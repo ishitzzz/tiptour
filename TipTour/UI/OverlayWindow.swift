@@ -637,6 +637,15 @@ struct BlueCursorView: View {
             navigationAnimationTimer?.invalidate()
         }
         .onChange(of: companionManager.detectedElementScreenLocation) { newLocation in
+            // A tutorial tour clears the location when the user has done the
+            // step; the held pointer then returns to the cursor.
+            if newLocation == nil,
+               companionManager.isTutorialTourHoldingPointer,
+               buddyNavigationMode == .pointingAtTarget {
+                releaseHeldPointerAndFlyBack()
+                return
+            }
+
             // When a UI element location is detected, navigate the buddy to
             // that position so it points at the element.
             guard let screenLocation = newLocation,
@@ -651,6 +660,12 @@ struct BlueCursorView: View {
             }
 
             startNavigatingToElement(screenLocation: screenLocation)
+        }
+        .onChange(of: companionManager.isTutorialTourHoldingPointer) { _, isHoldingPointer in
+            // The tour ended or was stopped while the pointer was held.
+            if !isHoldingPointer, buddyNavigationMode == .pointingAtTarget {
+                releaseHeldPointerAndFlyBack()
+            }
         }
     }
 
@@ -1126,9 +1141,19 @@ struct BlueCursorView: View {
             ?? "right here!"
 
         streamNavigationBubbleCharacter(phrase: pointerPhrase, characterIndex: 0) {
+            // A tutorial tour keeps pointing until the user does the step.
+            // If the step finished while the pointer was still flying in,
+            // there is nothing left to point at.
+            if self.companionManager.isTutorialTourHoldingPointer {
+                if self.companionManager.detectedElementScreenLocation == nil {
+                    self.releaseHeldPointerAndFlyBack()
+                }
+                return
+            }
             // All characters streamed — hold for 3 seconds, then fly back
             DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) {
                 guard self.buddyNavigationMode == .pointingAtTarget else { return }
+                guard !self.companionManager.isTutorialTourHoldingPointer else { return }
                 self.navigationBubbleOpacity = 0.0
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
                     guard self.buddyNavigationMode == .pointingAtTarget else { return }
@@ -1166,6 +1191,14 @@ struct BlueCursorView: View {
                 characterIndex: characterIndex + 1,
                 onComplete: onComplete
             )
+        }
+    }
+
+    private func releaseHeldPointerAndFlyBack() {
+        navigationBubbleOpacity = 0.0
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
+            guard case .pointingAtTarget = self.buddyNavigationMode else { return }
+            self.startFlyingBackToCursor()
         }
     }
 

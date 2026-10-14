@@ -31,11 +31,21 @@ Shortcuts activate only the selected mode. The primary menu-bar button and welco
 - Hold **Ctrl+Option+Command** for the Speak / Type / Highlight shortcut chooser.
 - **Auto-click** lets TipTour act. **Point only** lets Gemini indicate where you should click. JEV requires auto-click.
 
-Settings also contains desktop action access, screenshot privacy, permissions, and optional debug visuals. There is no recording, video creation, or image-generation pipeline.
+Settings also contains desktop action access, screenshot privacy, permissions, and optional debug visuals. TipTour does not record your screen and has no video creation or image-generation pipeline.
+
+## Learn from a video
+
+Paste a tutorial link (YouTube, Loom, or a direct `.mp4`) into **Learn from a video** in the menu bar panel, or choose a video file. [Elorian](https://elorian.ai) watches the tutorial and turns it into a step-by-step tour; press play and TipTour points at each control on your own screen and waits for you to click it, type, or press the shortcut. There are no Next buttons: a step moves on when you do it, and **Escape** stops the tour. TipTour never clicks for you in a tour.
+
+- Needs an Elorian API key (Settings → Models) and works with either mode. YouTube links need [yt-dlp](https://github.com/yt-dlp/yt-dlp) (`brew install yt-dlp`); English captions are used when the video has them.
+- Building a tour takes a few minutes per 90 s of video and roughly $0.15–$1 of Elorian credit per short tutorial. Tours are saved and replay instantly.
+- Each step is found on your screen with TipTour's local grounding first. If that misses and **Remote Screenshots** is on, Elorian points at it on a screenshot, using the target as it looked in the video.
 
 ## Privacy and permissions
 
 Gemini receives microphone audio and, when enabled, screenshots. JEV receives your typed task, locally detected labels/locations, and recent action history; screenshots stay local. Both modes use the shared local grounding and action engine.
+
+Learn from a video sends the tutorial video you choose (and its captions) to Elorian, and deletes the upload when the tour is built. During a tour, a screenshot goes to Elorian only when local grounding cannot find a step and Remote Screenshots is on.
 
 Accessibility permission is needed to inspect and control apps. macOS Screen Recording / Screen Content permission enables screenshots and local screen detection; it does **not** mean TipTour records videos. Microphone access is only needed for Gemini voice.
 

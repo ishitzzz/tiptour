@@ -128,6 +128,13 @@ struct TipTourSettingsView: View {
     private var voiceSection: some View {
         VStack(alignment: .leading, spacing: 14) {
             ProviderSetupView(companionManager: companionManager)
+
+            ProviderKeyCard(
+                title: "Elorian key · Learn from a video",
+                detail: "Works with either mode. Tutorial videos you choose go to Elorian, which turns them into step-by-step tours. When TipTour can't find a step's target locally and Remote Screenshots is on, a screenshot goes to Elorian to point at it. Uploaded videos are deleted after each build.",
+                keyName: KeychainStore.elorianAPIKeyName,
+                onKeyChanged: { companionManager.tutorialTourController.refresh() }
+            )
         }
     }
 

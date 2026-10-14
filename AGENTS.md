@@ -11,7 +11,9 @@ macOS 14.2+ menu bar-only SwiftUI/AppKit app (`LSUIElement=true`). Two provider 
 
 JEV is the default selected mode. Onboarding is Choose mode → Save that mode’s API key → Grant its permissions; Gemini additionally requires microphone access. The previous onboarding flag is migrated to a new mode-setup completion flag so existing users also choose a mode. Settings → Models shows the selector and only the selected mode’s key input. Keys are stored only in macOS Keychain; no environment, sibling project, or hosted-key fallback. The UI must report Keychain errors accurately.
 
-No Claude/Hermes integration, separate Flash Lite matcher, image-generation service, recording/video pipeline, or Worker proxy is bundled. Do not reintroduce them without an explicit user request.
+**Learn from a video** (any mode): the menu bar panel takes a tutorial link or video file. TipTour downloads it with the user's own `yt-dlp` (or reads the file), cuts it into ≤90 s overlapping parts with AVFoundation, and Elorian (`elorian-1-agent`, the user's Keychain key) watches each part in a polled background run and returns tour steps (action, label, description, normalized box, time). Steps are stitched, a target crop is cut from the video per step, and the tour is saved in Application Support. Playing a tour points at each target and waits for the user to do the step (no buttons; Escape stops); it never clicks. Uploaded videos are deleted from Elorian after every build.
+
+No Claude/Hermes integration, separate Flash Lite matcher, image-generation service, screen-recording pipeline, or Worker proxy is bundled. Do not reintroduce them without an explicit user request.
 
 ## Architecture
 
@@ -24,6 +26,7 @@ No Claude/Hermes integration, separate Flash Lite matcher, image-generation serv
 - AX is enabled for Electron on app activation. Preserve batched AX reads, messaging timeouts, target app pinning, clipboard/selected-range protections, and event-driven detection refreshes.
 - The localhost harness (`127.0.0.1:19474`) exposes the engine to developer clients. `/v1/agent-contract` is canonical. Preserve trace IDs, single-action workflow limits, and explicit deterministic `/v1/tasks` sequences.
 - Portable app instructions live in `TipTour/Skills/**/SKILL.md`; precedence is user overrides, project skills, then bundled skills. General documentation belongs outside the app target.
+- Tutorial tours ground each step through `ElementResolver` by label first (AX, browser DOM, local perception). Only when that misses and Remote Screenshots is on does Elorian point on a screenshot resized to 1000×1000 (fast mode, `tool_choice: none`), with the step's video crop as a reference image; its point then goes back through `ElementResolver` for local refinement. While a step waits, `isTutorialTourHoldingPointer` keeps the overlay pointer on the target.
 
 ## Key files
 
@@ -39,12 +42,21 @@ No Claude/Hermes integration, separate Flash Lite matcher, image-generation serv
 | `TipTour/Jev/JevStepPanelView.swift` | Decision progress in the text panel |
 | `TipTour/Voice/GeminiLiveSession.swift` | Realtime session, microphone, screenshots and tool callbacks |
 | `TipTour/Voice/GeminiLiveClient.swift` | Gemini WebSocket protocol and tool declarations |
-| `TipTour/UI/ProviderSetupView.swift` | The two Keychain key cards |
+| `TipTour/UI/ProviderSetupView.swift` | Mode selector and Keychain key cards (modes and Elorian) |
 | `TipTour/UI/CompanionPanelView.swift` | Compact mode hints, permissions and action controls |
 | `TipTour/UI/TipTourSettingsView.swift` | Models, desktop actions, privacy, permissions and advanced options |
 | `TipTour/UI/TextCommandPanelManager.swift` | Cursor-following, resizable command panel |
 | `TipTour/UI/TextCommandPanelView.swift` | JEV input, stop control and results |
 | `TipTour/Utilities/KeychainStore.swift` | Device-local provider credential storage |
+| `TipTour/Tutorials/TutorialTour.swift` | Tour model, Elorian answer parsing/salvage, part stitching, captions, prompts (~540 lines) |
+| `TipTour/Tutorials/ElorianClient.swift` | Keychain-authenticated Elorian client: uploads, polled background runs, fast pointing (~330 lines) |
+| `TipTour/Tutorials/TutorialVideoPreparer.swift` | yt-dlp/file input, ≤90 s AVFoundation parts, per-step target crops (~350 lines) |
+| `TipTour/Tutorials/TutorialTourBuilder.swift` | Video → saved tour pipeline; always deletes uploads (~210 lines) |
+| `TipTour/Tutorials/TutorialTourPlayer.swift` | Step-by-step playback: grounding, held pointer, advancing on the user’s own actions (~430 lines) |
+| `TipTour/Tutorials/TutorialTourCardPanel.swift` | Click-through tour card at the bottom of the screen (~190 lines) |
+| `TipTour/Tutorials/TutorialTourController.swift` | Panel-facing build/playback state (~110 lines) |
+| `TipTour/Tutorials/TutorialToursPanelSection.swift` | "Learn from a video" section of the menu bar panel (~200 lines) |
+| `TipTour/Tutorials/TutorialTourLibrary.swift` | Saved tours in Application Support (~65 lines) |
 
 See `docs/source-layout.md` for the remaining directory responsibilities.
 
@@ -52,7 +64,7 @@ See `docs/source-layout.md` for the remaining directory responsibilities.
 
 Open `tiptour-macos.xcodeproj`, select TipTour, set the signing team, and build/run in Xcode.
 
-**Do NOT run `xcodebuild` from the terminal** — it invalidates TCC permissions and the app will need to re-request screen recording/accessibility access. Pure Swift parsing/typechecking and isolated tests are permitted without replacing or launching the installed app. Run `scripts/test-jev.sh` for the JEV decision suite.
+**Do NOT run `xcodebuild` from the terminal** — it invalidates TCC permissions and the app will need to re-request screen recording/accessibility access. Pure Swift parsing/typechecking and isolated tests are permitted without replacing or launching the installed app. Run `scripts/test-jev.sh` for the JEV decision suite and `scripts/test-tutorials.sh` for the tutorial-tour suite.
 
 Known non-blocking Swift 6 concurrency and deprecated `onChange` warnings must not be fixed as incidental cleanup.
 

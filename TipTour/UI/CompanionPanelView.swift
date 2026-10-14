@@ -35,6 +35,7 @@ struct CompanionPanelView: View {
                 if isReady {
                     primaryMessageSection
                     readyControlSection
+                    TutorialToursPanelSection(tutorialTourController: companionManager.tutorialTourController)
                 } else {
                     onboardingSection
                 }

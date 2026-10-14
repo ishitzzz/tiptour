@@ -107,4 +107,12 @@ enum KeychainStore {
         set { set(newValue ?? "", forKey: "jevAPIKey") }
     }
 
+    /// Elorian API key for "Learn from a video" tutorial tours. It is not a
+    /// mode, so it works alongside whichever mode is selected.
+    static let elorianAPIKeyName = "elorianAPIKey"
+    static var elorianAPIKey: String? {
+        get { get(forKey: elorianAPIKeyName) }
+        set { set(newValue ?? "", forKey: elorianAPIKeyName) }
+    }
+
 }
