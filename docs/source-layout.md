@@ -13,7 +13,8 @@
 | `TipTour/Skills` | Portable markdown app guidance and small runtime hints |
 | `TipTour/UI` | Menu bar, Settings, command panel, pointer and detection overlays |
 | `TipTour/Utilities` | Permissions, Keychain, preferences, shortcuts, logging and analytics |
+| `TipTour/Tutorials` | Learn from a video: Elorian client, video parts, tour building, saved tours, playback and tour card |
 
 Gemini and JEV use the same action engine. Keep provider networking in their respective directories, execution in the action/workflow layer, and app-specific quirks in markdown skills. Neither UI nor providers should bypass the engine's action permissions or pauses.
 
-The app has no recording, image-generation, hosted-key proxy, Claude planner, or Hermes integration. General documentation stays outside the bundled `TipTour` directory.
+The app has no screen recording, image-generation, hosted-key proxy, Claude planner, or Hermes integration. Tutorial videos the user chooses are sent to Elorian only to build tours. General documentation stays outside the bundled `TipTour` directory.

@@ -53,14 +53,30 @@ struct ModeSelectionView: View {
 }
 
 struct ProviderKeyCard: View {
-    let mode: TipTourMode
-    var onKeyChanged: () -> Void = {}
-    private var title: String { mode == .jev ? "JEV / TypeSafe key" : "Gemini key" }
-    private var detail: String { mode.privacySummary }
-    private var keyName: String { mode.keyName }
+    private let title: String
+    private let detail: String
+    private let keyName: String
+    private let onKeyChanged: () -> Void
     @State private var input = ""
     @State private var hasSavedKey = false
     @State private var status = ""
+
+    init(mode: TipTourMode, onKeyChanged: @escaping () -> Void = {}) {
+        self.init(
+            title: mode == .jev ? "JEV / TypeSafe key" : "Gemini key",
+            detail: mode.privacySummary,
+            keyName: mode.keyName,
+            onKeyChanged: onKeyChanged
+        )
+    }
+
+    /// For keys that are not tied to a mode, such as Elorian's.
+    init(title: String, detail: String, keyName: String, onKeyChanged: @escaping () -> Void = {}) {
+        self.title = title
+        self.detail = detail
+        self.keyName = keyName
+        self.onKeyChanged = onKeyChanged
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {

@@ -77,6 +77,34 @@ final class CompanionManager: ObservableObject {
     @Published var detectedElementDisplayFrame: CGRect?
     /// Custom speech bubble text for the pointing animation.
     @Published var detectedElementBubbleText: String?
+    /// While a tutorial tour waits for the user to do a step, the pointer
+    /// stays on the target instead of flying back after a few seconds.
+    @Published private(set) var isTutorialTourHoldingPointer = false
+
+    /// "Learn from a video": Elorian turns tutorial videos into tours the
+    /// user follows on their own screen. It is not a mode, so it works
+    /// alongside JEV or Gemini and only needs desktop permissions.
+    lazy var tutorialTourController = TutorialTourController(
+        pointerControls: TutorialTourPointerControls(
+            showOverlayIfNeeded: { [weak self] in
+                self?.showOverlayForTutorialTour()
+            },
+            pointAtScreenLocation: { [weak self] globalScreenPoint, displayFrame, bubbleText in
+                self?.detectedElementScreenLocation = globalScreenPoint
+                self?.detectedElementDisplayFrame = displayFrame
+                self?.detectedElementBubbleText = bubbleText
+            },
+            clearPointer: { [weak self] in
+                self?.clearDetectedElementLocation()
+            },
+            setPointerHeldOnTarget: { [weak self] isPointerHeldOnTarget in
+                self?.isTutorialTourHoldingPointer = isPointerHeldOnTarget
+            },
+            areRemoteScreenshotsAllowed: { [weak self] in
+                self?.isScreenshotStreamingEnabled ?? false
+            }
+        )
+    )
 
     /// Debug-only visual overlay for the restored native CoreML/Vision
     /// detector. This is deliberately not sent to Gemini yet.
@@ -1049,6 +1077,7 @@ final class CompanionManager: ObservableObject {
     func stop() {
         cancelTextCommand()
         stopVoiceSession()
+        tutorialTourController.stopPlayback()
         stopNativeDetection()
         globalPushToTalkShortcutMonitor.stop()
         globalTextCommandShortcutMonitor.stop()
@@ -1063,6 +1092,13 @@ final class CompanionManager: ObservableObject {
         accessibilityCheckTimer = nil
         voiceAudioPowerCancellable?.cancel()
         voiceModelSpeakingCancellable?.cancel()
+    }
+
+    private func showOverlayForTutorialTour() {
+        guard hasDesktopPermissions, !isOverlayVisible else { return }
+        overlayWindowManager.hasShownOverlayBefore = true
+        overlayWindowManager.showOverlay(onScreens: NSScreen.screens, companionManager: self)
+        isOverlayVisible = true
     }
 
     func clearDetectedElementLocation() {
