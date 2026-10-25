@@ -41,6 +41,7 @@ starts with those markings. Capturing without a scribble works too.
   `requiresOnDeviceRecognition = true`. If the active locale reports
   `supportsOnDeviceRecognition == false`, the flow stops with an
   explanation instead of sending audio to a network service.
+- **Clipboard handoff (any app)**: the preview has **Copy both**, **Copy image** and **Copy text**. They leave the marked image and/or your question on the system clipboard (the clipboard is not restored afterwards, so the copy stays until you paste) and work with any app, site or guide. **Copy both** writes one item with PNG and text flavors; which flavor an app reads is the app's choice, so use the single-flavor buttons when an app takes only one. Direct insertion into a named app is optional and off by default (no ChatGPT default).
 - **Preview**: floating panel with the image, editable transcript and a
   target-app picker (running apps plus the configured default).
 - **Insertion**: the target app is activated and verified frontmost. The

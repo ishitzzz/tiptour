@@ -94,12 +94,13 @@ enum TipTourDefaults {
     }
 
     /// Bundle identifier of the app the ask harness inserts drafts into.
-    /// Editable in Settings; defaults to the ChatGPT Mac app.
+    /// Optional. Empty means no direct insertion: the preview offers
+    /// clipboard copy for any app instead.
     static var askTargetBundleIdentifier: String {
         get {
             let stored = UserDefaults.standard.string(forKey: "askTargetBundleIdentifier")?
                 .trimmingCharacters(in: .whitespacesAndNewlines)
-            return stored?.isEmpty == false ? stored! : "com.openai.chat"
+            return stored ?? ""
         }
         set { UserDefaults.standard.set(newValue, forKey: "askTargetBundleIdentifier") }
     }

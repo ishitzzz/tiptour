@@ -34,6 +34,7 @@ import AppKit
 
 enum AskDraftStagerError: LocalizedError {
     case accessibilityNotGranted
+    case clipboardWriteFailed
     case targetAppNotInstalled(bundleIdentifier: String)
     case targetAppDidNotBecomeFrontmost(bundleIdentifier: String)
     case composerNotFocused(appName: String)
@@ -46,6 +47,8 @@ enum AskDraftStagerError: LocalizedError {
         switch self {
         case .accessibilityNotGranted:
             return "Accessibility permission is required to paste into another app. Grant it in System Settings > Privacy & Security > Accessibility."
+        case .clipboardWriteFailed:
+            return "macOS refused the clipboard write, so nothing was copied."
         case .targetAppNotInstalled(let bundleIdentifier):
             return "No installed app matches bundle identifier \(bundleIdentifier). Pick another target in the ask preview or in Settings."
         case .targetAppDidNotBecomeFrontmost(let bundleIdentifier):
@@ -113,6 +116,39 @@ private final class GeneralPasteboardStaging: AskStagingPasteboard {
 }
 
 @MainActor
+enum AskClipboardHandoff {
+    /// Leaves the chosen content on the general pasteboard for the user to
+    /// paste anywhere. The previous clipboard is deliberately NOT restored:
+    /// the copy has to stay available until the user pastes it.
+    static func copy(image: CGImage, text: String, mode: AskCopyMode) async throws -> String {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        let flavors = mode.flavors(hasText: !trimmed.isEmpty)
+        guard !flavors.isEmpty else { return mode.confirmation(hasText: false) }
+
+        var pngData: Data?
+        if flavors.contains(.png) {
+            pngData = try await Task.detached(priority: .userInitiated) {
+                let bitmap = NSBitmapImageRep(cgImage: image)
+                guard let data = bitmap.representation(using: .png, properties: [:]) else {
+                    throw AskDraftStagerError.imageEncodingFailed
+                }
+                return data
+            }.value
+        }
+
+        let item = NSPasteboardItem()
+        if let pngData { item.setData(pngData, forType: .png) }
+        if flavors.contains(.text) { item.setString(trimmed, forType: .string) }
+        let pasteboard = NSPasteboard.general
+        pasteboard.clearContents()
+        guard pasteboard.writeObjects([item]) else {
+            throw AskDraftStagerError.clipboardWriteFailed
+        }
+        return mode.confirmation(hasText: !trimmed.isEmpty)
+    }
+}
+
+@MainActor
 enum AskDraftStager {
     /// Heuristic waits (nanoseconds). The target app gives no completion
     /// signal, so these are best-effort and documented as such.
@@ -158,8 +194,8 @@ enum AskDraftStager {
 
         // PNG encoding is CPU-heavy; keep it off the main actor.
         let pngData: Data = try await Task.detached(priority: .userInitiated) {
-            guard let bitmap = NSBitmapImageRep(cgImage: image),
-                  let data = bitmap.representation(using: .png, properties: [:]) else {
+            let bitmap = NSBitmapImageRep(cgImage: image)
+            guard let data = bitmap.representation(using: .png, properties: [:]) else {
                 throw AskDraftStagerError.imageEncodingFailed
             }
             return data

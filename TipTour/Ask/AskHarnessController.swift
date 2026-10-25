@@ -29,6 +29,7 @@ final class AskHarnessController: ObservableObject {
     @Published var targetBundleIdentifier: String = TipTourDefaults.askTargetBundleIdentifier
     @Published private(set) var targetApps: [AskTargetApp] = []
     @Published private(set) var insertionStatus: String?
+    @Published private(set) var copyConfirmation: String?
     @Published private(set) var isInserting = false
     @Published private(set) var captureCaption: String = ""
 
@@ -201,6 +202,8 @@ final class AskHarnessController: ObservableObject {
                     decision: decision
                 )
                 self.insertionProgress = AskInsertionProgress()
+                self.copyConfirmation = nil
+                self.insertionStatus = nil
                 self.draftImage = NSImage(
                     cgImage: composited,
                     size: NSSize(width: displayFrame.width, height: displayFrame.height)
@@ -236,7 +239,7 @@ final class AskHarnessController: ObservableObject {
             .sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
 
         let configuredIdentifier = TipTourDefaults.askTargetBundleIdentifier
-        if !targets.contains(where: { $0.bundleIdentifier == configuredIdentifier }) {
+        if !configuredIdentifier.isEmpty, !targets.contains(where: { $0.bundleIdentifier == configuredIdentifier }) {
             let isInstalled = NSWorkspace.shared.urlForApplication(withBundleIdentifier: configuredIdentifier) != nil
             targets.insert(
                 AskTargetApp(
@@ -264,12 +267,33 @@ final class AskHarnessController: ObservableObject {
         TipTourDefaults.askTargetBundleIdentifier = targetBundleIdentifier
     }
 
+    func copyToClipboard(_ mode: AskCopyMode) {
+        guard !isInserting,
+              let image = draftImage?.cgImage(forProposedRect: nil, context: nil, hints: nil) else { return }
+        let text = draftText
+        Task { [weak self] in
+            do {
+                let message = try await AskClipboardHandoff.copy(image: image, text: text, mode: mode)
+                self?.copyConfirmation = message
+                self?.insertionStatus = nil
+            } catch {
+                self?.copyConfirmation = nil
+                self?.insertionStatus = error.localizedDescription
+            }
+        }
+    }
+
     func insertDraft() {
+        guard !targetBundleIdentifier.isEmpty else {
+            insertionStatus = "Pick an app to insert into, or use the copy buttons and paste yourself."
+            return
+        }
         guard !isInserting,
               let image = draftImage?.cgImage(forProposedRect: nil, context: nil, hints: nil) else { return }
 
         isInserting = true
         insertionStatus = nil
+        copyConfirmation = nil
         let text = draftText
         let bundleIdentifier = targetBundleIdentifier
         persistTargetSelection()
@@ -301,6 +325,7 @@ final class AskHarnessController: ObservableObject {
         draftImage = nil
         draftText = ""
         insertionStatus = nil
+        copyConfirmation = nil
         captureCaption = ""
         insertionProgress = AskInsertionProgress()
     }

@@ -138,6 +138,39 @@ final class AskClipboardOwnership<Pasteboard: AskStagingPasteboard> {
     }
 }
 
+// MARK: - Clipboard handoff (copy only, any target app)
+
+/// What a copy-to-clipboard action puts on the pasteboard. `.both` writes
+/// one pasteboard item carrying PNG and text flavors; which flavor an app
+/// reads is the app's choice, so image-only and text-only exist as exact
+/// alternatives.
+enum AskCopyMode: Equatable {
+    case imageAndText, imageOnly, textOnly
+
+    enum Flavor: Equatable { case png, text }
+
+    func flavors(hasText: Bool) -> [Flavor] {
+        switch self {
+        case .imageAndText: return hasText ? [.png, .text] : [.png]
+        case .imageOnly: return [.png]
+        case .textOnly: return hasText ? [.text] : []
+        }
+    }
+
+    func confirmation(hasText: Bool) -> String {
+        switch flavors(hasText: hasText) {
+        case [.png, .text]:
+            return "Copied the marked image and your question together. Paste where you like. If the app only takes one of them, use Copy image or Copy text. Your clipboard now holds this copy."
+        case [.png]:
+            return "Copied the marked image. Paste where you like. Your clipboard now holds it."
+        case [.text]:
+            return "Copied your question. Paste where you like. Your clipboard now holds it."
+        default:
+            return "Nothing to copy: the question is empty."
+        }
+    }
+}
+
 // MARK: - Insertion progress (retry without blind duplicate paste)
 
 /// Which pieces of the current draft a paste was already ATTEMPTED for in

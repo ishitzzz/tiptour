@@ -407,3 +407,22 @@ final class AskHarnessCoreTests: XCTestCase {
         XCTAssertEqual(sink.finish(), "hello there")
     }
 }
+
+final class AskCopyModeTests: XCTestCase {
+    func testImageAndTextCarriesBothFlavorsWhenTextExists() {
+        XCTAssertEqual(AskCopyMode.imageAndText.flavors(hasText: true), [.png, .text])
+    }
+
+    func testImageAndTextFallsBackToImageWhenQuestionIsEmpty() {
+        XCTAssertEqual(AskCopyMode.imageAndText.flavors(hasText: false), [.png])
+    }
+
+    func testTextOnlyWithEmptyQuestionCopiesNothing() {
+        XCTAssertTrue(AskCopyMode.textOnly.flavors(hasText: false).isEmpty)
+        XCTAssertEqual(AskCopyMode.textOnly.confirmation(hasText: false), "Nothing to copy: the question is empty.")
+    }
+
+    func testImageOnlyIgnoresText() {
+        XCTAssertEqual(AskCopyMode.imageOnly.flavors(hasText: true), [.png])
+    }
+}

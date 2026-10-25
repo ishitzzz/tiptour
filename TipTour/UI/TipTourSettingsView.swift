@@ -240,10 +240,10 @@ struct TipTourSettingsView: View {
             rowIcon("cursorarrow.rays")
 
             VStack(alignment: .leading, spacing: 2) {
-                Text("Ask Draft Target App")
+                Text("Ask Direct Insert App (optional)")
                     .font(.system(size: 13, weight: .medium))
                     .foregroundColor(DS.Colors.textSecondary)
-                Text("Ctrl+Option+Shift captures your scribbled screen and spoken question, then offers to insert them as a draft in this app's composer (bundle identifier).")
+                Text("Ctrl+Option+Shift captures your scribbled screen and spoken question, then lets you copy them to the clipboard and paste into any app. Optionally name an app (bundle identifier) to insert into directly.")
                     .font(.system(size: 11))
                     .foregroundColor(DS.Colors.textTertiary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -251,7 +251,7 @@ struct TipTourSettingsView: View {
             .frame(maxWidth: .infinity, alignment: .leading)
 
             TextField(
-                "com.openai.chat",
+                "optional",
                 text: Binding(
                     get: { TipTourDefaults.askTargetBundleIdentifier },
                     set: { TipTourDefaults.askTargetBundleIdentifier = $0 }
