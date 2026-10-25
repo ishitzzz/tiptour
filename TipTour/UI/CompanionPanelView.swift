@@ -156,6 +156,12 @@ struct CompanionPanelView: View {
             .tint(DS.Colors.accent)
             .pointerCursor()
             .disabled(companionManager.isTextCommandRunning)
+            if let voiceError = companionManager.voiceErrorMessage {
+                Text(voiceError)
+                    .font(.system(size: 11))
+                    .foregroundColor(DS.Colors.warning)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
         }
     }
 
@@ -177,10 +183,20 @@ struct CompanionPanelView: View {
             case .key:
                 if companionManager.selectedMode == .jev {
                     JevConnectionPicker(companionManager: companionManager)
+                    ProviderKeyCard(mode: companionManager.selectedMode,
+                        onKeyChanged: companionManager.refreshProviderKeyStatus)
+                        .id("\(companionManager.selectedMode.rawValue)-\(companionManager.jevConnection.rawValue)")
+                } else if companionManager.selectedMode == .gemini {
+                    // Same pool card as Settings → Models. The legacy
+                    // single-key card here wrote the wrong slot, orphaned
+                    // a second key, and could flag "Key needed" while the
+                    // pool already had keys.
+                    GeminiKeyPoolCard(onKeyChanged: companionManager.refreshProviderKeyStatus)
+                } else {
+                    ProviderKeyCard(mode: companionManager.selectedMode,
+                        onKeyChanged: companionManager.refreshProviderKeyStatus)
+                        .id(companionManager.selectedMode)
                 }
-                ProviderKeyCard(mode: companionManager.selectedMode,
-                    onKeyChanged: companionManager.refreshProviderKeyStatus)
-                    .id("\(companionManager.selectedMode.rawValue)-\(companionManager.jevConnection.rawValue)")
             case .permissions:
                 Text(companionManager.selectedMode == .jev
                     ? "JEV needs access to see screen controls and click them. No microphone needed."

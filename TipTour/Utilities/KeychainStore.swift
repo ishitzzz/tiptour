@@ -95,10 +95,68 @@ enum KeychainStore {
 
     // MARK: - TipTour-specific keys
 
-    /// Gemini API key the user has pasted directly into the app.
+    /// Legacy single Gemini API key slot. The Gemini key pool migrates
+    /// this into `geminiAPIKeys` on first read; kept so existing installs
+    /// keep working.
     static var geminiAPIKey: String? {
         get { get(forKey: "geminiAPIKey") }
         set { set(newValue ?? "", forKey: "geminiAPIKey") }
+    }
+
+    // MARK: - Gemini key pool
+
+    static let geminiAPIKeysName = "geminiAPIKeys"
+
+    /// All saved Gemini keys in user-managed order. The legacy single-key
+    /// slot migrates into the list on first read so existing installs keep
+    /// their key without re-pasting.
+    static var geminiAPIKeys: [String] {
+        get {
+            var keys = decodeGeminiAPIKeys()
+            if keys.isEmpty, let legacy = geminiAPIKey, !legacy.isEmpty {
+                let migrated = [legacy.trimmingCharacters(in: .whitespacesAndNewlines)].filter { !$0.isEmpty }
+                // The legacy slot is deleted ONLY after the list write
+                // succeeds and reads back intact — a failed Keychain write
+                // must never lose the user's only key.
+                if !migrated.isEmpty, encodeGeminiAPIKeys(migrated) {
+                    delete(forKey: "geminiAPIKey")
+                    keys = migrated
+                } else {
+                    keys = [legacy]
+                }
+            }
+            return keys
+        }
+        set { setGeminiAPIKeys(newValue) }
+    }
+
+    /// Writes the Gemini key list durably. Returns true only when the new
+    /// list was stored AND read back intact — callers must not update
+    /// in-memory state or show "Saved"/"Removed" on false.
+    @discardableResult
+    static func setGeminiAPIKeys(_ keys: [String]) -> Bool {
+        encodeGeminiAPIKeys(keys)
+    }
+
+    private static func decodeGeminiAPIKeys() -> [String] {
+        guard let raw = get(forKey: geminiAPIKeysName),
+              let data = raw.data(using: .utf8),
+              let list = try? JSONDecoder().decode([String].self, from: data) else { return [] }
+        return list.filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+    }
+
+    @discardableResult
+    private static func encodeGeminiAPIKeys(_ keys: [String]) -> Bool {
+        let cleaned = keys.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }
+        if cleaned.isEmpty {
+            // Empty list means "no keys" — remove the item outright.
+            guard delete(forKey: geminiAPIKeysName) else { return false }
+            return decodeGeminiAPIKeys().isEmpty
+        }
+        guard let data = try? JSONEncoder().encode(cleaned),
+              let raw = String(data: data, encoding: .utf8),
+              set(raw, forKey: geminiAPIKeysName) else { return false }
+        return decodeGeminiAPIKeys() == cleaned
     }
 
     /// TypeSafe API key for JEV text commands.

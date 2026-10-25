@@ -145,10 +145,19 @@ final class GeminiLiveSession: ObservableObject {
     /// recover transparently.
     private var reconnectInFlight: Bool = false
 
-    /// Reconnect attempt counter — resets to zero on successful connect
-    /// and caps the exponential backoff at a sane ceiling.
-    private var reconnectAttemptIndex: Int = 0
-    private static let maxReconnectAttempts: Int = 5
+    /// Bumped on every start/stop so an in-flight connect or reconnect
+    /// loop from a stale session (user stop, mode switch) stops touching
+    /// the key pool instead of burning failure strikes on keys.
+    /// Lock-protected and nonisolated on purpose: the failover runner's
+    /// liveness check can be called off the main actor.
+    private let sessionGenerationLock = NSLock()
+    private var _sessionGeneration = 0
+    private var sessionGeneration: Int {
+        sessionGenerationLock.withLock { _sessionGeneration }
+    }
+    private func bumpSessionGeneration() {
+        sessionGenerationLock.withLock { _sessionGeneration += 1 }
+    }
 
     // MARK: - Init
 
@@ -175,22 +184,9 @@ final class GeminiLiveSession: ObservableObject {
 
         var startupCompleted = false
         defer { if !startupCompleted { stop() } }
-        let apiKey = try await fetchAPIKey()
-
-        try await RetryWithExponentialBackoff.run(
-            maxAttempts: 3,
-            initialDelay: 0.5,
-            operationName: "GeminiLive.connect"
-        ) { [weak self] in
-            guard let self else {
-                throw NSError(domain: "GeminiLiveSession", code: -13,
-                              userInfo: [NSLocalizedDescriptionKey: "Session deallocated during WebSocket connect"])
-            }
-            try await self.geminiClient.connect(
-                apiKey: apiKey,
-                systemPrompt: self.systemPrompt
-            )
-        }
+        bumpSessionGeneration()
+        keyPool.reloadKeys()
+        try await connectWithKeyPool(generation: sessionGeneration)
 
         try Task.checkCancellation()
 
@@ -237,6 +233,7 @@ final class GeminiLiveSession: ObservableObject {
     /// End the session — stops mic capture, closes WebSocket, stops playback.
     func stop() {
 
+        bumpSessionGeneration()
         stopPeriodicScreenshotUpdates()
         hasReceivedUserSpeechThisSession = false
         didSendStateSyncScreenshotForCurrentUserTurn = false
@@ -542,15 +539,72 @@ final class GeminiLiveSession: ObservableObject {
         }
     }
 
-    // MARK: - API Key Fetch
+    // MARK: - API Key Pool
 
-    private func fetchAPIKey() async throws -> String {
-        guard let key = KeychainStore.geminiAPIKey, !key.isEmpty else {
-            throw NSError(domain: "GeminiLiveSession", code: -9, userInfo: [
-                NSLocalizedDescriptionKey: "Add your Gemini API key in Settings → Models to use realtime voice."
-            ])
+    /// Pool of user-supplied Gemini keys with server-honoring cooldowns.
+    private let keyPool = GeminiKeyPool.shared
+
+    /// ID of the key behind the current/last connection. A transient blip
+    /// retries the same key (via `preferring:`) before the pool fails over.
+    private var activeKeyID: String?
+
+    /// Maps whatever the transport threw into classifier input for the
+    /// pool. Nonisolated: the failover runner calls it off-actor. Every
+    /// message is scrubbed of key material — transport errors can embed
+    /// the request URL carrying the raw key.
+    private nonisolated func connectionFailure(from error: Error) -> GeminiConnectionFailure {
+        if let structured = error as? GeminiLiveConnectError {
+            // `underlying` was already sanitized at the client boundary.
+            return GeminiConnectionFailure(httpStatus: structured.httpStatus,
+                                           closeCode: structured.closeCode,
+                                           retryAfter: structured.retryAfter,
+                                           message: structured.underlying)
         }
-        return key
+        return GeminiConnectionFailure(message: keyPool.sanitized(error.localizedDescription))
+    }
+
+    /// Shared failure mapping + logging for both failover loops.
+    private nonisolated func failoverFailure(from error: Error) -> GeminiConnectionFailure {
+        let failure = connectionFailure(from: error)
+        let kind = GeminiFailureClassifier.classify(failure)
+        print("[GeminiLiveSession] key connect failed (\(kind)): \(failure.message)")
+        return failure
+    }
+
+    /// Wraps an arbitrary error for UI surfacing with key material
+    /// scrubbed. PoolErrors are already secret-free (and carry their own
+    /// retry guidance), so they pass through untouched.
+    private func sanitizedError(_ error: Error) -> Error {
+        if error is GeminiKeyPool.PoolError { return error }
+        return NSError(domain: "TipTour.GeminiLiveSession", code: 0,
+                       userInfo: [NSLocalizedDescriptionKey: keyPool.sanitized(error.localizedDescription)])
+    }
+
+    /// Opens the websocket through the key pool's failover runner: every
+    /// ready key gets a fair attempt (one per round, two rounds), a
+    /// cancelled or stale start never costs a key a strike, and the
+    /// terminal error says truthfully whether every key is blocked (with
+    /// the earliest retry time) or the bounded attempt budget ran out.
+    private func connectWithKeyPool(generation: Int) async throws {
+        guard keyPool.hasKeys else { throw GeminiKeyPool.PoolError.noKeys }
+        let entry = try await GeminiKeyFailover.run(
+            pool: keyPool,
+            policy: .initialConnect(keyCount: keyPool.entries.count),
+            isCancelled: { [weak self] in
+                guard let self else { return true }
+                return self.sessionGeneration != generation
+            },
+            sleep: { try await Task.sleep(nanoseconds: GeminiKeyFailover.sleepNanoseconds($0)) },
+            failureFrom: { [weak self] error in
+                self?.failoverFailure(from: error)
+                    ?? GeminiConnectionFailure(message: GeminiKeyPool.sanitized(error.localizedDescription))
+            },
+            attempt: { [weak self] entry in
+                guard let self else { throw CancellationError() }
+                try await self.geminiClient.connect(apiKey: entry.key, systemPrompt: self.systemPrompt)
+            }
+        )
+        activeKeyID = entry.id
     }
 
     // MARK: - Mic Capture
@@ -729,9 +783,10 @@ final class GeminiLiveSession: ObservableObject {
             // reconnect rather than tearing the whole session down — the
             // user is probably mid-utterance and a brief gap is far less
             // disruptive than killing the overlay outright.
-            print("[GeminiLiveSession] Unexpected disconnect — \(error.localizedDescription); attempting reconnect")
+            print("[GeminiLiveSession] Unexpected disconnect — \(keyPool.sanitized(error.localizedDescription)); attempting reconnect")
             guard isActive, !reconnectInFlight else { return }
-            Task { await self.attemptReconnect(after: error) }
+            let generation = sessionGeneration
+            Task { await self.attemptReconnect(after: error, generation: generation) }
 
         case .error(let error):
             // Transparent reconnect before propagating: network blips and
@@ -740,19 +795,22 @@ final class GeminiLiveSession: ObservableObject {
             // every retry fails or the session was already being torn
             // down deliberately (isActive == false).
             guard isActive, !reconnectInFlight else {
-                onError?(error)
+                onError?(sanitizedError(error))
                 stop()
                 return
             }
-            Task { await self.attemptReconnect(after: error) }
+            let generation = sessionGeneration
+            Task { await self.attemptReconnect(after: error, generation: generation) }
         }
     }
 
-    /// Try to re-establish the WebSocket with exponential backoff. Keeps
-    /// the audio player and published state intact so the user doesn't
-    /// see a "session ended" flash — just a brief gap in mic streaming
-    /// until the reconnect lands.
-    private func attemptReconnect(after originalError: Error) async {
+    /// Try to re-establish the WebSocket through the same bounded failover
+    /// runner as the initial connect (pool-size-derived attempt bound,
+    /// distinct-key coverage per round). Keeps the audio player and published state intact so
+    /// the user doesn't see a "session ended" flash — just a brief gap in
+    /// mic streaming until the reconnect lands. A stale generation (user
+    /// stop / mode switch) aborts without penalizing any key.
+    private func attemptReconnect(after originalError: Error, generation: Int) async {
         reconnectInFlight = true
         defer { reconnectInFlight = false }
 
@@ -762,42 +820,59 @@ final class GeminiLiveSession: ObservableObject {
         stopMicCapture()
         geminiClient.disconnect()
 
-        while reconnectAttemptIndex < Self.maxReconnectAttempts {
-            reconnectAttemptIndex += 1
-            let backoffSeconds = pow(2.0, Double(reconnectAttemptIndex - 1)) * 0.5
-            print("[GeminiLiveSession] 🔁 reconnect attempt \(reconnectAttemptIndex)/\(Self.maxReconnectAttempts) in \(backoffSeconds)s")
-            try? await Task.sleep(nanoseconds: UInt64(backoffSeconds * 1_000_000_000))
+        do {
+            let entry = try await GeminiKeyFailover.run(
+                pool: keyPool,
+                policy: .reconnect(keyCount: keyPool.entries.count),
+                isCancelled: { [weak self] in
+                    guard let self else { return true }
+                    return !self.isActive || self.sessionGeneration != generation
+                },
+                sleep: { try await Task.sleep(nanoseconds: GeminiKeyFailover.sleepNanoseconds($0)) },
+                failureFrom: { [weak self] error in
+                    self?.failoverFailure(from: error)
+                        ?? GeminiConnectionFailure(message: GeminiKeyPool.sanitized(error.localizedDescription))
+                },
+                attempt: { [weak self] entry in
+                    guard let self else { throw CancellationError() }
+                    try await self.geminiClient.connect(apiKey: entry.key, systemPrompt: self.systemPrompt)
+                }
+            )
 
-            // If the user explicitly stopped the session while we were
-            // waiting, bail out silently.
-            guard isActive else {
-                print("[GeminiLiveSession] reconnect aborted — session no longer active")
+            guard isActive, sessionGeneration == generation else {
+                // Session died while the reconnect was landing — close the
+                // socket we just opened and leave the pool alone.
+                geminiClient.disconnect()
                 return
             }
-
-            do {
-                let apiKey = try await fetchAPIKey()
-                try await geminiClient.connect(apiKey: apiKey, systemPrompt: systemPrompt)
-                // Gemini's server-side context was lost — force the next
-                // tick to send a fresh frame regardless of hash.
-                lastSentScreenshotHashByScreenLabel.removeAll()
-                await captureAndProcessFrameForGemini()
-                try startMicCapture()
-                audioPlayer.startPlaying()
-                startPeriodicScreenshotUpdates()
-                reconnectAttemptIndex = 0
-                print("[GeminiLiveSession] ✅ reconnected successfully")
-                return
-            } catch {
-                print("[GeminiLiveSession] reconnect attempt \(reconnectAttemptIndex) failed: \(error.localizedDescription)")
-            }
+            activeKeyID = entry.id
+            // Gemini's server-side context was lost — force the next
+            // tick to send a fresh frame regardless of hash.
+            lastSentScreenshotHashByScreenLabel.removeAll()
+            await captureAndProcessFrameForGemini()
+            try startMicCapture()
+            audioPlayer.startPlaying()
+            startPeriodicScreenshotUpdates()
+            print("[GeminiLiveSession] ✅ reconnected successfully")
+        } catch is CancellationError {
+            // User stopped or the session was superseded mid-reconnect.
+            print("[GeminiLiveSession] reconnect aborted — session stopped or superseded")
+        } catch let poolError as GeminiKeyPool.PoolError {
+            // Every key is blocked (earliest retry attached) or the bounded
+            // attempts ran out — surface the truthful terminal state.
+            guard isActive, sessionGeneration == generation else { return }
+            print("[GeminiLiveSession] reconnect stopped — \(poolError.localizedDescription)")
+            onError?(poolError)
+            stop()
+        } catch {
+            // The runner rethrows .clientError failures directly (the
+            // request shape is wrong, retrying any key hits it again), and
+            // post-connect audio setup failures land here too.
+            guard isActive, sessionGeneration == generation else { return }
+            print("[GeminiLiveSession] reconnect failed — \(keyPool.sanitized(error.localizedDescription))")
+            onError?(sanitizedError(error))
+            stop()
         }
-
-        // Exhausted all retries — now surface the original error.
-        reconnectAttemptIndex = 0
-        print("[GeminiLiveSession] ✗ reconnect exhausted — reporting error")
-        onError?(originalError)
-        stop()
     }
 
     // MARK: - Tool Call Dispatch

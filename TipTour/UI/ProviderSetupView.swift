@@ -8,10 +8,16 @@ struct ProviderSetupView: View {
             ModeSelectionView(companionManager: companionManager)
             if companionManager.selectedMode == .jev {
                 JevConnectionPicker(companionManager: companionManager)
+                ProviderKeyCard(mode: companionManager.selectedMode,
+                    onKeyChanged: companionManager.refreshProviderKeyStatus)
+                    .id("\(companionManager.selectedMode.rawValue)-\(companionManager.jevConnection.rawValue)")
+            } else if companionManager.selectedMode == .gemini {
+                GeminiKeyPoolCard(onKeyChanged: companionManager.refreshProviderKeyStatus)
+            } else {
+                ProviderKeyCard(mode: companionManager.selectedMode,
+                    onKeyChanged: companionManager.refreshProviderKeyStatus)
+                    .id(companionManager.selectedMode)
             }
-            ProviderKeyCard(mode: companionManager.selectedMode,
-                onKeyChanged: companionManager.refreshProviderKeyStatus)
-                .id("\(companionManager.selectedMode.rawValue)-\(companionManager.jevConnection.rawValue)")
             Text("Your choice is saved. You can switch modes here any time.")
                 .font(.system(size: 11))
                 .foregroundColor(DS.Colors.textTertiary)
@@ -178,6 +184,108 @@ struct ProviderKeyCard: View {
             onKeyChanged()
         } else {
             status = "Could not save to Keychain. Try again."
+        }
+    }
+}
+
+/// Key pool manager for Gemini mode: a list of user-supplied keys with
+/// per-key cooldown status. Keys live in macOS Keychain; only the masked
+/// suffix is ever shown.
+struct GeminiKeyPoolCard: View {
+    @ObservedObject private var pool = GeminiKeyPool.shared
+    let onKeyChanged: () -> Void
+    @State private var input = ""
+    @State private var status = ""
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                Text("Gemini keys").font(.system(size: 14, weight: .semibold))
+                Spacer()
+                Text(pool.entries.isEmpty ? "Key needed" : "\(pool.entries.count) saved")
+                    .font(.system(size: 11))
+                    .foregroundColor(pool.entries.isEmpty ? DS.Colors.textTertiary : DS.Colors.success)
+            }
+            Text("Save keys from different Google projects. If a key is blocked or cooling down, the next available key is tried.")
+                .font(.system(size: 12))
+                .foregroundColor(DS.Colors.textSecondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            ForEach(pool.entries) { entry in
+                HStack(spacing: 8) {
+                    Text(entry.masked)
+                        .font(.system(size: 12, design: .monospaced))
+                    Spacer(minLength: 0)
+                    Text(statusText(for: entry))
+                        .font(.system(size: 10))
+                        .foregroundColor(DS.Colors.textSecondary)
+                        .multilineTextAlignment(.trailing)
+                    Button("Remove") {
+                        if pool.removeKey(id: entry.id) {
+                            status = "Removed."
+                            onKeyChanged()
+                        } else {
+                            status = "Could not remove the key. Try again."
+                        }
+                    }
+                    .font(.system(size: 11))
+                    .pointerCursor()
+                    .accessibilityLabel("Remove key \(entry.masked)")
+                }
+            }
+
+            SecureField(pool.entries.isEmpty ? "Paste your Gemini API key" : "Paste another Gemini API key", text: $input)
+                .textFieldStyle(.roundedBorder)
+                .accessibilityLabel("Gemini API key")
+                .onSubmit(add)
+            HStack {
+                Button("Add key", action: add)
+                    .disabled(input.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    .pointerCursor()
+                Button("Reset key states") {
+                    pool.resetStates()
+                    status = "Key states reset."
+                }
+                .disabled(pool.entries.isEmpty)
+                .pointerCursor()
+            }
+            if !status.isEmpty {
+                Text(status).font(.system(size: 11)).foregroundColor(DS.Colors.textSecondary)
+            }
+            Text("Stored securely in macOS Keychain. " + TipTourMode.gemini.privacySummary)
+                .font(.system(size: 10)).foregroundColor(DS.Colors.textTertiary)
+        }
+        .padding(12)
+        .background(RoundedRectangle(cornerRadius: 12).fill(DS.Colors.surface1))
+        .onAppear { pool.reloadKeys() }
+    }
+
+    private func add() {
+        let trimmed = input.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        if pool.entries.contains(where: { $0.key == trimmed }) {
+            status = "That key is already saved."
+            return
+        }
+        // The pool persists first and only then updates in memory — a
+        // failed Keychain write must never show "Saved".
+        if pool.addKey(trimmed) {
+            input = ""
+            status = "Saved."
+            onKeyChanged()
+        } else {
+            status = "Could not save to Keychain. Try again."
+        }
+    }
+
+    private func statusText(for entry: GeminiKeyPool.Entry) -> String {
+        switch entry.state {
+        case .ready:
+            return "Ready"
+        case .coolingDown(let until, let reason):
+            return "\(reason) — retry after \(until.formatted(date: .omitted, time: .shortened))"
+        case .parked(let reason):
+            return reason
         }
     }
 }

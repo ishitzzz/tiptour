@@ -20,6 +20,8 @@ A macOS menu bar companion with two modes, powered by your own API keys.
 
 **JEV is selected by default.** On first launch, choose JEV or Gemini, save that mode’s API key, then grant its permissions. JEV does not require microphone access. You can switch later in **Settings → Models**, which shows only the selected mode’s key field. JEV can connect through TypeSafe direct (default) or OpenRouter (TypeSafe Jev via OpenRouter's System One endpoint, `~typesafe/jev-latest`); each connection has its own Keychain key. The OpenRouter connection bills input tokens to your OpenRouter balance (output tokens are free); there is no automatic fallback or top-up. Keys stay in macOS Keychain. There are no shared keys, hosted key proxies, or keys loaded from other projects.
 
+**Gemini key pool (this fork).** Gemini mode accepts multiple API keys you supply — for example one per Google project. If a key is rate-limited it cools down and the next available key is tried; a rejected key is parked for the rest of the run until you reset it. When every key is cooling down, the error says when the earliest retry is; when keys are parked or the bounded attempt budget runs out first, the error says that instead. Cooldowns follow the server’s own retry hints, keys are only shown masked, and a rejected key is never deleted for you. Manage the list and per-key status in **Settings → Models**. Details: [docs/gemini-key-pool.md](docs/gemini-key-pool.md).
+
 Shortcuts activate only the selected mode. The primary menu-bar button and welcome hint follow your selection.
 
 ## Using TipTour
