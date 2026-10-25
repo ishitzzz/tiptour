@@ -7,24 +7,58 @@ clipboard copy fixes. The notes below cover all three.
 
 ## Updating an existing local build without losing your changes
 
-If you already have this repo checked out on your Mac with your own
-edits (tracked or untracked), keep them safe first - do not hard-reset
-or stash-drop them:
+If this repo is already on your Mac with your own edits, do not hard-reset,
+stash-drop, or `git add -A` / `git add -u`. Tracked files can hold keys too,
+so check contents, not only filenames.
+
+1. Look first. Note your current branch (or detached HEAD) and what changed:
 
 ```bash
 cd tiptour
-git checkout -b backup-before-combined   # new local safety branch
-git add -A                               # stage tracked AND untracked changes
-git commit -m "Local state before combined branch"
-git checkout main                        # or whatever you had checked out
-git fetch origin
-git checkout feature/combined-jev-or-keypool-clipboard
+git status --short --branch
+git diff --stat
 ```
 
-Your old state stays recoverable on `backup-before-combined`. If you want
-your local edits on top of the combined branch later, merge or cherry-pick
-from that backup branch.
+2. Back up everything uncommitted to a private folder outside git, with
+restricted permissions. This includes any key files. Do not zip or upload it.
 
+```bash
+B="$HOME/tiptour-backup-$(date +%Y%m%d-%H%M%S)"
+mkdir -m 700 "$B"
+git ls-files -m -o --exclude-standard -z | xargs -0 -I{} cp --parents -p {} "$B"/
+git ls-files -o -i --exclude-standard -z | xargs -0 -I{} cp --parents -p {} "$B"/
+```
+
+(On macOS use `ditto` or `rsync -R` if `cp --parents` is missing.)
+
+3. Optional local safety branch. Stage only files you have reviewed
+(`git diff <file>`) and that contain no keys, by name:
+
+```bash
+TS=$(date +%Y%m%d-%H%M%S)
+git branch "backup-$TS"                              # marks the current commit, no checkout
+git switch -c "local-integration-backup-$TS"         # new unique branch from where you are (works on detached HEAD too)
+git add path/to/reviewed-file1 path/to/reviewed-file2
+git commit -m "Local state before combined branch"
+```
+
+Skip any file with `.env*`, `*.pem`, `*.key`, `*secret*`, `*credential*`,
+`*apikey*`, or key-looking contents. They stay in the private backup only.
+If a tracked file already holds a key, do not commit it: keep the private
+copy and ask for help.
+
+4. Bring in the combined branch without replacing your work:
+
+```bash
+git fetch origin
+git switch -c "local-integration-combined-$TS"    # new unique branch from your current state
+git merge origin/fix/combined-docs-safe-update
+```
+
+If the merge conflicts, stop. Do not use `-X theirs/ours` and do not drop
+the key pool. Your old branch and the private backup keep your state.
+The combined branch reorganised files into subfolders, so conflicts with
+flat local paths are possible.
 
 ## Get the code
 
