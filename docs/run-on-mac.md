@@ -30,11 +30,12 @@ An existing single Gemini key from an older install migrates into the pool autom
 
 ## What to expect from the pool
 
-- A rate-limited key cools down (server's own retry time when given) and the next key is tried.
-- A rejected key (bad/disabled key, project restriction) is parked for the rest of the app run and says so — it is never deleted.
+- A rate-limited key cools down (server's own retry time when the transport exposes it) and the next available key is tried — each connection attempt covers every ready key, however many you saved.
+- A rejected key (bad/disabled key, project restriction) is parked for the rest of the app run and says so — it is never deleted. Relaunching the app makes it eligible again.
 - A billing/credits failure (402) parks the key and warns that projects on the same Google billing account share that cap.
-- If no key is currently usable, the error says when the earliest retry is.
+- If no key is currently usable, the menu bar panel says so with the earliest retry time; if a bounded connect run gives up first, it says that instead. Stopping voice (or switching modes) mid-connect never counts as a key failure.
 - Switching keys opens a fresh Gemini session; the conversation does not carry across keys (same as any reconnect today).
+- The onboarding key step for Gemini is the same key-pool card as Settings → Models.
 
 ## Tests (no Xcode, no network, no real keys)
 
@@ -47,6 +48,6 @@ Both build a scratch SPM package and run in seconds. The key-pool script also ru
 
 ## Not yet verified (needs your Mac run)
 
-- Real websocket handshake classification against Google's actual Live error responses (status / Retry-After / close codes).
-- The Settings key-list card's layout and interactions.
+- Real websocket handshake classification against Google's actual Live error responses. In particular: whether macOS exposes the failed upgrade's HTTP status and `Retry-After` to URLSessionWebSocketTask is unverified — if it doesn't, classification falls back to close code and message text and cooldowns use the bounded backoff.
+- The Settings key-list card's and menu bar panel error banner's layout and interactions.
 - End-to-end failover with real keys from your projects.
