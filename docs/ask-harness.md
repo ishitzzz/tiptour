@@ -1,6 +1,6 @@
 # Ask harness: scribble + voice clipboard handoff
 
-Branch: `fix/clipboard-copy-state` (built on clipboard candidate `699d4bc`).
+Branch: `fix/ask-preview-close-copy-gate` (built on `a4993b2`).
 
 Hold **Ctrl+Option+Shift**, say your question out loud, release. TipTour
 captures the screen under your cursor, draws your scribble (the
@@ -42,9 +42,11 @@ starts with those markings. Capturing without a scribble works too.
   `requiresOnDeviceRecognition = true`. If the active locale reports
   `supportsOnDeviceRecognition == false`, the flow stops with an
   explanation instead of sending audio to a network service.
-- **Clipboard handoff (any app)**: the preview has **Copy both**, **Copy image** and **Copy text**. They leave the marked image and/or your question on the system clipboard (the clipboard is not restored afterwards, so the copy stays until you paste) for you to paste into your chosen app or site; acceptance depends on that app or site. **Copy both** writes one item with PNG and text flavors; which flavor an app reads is the app's choice, so use the single-flavor buttons when an app takes only one. Direct insertion into a named app is optional and off by default (no ChatGPT default). Copy both with an empty question explicitly reports image-only copying. Editing the preview clears the old copy confirmation. A pending copy is invalidated by edits, closing the preview or a newer copy request, and cannot overwrite the clipboard after that invalidation; copy again after editing. A copy failure is reported, not shown as success.
+- **Clipboard copy**: the preview has **Copy both**, **Copy image** and **Copy text**. They leave the marked image and/or your question on the system clipboard (the clipboard is not restored afterwards, so the copy stays until you paste) for you to paste into your chosen app or site; acceptance depends on that app or site. **Copy both** writes one item with PNG and text flavors; which flavor an app reads is the app's choice, so use the single-flavor buttons when an app takes only one. Direct insertion into a named app is optional and off by default (no ChatGPT default). Copy both with an empty question explicitly reports image-only copying. Editing the preview clears the old copy confirmation. A pending copy is invalidated by edits, closing the preview (Close button, Escape or the window's red close), a new capture, or a newer copy request, and cannot overwrite the clipboard or publish its result after that invalidation; copy again after editing. A copy failure is reported, not shown as success.
 - **Preview**: floating panel with the image, editable transcript and a
-  target-app picker (running apps plus the configured default).
+  target-app picker (running apps plus the configured default). Closing it
+  (Close button, Escape or the red close) cancels the preview and drops
+  any pending copy.
 - **Insertion**: the target app is activated and verified frontmost. The
   focused element must be a multi-line text area (search fields, combo
   boxes and single-line text fields are refused), and the exact focused
@@ -69,7 +71,7 @@ starts with those markings. Capturing without a scribble works too.
    - **Accessibility** (already used) for the global hotkey and Cmd+V.
    - **Microphone** and **Speech Recognition** (new prompt on first use)
      for on-device transcription.
-3. Settings > Advanced > **Ask Draft Target App** is empty by default.
+3. Settings > Advanced > **Ask Direct Insert App (optional)** is empty by default.
    Leave it empty to copy and paste yourself. For optional direct
    insertion, enter an installed app's bundle identifier or pick a
    running app in the preview; the choice is remembered.
@@ -79,9 +81,11 @@ starts with those markings. Capturing without a scribble works too.
 - **Not yet run on a Mac.** Built and reviewed on Linux without Xcode;
   UI pixels, the capture/composite pipeline, and the paste flow all need
   a real Mac pass before calling this working.
-- Whether a given app's composer accepts a pasted image is app-dependent
-  and unverified. If an app ignores the image paste, the text still
-  lands; test with your target first.
+- Whether a given app's composer accepts a pasted image or pasted text
+  is app-dependent and unverified. Each paste is a best-effort attempt:
+  the app may accept the image, the text, both or neither, and TipTour
+  cannot confirm what the app accepted. Check the draft in the target
+  app; test with your target first.
 - "On-device" covers transcription only. The target app may sync its own
   drafts, and macOS may sync the staged clipboard (Universal Clipboard)
   while it is staged.
@@ -98,7 +102,9 @@ starts with those markings. Capturing without a scribble works too.
 ## Tests
 
 `scripts/test-ask.sh` runs the pure logic (coordinate mapping, session
-generations, clipboard ownership with a fake pasteboard, composer role
+generations, clipboard ownership with a fake pasteboard, copy-mode
+flavors, copy-request gate and copy-outcome reset rules, composer role
 policy, chord provenance, markings and sizing decisions) with SwiftPM and
-no Xcode. It does not cover capture, compositing pixels, event taps, AX or
-the paste flow; those need a Mac.
+no Xcode. It does not cover capture, compositing pixels, event taps, AX,
+the paste flow or the AppKit window-close wiring that calls those reset
+rules; those need a Mac.

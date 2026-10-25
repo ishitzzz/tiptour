@@ -457,3 +457,52 @@ final class AskCopyRequestGateTests: XCTestCase {
         XCTAssertTrue(gate.isCurrent(freshPreviewCopy))
     }
 }
+
+final class AskCopyOutcomeStateTests: XCTestCase {
+    /// The reset semantics the capture-start, draft-publish and
+    /// preview-close wiring all call. These cover the pure decision only;
+    /// the AppKit wiring that calls reset() (window delegate, capture
+    /// start) is verified on a Mac, not here.
+    func testBeginCopyOwnsGateAndClearsOldConfirmation() {
+        var outcome = AskCopyOutcomeState()
+        let firstCopy = outcome.beginCopy()
+        outcome.finishCopy(confirmation: "done")
+        let secondCopy = outcome.beginCopy()
+        XCTAssertTrue(outcome.isCurrent(secondCopy))
+        XCTAssertFalse(outcome.isCurrent(firstCopy))
+        XCTAssertNil(outcome.confirmation)
+        XCTAssertTrue(outcome.hasOutcome)
+    }
+
+    func testResetInvalidatesPendingCopyAndClearsOutcome() {
+        var outcome = AskCopyOutcomeState()
+        let pendingCopy = outcome.beginCopy()
+        outcome.markCopying()
+        outcome.reset()
+        XCTAssertFalse(outcome.isCurrent(pendingCopy),
+                       "a copy pending at reset must never write or publish afterwards")
+        XCTAssertFalse(outcome.isCopying)
+        XCTAssertFalse(outcome.hasOutcome)
+        XCTAssertNil(outcome.confirmation)
+    }
+
+    func testResetThenNewCopyPublishesOnlyNewGeneration() {
+        var outcome = AskCopyOutcomeState()
+        let staleCopy = outcome.beginCopy()
+        outcome.reset()
+        let freshCopy = outcome.beginCopy()
+        XCTAssertFalse(outcome.isCurrent(staleCopy))
+        XCTAssertTrue(outcome.isCurrent(freshCopy))
+    }
+
+    func testFinishCopyClearsCopyingFlagAndKeepsConfirmation() {
+        var outcome = AskCopyOutcomeState()
+        _ = outcome.beginCopy()
+        outcome.markCopying()
+        XCTAssertTrue(outcome.isCopying)
+        outcome.finishCopy(confirmation: "copied")
+        XCTAssertFalse(outcome.isCopying)
+        XCTAssertEqual(outcome.confirmation, "copied")
+        XCTAssertTrue(outcome.hasOutcome)
+    }
+}

@@ -62,7 +62,7 @@ struct AskPreviewView: View {
                 }
             }
 
-            if let confirmation = controller.copyConfirmation {
+            if let confirmation = controller.copyOutcome.confirmation {
                 Text(confirmation)
                     .font(.system(size: 12))
                     .foregroundColor(.green)

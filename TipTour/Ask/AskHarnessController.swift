@@ -35,9 +35,8 @@ final class AskHarnessController: ObservableObject {
     @Published var targetBundleIdentifier: String = TipTourDefaults.askTargetBundleIdentifier
     @Published private(set) var targetApps: [AskTargetApp] = []
     @Published private(set) var insertionStatus: String?
-    @Published private(set) var copyConfirmation: String?
+    @Published private(set) var copyOutcome = AskCopyOutcomeState()
     @Published private(set) var isInserting = false
-    @Published private(set) var isCopying = false
     @Published private(set) var captureCaption: String = ""
 
     private weak var companionManager: CompanionManager?
@@ -57,8 +56,6 @@ final class AskHarnessController: ObservableObject {
     private var activeSession: ActiveSession?
     private var finishTask: Task<Void, Never>?
     private var insertionProgress = AskInsertionProgress()
-    private var copyRequestGate = AskCopyRequestGate()
-    private var hasCopyOutcome = false
 
     init(companionManager: CompanionManager) {
         self.companionManager = companionManager
@@ -106,6 +103,12 @@ final class AskHarnessController: ObservableObject {
         guard let generation = sessionGate.begin() else { return }
         isCapturing = true
         insertionStatus = nil
+        // A new capture replaces whatever the previous preview held, so a
+        // pending copy of the old image/question must lose its gate NOW -
+        // not only when the new draft publishes. Otherwise a slower old
+        // encoding could still write the old image/question during this
+        // capture (or after it fails and no new draft ever arrives).
+        copyOutcome.reset()
 
         // Markings are strictly gesture-bound: only a highlight still in
         // flight, or one committed by this ask chord moments ago. Anything
@@ -211,7 +214,11 @@ final class AskHarnessController: ObservableObject {
                     decision: decision
                 )
                 self.insertionProgress = AskInsertionProgress()
-                self.copyConfirmation = nil
+                // Reset the previous preview's copy outcome BEFORE the
+                // draft assignments: draftImage/draftText didSet treats a
+                // surviving outcome as an edit and would otherwise re-publish
+                // the stale "preview changed" warning over this new preview.
+                self.copyOutcome.reset()
                 self.insertionStatus = nil
                 self.draftImage = NSImage(
                     cgImage: composited,
@@ -277,13 +284,14 @@ final class AskHarnessController: ObservableObject {
     }
 
     private func invalidateCopyForPreviewEdit() {
-        copyRequestGate.invalidate()
-        if isCopying || hasCopyOutcome {
+        // The warning depends on the state BEFORE the reset: only a copy
+        // the user could still see (in flight or with a shown outcome) is
+        // worth telling them to redo.
+        let hadVisibleCopyState = copyOutcome.isCopying || copyOutcome.hasOutcome
+        copyOutcome.reset()
+        if hadVisibleCopyState {
             insertionStatus = "The preview changed. Copy again to put the current image and question on the clipboard."
         }
-        isCopying = false
-        hasCopyOutcome = false
-        copyConfirmation = nil
     }
 
     func copyToClipboard(_ mode: AskCopyMode) {
@@ -291,10 +299,7 @@ final class AskHarnessController: ObservableObject {
             insertionStatus = "Wait for insertion to finish, then copy again."
             return
         }
-        let generation = copyRequestGate.begin()
-        hasCopyOutcome = true
-        copyConfirmation = nil
-        isCopying = false
+        let generation = copyOutcome.beginCopy()
         let text = draftText
         let hasText = !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         guard !mode.flavors(hasText: hasText).isEmpty else {
@@ -308,28 +313,27 @@ final class AskHarnessController: ObservableObject {
             insertionStatus = AskDraftStagerError.copyImageUnavailable.localizedDescription
             return
         }
-        isCopying = true
+        copyOutcome.markCopying()
         insertionStatus = "Copying to clipboard..."
         Task { [weak self] in
             do {
                 let message = try await AskClipboardHandoff.copy(
                     image: image, text: text, mode: mode,
                     isCurrent: { [weak self] in
-                        self?.copyRequestGate.isCurrent(generation) == true
+                        self?.copyOutcome.isCurrent(generation) == true
                     }
                 )
-                guard let self, self.copyRequestGate.isCurrent(generation) else { return }
-                self.isCopying = false
+                guard let self, self.copyOutcome.isCurrent(generation) else { return }
                 if mode == .imageAndText && !hasText {
+                    self.copyOutcome.finishCopy(confirmation: nil)
                     self.insertionStatus = message
                 } else {
-                    self.copyConfirmation = message
+                    self.copyOutcome.finishCopy(confirmation: message)
                     self.insertionStatus = nil
                 }
             } catch {
-                guard let self, self.copyRequestGate.isCurrent(generation) else { return }
-                self.isCopying = false
-                self.copyConfirmation = nil
+                guard let self, self.copyOutcome.isCurrent(generation) else { return }
+                self.copyOutcome.finishCopy(confirmation: nil)
                 self.insertionStatus = error.localizedDescription
             }
         }
@@ -343,12 +347,9 @@ final class AskHarnessController: ObservableObject {
         guard !isInserting,
               let image = draftImage?.cgImage(forProposedRect: nil, context: nil, hints: nil) else { return }
 
-        copyRequestGate.invalidate()
-        isCopying = false
-        hasCopyOutcome = false
+        copyOutcome.reset()
         isInserting = true
         insertionStatus = nil
-        copyConfirmation = nil
         let text = draftText
         let bundleIdentifier = targetBundleIdentifier
         persistTargetSelection()
@@ -375,12 +376,16 @@ final class AskHarnessController: ObservableObject {
         }
     }
 
+    /// Every way of dismissing the preview funnels here: the Close button,
+    /// Escape, and the window's red close (via the panel's delegate). It
+    /// must drop any in-flight copy too - the docs promise a pending copy
+    /// cannot write after the preview closes.
     func cancelPreview() {
         previewPanelManager.hide()
+        copyOutcome.reset()
         draftImage = nil
         draftText = ""
         insertionStatus = nil
-        copyConfirmation = nil
         captureCaption = ""
         insertionProgress = AskInsertionProgress()
     }

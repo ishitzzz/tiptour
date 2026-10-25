@@ -24,7 +24,7 @@ private final class AskPreviewKeyablePanel: NSPanel {
 }
 
 @MainActor
-final class AskPreviewPanelManager {
+final class AskPreviewPanelManager: NSObject, NSWindowDelegate {
     private weak var controller: AskHarnessController?
     private var panel: NSPanel?
 
@@ -32,6 +32,7 @@ final class AskPreviewPanelManager {
 
     init(controller: AskHarnessController) {
         self.controller = controller
+        super.init()
     }
 
     func show() {
@@ -51,6 +52,17 @@ final class AskPreviewPanelManager {
         panel?.orderOut(nil)
     }
 
+    /// The title bar's red close button closes the window directly,
+    /// bypassing the Close button and Escape. Unhandled, it left the draft
+    /// and any in-flight clipboard copy alive behind a closed panel, and
+    /// the pending copy's writes still landed afterwards - contradicting
+    /// the documented "closing the preview invalidates a pending copy".
+    /// Route it through the same cancel path. cancelPreview only calls
+    /// orderOut (hide), never close(), so this cannot recurse.
+    func windowWillClose(_ notification: Notification) {
+        controller?.cancelPreview()
+    }
+
     private func createPanel(controller: AskHarnessController) {
         let previewView = AskPreviewView(controller: controller)
         let hostingView = NSHostingView(rootView: previewView)
@@ -65,6 +77,9 @@ final class AskPreviewPanelManager {
         previewPanel.onEscape = { [weak controller] in
             controller?.cancelPreview()
         }
+        // NSWindow.delegate is weak and the manager owns the panel, never
+        // the other way round: no retain cycle and no teardown to manage.
+        previewPanel.delegate = self
         previewPanel.title = "Ask with screenshot"
         previewPanel.titlebarAppearsTransparent = true
         previewPanel.isFloatingPanel = true

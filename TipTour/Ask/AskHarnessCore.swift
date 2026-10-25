@@ -188,6 +188,56 @@ struct AskCopyRequestGate {
     func isCurrent(_ candidate: Int) -> Bool { candidate == generation }
 }
 
+/// The preview-visible state of the current or most recent copy request,
+/// plus the gate that decides whether an in-flight copy may still write
+/// or publish. Foundation-only so the reset rules are unit-testable; the
+/// AppKit controller forwards every copy-state change here.
+///
+/// The reset rule the harness depends on: whenever the preview a copy
+/// belonged to stops being current - the text/image is edited, a new
+/// capture starts, a new draft publishes, or the preview closes (Close
+/// button, Escape or the window's red close) - `reset()` must run so a
+/// pending encoding loses its gate BEFORE it can write the old image or
+/// question to the clipboard.
+struct AskCopyOutcomeState {
+    private(set) var gate = AskCopyRequestGate()
+    private(set) var isCopying = false
+    private(set) var hasOutcome = false
+    private(set) var confirmation: String?
+
+    /// A copy request starts. It owns the gate until it finishes or a
+    /// reset invalidates it, and clears the previous copy's confirmation.
+    mutating func beginCopy() -> Int {
+        hasOutcome = true
+        confirmation = nil
+        isCopying = false
+        return gate.begin()
+    }
+
+    /// Encoding and the clipboard write are actually in flight.
+    mutating func markCopying() {
+        isCopying = true
+    }
+
+    /// The copy finished (success or failure) and published its result.
+    mutating func finishCopy(confirmation: String?) {
+        isCopying = false
+        self.confirmation = confirmation
+    }
+
+    /// The preview this copy belonged to was edited, replaced or closed.
+    /// Invalidates the gate first so a slower pending encoding can never
+    /// write afterwards, then clears the visible outcome.
+    mutating func reset() {
+        gate.invalidate()
+        isCopying = false
+        hasOutcome = false
+        confirmation = nil
+    }
+
+    func isCurrent(_ candidate: Int) -> Bool { gate.isCurrent(candidate) }
+}
+
 // MARK: - Insertion progress (retry without blind duplicate paste)
 
 /// Which pieces of the current draft a paste was already ATTEMPTED for in
