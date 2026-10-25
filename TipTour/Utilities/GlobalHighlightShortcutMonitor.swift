@@ -16,6 +16,10 @@ final class GlobalHighlightShortcutMonitor: ObservableObject {
         case began(CGPoint)
         case moved(CGPoint)
         case ended
+        /// The highlight ended on an event whose modifier flags are the ask
+        /// harness chord (Option was added). Provenance comes from the
+        /// event itself, not from callback order between the two taps.
+        case endedByAskChord
     }
 
     let highlightTransitionPublisher = PassthroughSubject<HighlightTransition, Never>()
@@ -122,7 +126,8 @@ final class GlobalHighlightShortcutMonitor: ObservableObject {
             highlightTransitionPublisher.send(.began(currentMouseLocation))
         } else if !isHighlightHeld && isHighlightShortcutCurrentlyPressed {
             isHighlightShortcutCurrentlyPressed = false
-            highlightTransitionPublisher.send(.ended)
+            let endedByAskChord = AskGestureProvenance.isAskChord(flagsRawValue: event.flags.rawValue)
+            highlightTransitionPublisher.send(endedByAskChord ? .endedByAskChord : .ended)
         } else if isHighlightHeld && isMouseMovementEvent {
             highlightTransitionPublisher.send(.moved(currentMouseLocation))
         }

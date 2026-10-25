@@ -30,18 +30,25 @@ final class AskHarnessController: ObservableObject {
     @Published private(set) var targetApps: [AskTargetApp] = []
     @Published private(set) var insertionStatus: String?
     @Published private(set) var isInserting = false
-    @Published private(set) var capturedAt: Date?
-    @Published private(set) var markingsCommittedAt: Date?
+    @Published private(set) var captureCaption: String = ""
 
     private weak var companionManager: CompanionManager?
     private let transcriber = OnDeviceSpeechTranscriber()
     private lazy var previewPanelManager = AskPreviewPanelManager(controller: self)
 
-    private var pendingCapture: Task<CompanionScreenCGImageCapture, Error>?
-    private var pendingTrailPoints: [CGPoint] = []
-    private var pendingMarkingsCommittedAt: Date?
-    private var pendingCapturedAt: Date?
-    private var sessionActive = false
+    /// State of the session in flight. Owned per session and moved out
+    /// atomically at release, so a re-press can never overwrite it.
+    private struct ActiveSession {
+        let generation: Int
+        let pressedAt: Date
+        let trailPoints: [CGPoint]
+        var capture: Task<CompanionScreenCGImageCapture, Error>
+    }
+
+    private var sessionGate = AskSessionGate()
+    private var activeSession: ActiveSession?
+    private var finishTask: Task<Void, Never>?
+    private var insertionProgress = AskInsertionProgress()
 
     init(companionManager: CompanionManager) {
         self.companionManager = companionManager
@@ -59,16 +66,22 @@ final class AskHarnessController: ObservableObject {
     }
 
     func cancelActiveCapture() {
-        guard sessionActive else { return }
-        sessionActive = false
-        pendingCapture?.cancel()
-        pendingCapture = nil
+        sessionGate.cancel()
+        activeSession?.capture.cancel()
+        activeSession = nil
+        finishTask?.cancel()
         Task { [transcriber] in _ = await transcriber.stop() }
         isCapturing = false
     }
 
     private func beginCapture() {
-        guard let companionManager, !sessionActive else { return }
+        guard let companionManager else { return }
+        guard sessionGate.phase == .idle else {
+            if sessionGate.phase == .finishing {
+                companionManager.presentAskHarnessHint("Still finishing the previous ask. Try again in a moment.")
+            }
+            return
+        }
 
         guard companionManager.hasScreenRecordingPermission else {
             companionManager.presentAskHarnessHint("Screen recording permission is required for the ask screenshot.")
@@ -80,33 +93,37 @@ final class AskHarnessController: ObservableObject {
             return
         }
 
-        sessionActive = true
+        guard let generation = sessionGate.begin() else { return }
         isCapturing = true
         insertionStatus = nil
 
-        // Snapshot the scribble at the same gesture boundary as the
-        // capture: adding Option while Ctrl+Shift is held commits the focus
-        // highlight, and both this snapshot and the screenshot are taken at
-        // that moment, so the markings always match the captured content.
+        // Markings are strictly gesture-bound: only a highlight still in
+        // flight, or one committed by this ask chord moments ago. Anything
+        // older is not reused. The trail is not part of the capture itself
+        // (ScreenCaptureKit excludes our windows); it is drawn afterwards.
         let trail = companionManager.currentScribbleTrail()
-        pendingTrailPoints = trail?.points ?? []
-        pendingMarkingsCommittedAt = trail?.committedAt
-        pendingCapturedAt = Date()
+        let pressedAt = Date()
 
-        pendingCapture = Task {
-            try await CompanionScreenCaptureUtility.captureCursorScreenAsCGImage()
-        }
+        activeSession = ActiveSession(
+            generation: generation,
+            pressedAt: pressedAt,
+            trailPoints: trail ?? [],
+            capture: Task {
+                try await CompanionScreenCaptureUtility.captureCursorScreenAsCGImage(atNativePixelScale: true)
+            }
+        )
 
         Task { [weak self, transcriber] in
             do {
                 try await transcriber.start()
             } catch {
                 await MainActor.run {
-                    guard let self, self.sessionActive else { return }
-                    self.sessionActive = false
+                    guard let self, self.sessionGate.isCurrent(generation),
+                          self.sessionGate.phase == .capturing else { return }
+                    self.sessionGate.cancel()
                     self.isCapturing = false
-                    self.pendingCapture?.cancel()
-                    self.pendingCapture = nil
+                    self.activeSession?.capture.cancel()
+                    self.activeSession = nil
                     self.companionManager?.presentAskHarnessHint(error.localizedDescription)
                 }
             }
@@ -114,34 +131,54 @@ final class AskHarnessController: ObservableObject {
     }
 
     private func finishCapture() {
-        guard sessionActive else { return }
-        sessionActive = false
+        guard let generation = sessionGate.beginFinish(),
+              let session = activeSession, session.generation == generation else { return }
+        activeSession = nil
 
-        Task { [weak self, transcriber] in
+        finishTask = Task { [weak self, transcriber] in
             let transcript = await transcriber.stop()
-
             guard let self else { return }
+            defer {
+                self.sessionGate.finished()
+                self.finishTask = nil
+            }
+            guard self.sessionGate.mayPublish(generation) else { return }
             self.isCapturing = false
 
             do {
-                guard let captureTask = self.pendingCapture else { return }
-                self.pendingCapture = nil
-                let capture = try await captureTask.value
+                let capture = try await session.capture.value
+                let capturedAt = Date()
+                guard self.sessionGate.mayPublish(generation) else { return }
 
-                let composited = AskMarkingCompositor.compositingTrail(
-                    self.pendingTrailPoints,
-                    onto: capture.image,
-                    displayFrame: capture.displayFrame
+                let displayFrame = capture.displayFrame
+                let onDisplayCount = session.trailPoints.filter {
+                    displayFrame.insetBy(dx: -24, dy: -24).contains($0)
+                }.count
+                let decision = AskMarkingPolicy.decide(
+                    pointCount: session.trailPoints.count,
+                    pointsOnDisplayCount: onDisplayCount
                 )
-                self.pendingTrailPoints = []
 
-                self.capturedAt = self.pendingCapturedAt
-                self.markingsCommittedAt = self.pendingMarkingsCommittedAt
-                self.pendingCapturedAt = nil
-                self.pendingMarkingsCommittedAt = nil
+                var composited = capture.image
+                if case .draw = decision {
+                    let points = session.trailPoints
+                    let baseImage = capture.image
+                    // Compositing is CPU/GPU heavy; keep it off the main actor.
+                    composited = await Task.detached(priority: .userInitiated) {
+                        AskMarkingCompositor.compositingTrail(points, onto: baseImage, displayFrame: displayFrame)
+                    }.value
+                }
+                guard self.sessionGate.mayPublish(generation) else { return }
+
+                self.captureCaption = AskPreviewCaption.text(
+                    completedTimeText: capturedAt.formatted(date: .omitted, time: .standard),
+                    delaySeconds: capturedAt.timeIntervalSince(session.pressedAt),
+                    decision: decision
+                )
+                self.insertionProgress = AskInsertionProgress()
                 self.draftImage = NSImage(
                     cgImage: composited,
-                    size: NSSize(width: capture.displayFrame.width, height: capture.displayFrame.height)
+                    size: NSSize(width: displayFrame.width, height: displayFrame.height)
                 )
                 self.draftText = transcript
                 self.targetBundleIdentifier = TipTourDefaults.askTargetBundleIdentifier
@@ -150,6 +187,7 @@ final class AskHarnessController: ObservableObject {
             } catch is CancellationError {
                 return
             } catch {
+                guard self.sessionGate.mayPublish(generation) else { return }
                 self.companionManager?.presentAskHarnessHint("Couldn't capture the screen: \(error.localizedDescription)")
             }
         }
@@ -213,10 +251,13 @@ final class AskHarnessController: ObservableObject {
 
         Task { [weak self] in
             do {
+                var progress = self?.insertionProgress ?? AskInsertionProgress()
+                defer { self?.insertionProgress = progress }
                 let summary = try await AskDraftStager.insertDraft(
                     image: image,
                     text: text,
-                    targetBundleIdentifier: bundleIdentifier
+                    targetBundleIdentifier: bundleIdentifier,
+                    progress: &progress
                 )
                 guard let self else { return }
                 self.isInserting = false
@@ -235,7 +276,7 @@ final class AskHarnessController: ObservableObject {
         draftImage = nil
         draftText = ""
         insertionStatus = nil
-        capturedAt = nil
-        markingsCommittedAt = nil
+        captureCaption = ""
+        insertionProgress = AskInsertionProgress()
     }
 }

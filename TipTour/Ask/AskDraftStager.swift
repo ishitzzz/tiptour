@@ -5,22 +5,26 @@
 //  Places the composited screenshot and the transcribed question into the
 //  chosen app's composer as a DRAFT. It stages each piece on the general
 //  pasteboard, pastes with a synthesized Cmd+V aimed at the target app's
-//  pid, and never presses Return — sending is always the user's action.
+//  pid, and never presses Return - sending is always the user's action.
 //
-//  Pasting goes only into a verified editable composer: after the target
-//  app is frontmost, its focused AX element must be a text-editing role,
-//  and focus is re-verified before the second paste. Otherwise the image
-//  or text could land in a search field, another conversation, or nowhere
-//  editable — those cases fail closed and say what to do.
-//
-//  The user's prior clipboard contents are restored afterwards, but only
-//  when the pasteboard's changeCount shows nothing else was copied while
-//  the staging was in flight; clobbering a concurrent user copy is worse
-//  than leaving the staged content behind. A skipped restore is logged
-//  and surfaced in the returned summary.
-//
-//  The staged window is deliberately short because Universal Clipboard can
-//  sync pasteboard contents to the user's other devices while staged.
+//  Safety protocol:
+//  - Paste only into a focused multi-line text area (AskComposerPolicy).
+//    The exact focused window + element is captured once and must be the
+//    same object before every paste; the app pid alone is not enough. If
+//    the composer cannot be identified, nothing is pasted and the user is
+//    asked to click into the message field themselves and retry.
+//  - Clipboard ownership: the change count is captured right after each of
+//    our writes (AskClipboardOwnership). Before each later write/paste it
+//    must be unchanged; if the user copied something, the sequence stops
+//    and the newer clipboard is never overwritten or pasted.
+//  - Restore of the previous clipboard happens only while we still own it,
+//    on success, failure and cancellation alike.
+//  - Limits we cannot remove: we cannot observe when the target app has
+//    consumed a paste. The waits below are heuristics, not guarantees, and
+//    a slow app can miss a paste or read the clipboard after restore. The
+//    result text says so. Universal Clipboard may sync staged contents.
+//  - Retry: AskInsertionProgress records which pieces already went in so a
+//    retry never blindly pastes the same piece twice.
 //
 
 import AppKit
@@ -32,6 +36,7 @@ enum AskDraftStagerError: LocalizedError {
     case composerNotEditable(appName: String)
     case focusLostDuringInsertion(appName: String)
     case imageEncodingFailed
+    case clipboardChangedDuringInsertion(appName: String, pastedImage: Bool)
 
     var errorDescription: String? {
         switch self {
@@ -42,77 +47,158 @@ enum AskDraftStagerError: LocalizedError {
         case .targetAppDidNotBecomeFrontmost(let bundleIdentifier):
             return "\(bundleIdentifier) did not come to the front, so nothing was pasted. The draft was not inserted."
         case .composerNotEditable(let appName):
-            return "Couldn't confirm an editable composer is focused in \(appName). Click into its message field, then press Insert as draft again."
+            return "Couldn't confirm an editable composer is focused in \(appName). Click into its message field yourself, then press Insert as draft again."
         case .focusLostDuringInsertion(let appName):
             return "Focus moved in \(appName) after the image was placed, so the question text was not pasted. Check the app before trying again."
         case .imageEncodingFailed:
             return "Could not encode the captured image for the clipboard."
+        case .clipboardChangedDuringInsertion(let appName, let pastedImage):
+            let state = pastedImage ? "The image may already be in \(appName)'s draft; check it before retrying (a retry will not paste the image again)." : "Nothing was pasted."
+            return "You copied something while the draft was being placed, so the insert stopped and your newer clipboard was kept. \(state)"
         }
+    }
+}
+
+/// NSPasteboard-backed staging surface.
+private final class GeneralPasteboardStaging: AskStagingPasteboard {
+    private let pasteboard = NSPasteboard.general
+    private let previousItems: [NSPasteboardItem]
+    private let pngData: Data
+    private let text: String
+
+    init(pngData: Data, text: String) {
+        self.pngData = pngData
+        self.text = text
+        self.previousItems = GeneralPasteboardStaging.copyItems(from: NSPasteboard.general)
+    }
+
+    var changeCount: Int { pasteboard.changeCount }
+
+    func writeStaged(_ payload: AskStagedPayload) -> Int {
+        let item = NSPasteboardItem()
+        switch payload.kind {
+        case .image: item.setData(pngData, forType: .png)
+        case .text: item.setString(text, forType: .string)
+        }
+        pasteboard.clearContents()
+        pasteboard.writeObjects([item])
+        return pasteboard.changeCount
+    }
+
+    func restorePrevious() -> Int {
+        pasteboard.clearContents()
+        if !previousItems.isEmpty { pasteboard.writeObjects(previousItems) }
+        return pasteboard.changeCount
+    }
+
+    private static func copyItems(from pasteboard: NSPasteboard) -> [NSPasteboardItem] {
+        pasteboard.pasteboardItems?.map { item in
+            let copiedItem = NSPasteboardItem()
+            for type in item.types {
+                if let data = item.data(forType: type) {
+                    copiedItem.setData(data, forType: type)
+                } else if let string = item.string(forType: type) {
+                    copiedItem.setString(string, forType: type)
+                }
+            }
+            return copiedItem
+        } ?? []
     }
 }
 
 @MainActor
 enum AskDraftStager {
-    /// Inserts image then text into the target app's focused composer.
-    /// Returns a short human-readable summary including any clipboard
-    /// restore caveat.
+    /// Heuristic waits (nanoseconds). The target app gives no completion
+    /// signal, so these are best-effort and documented as such.
+    private static let imageSettleNanoseconds: UInt64 = 800_000_000
+    private static let restoreDelayNanoseconds: UInt64 = 1_500_000_000
+
+    /// Inserts image then text into the target app's focused composer,
+    /// skipping pieces `progress` says already went in. Returns a short
+    /// human-readable summary including clipboard and timing caveats.
     static func insertDraft(
         image: CGImage,
         text: String,
-        targetBundleIdentifier: String
+        targetBundleIdentifier: String,
+        progress: inout AskInsertionProgress
     ) async throws -> String {
         guard AXIsProcessTrusted() else {
             throw AskDraftStagerError.accessibilityNotGranted
         }
+        progress.prepare(forTarget: targetBundleIdentifier)
 
         let targetApplication = try await resolvedFrontmostApplication(
             bundleIdentifier: targetBundleIdentifier
         )
         let appName = targetApplication.localizedName ?? targetBundleIdentifier
+        let targetPID = targetApplication.processIdentifier
 
-        guard isEditableComposerFocused(in: targetApplication.processIdentifier) else {
+        guard let composerFocus = ComposerFocus.capture(in: targetPID) else {
             throw AskDraftStagerError.composerNotEditable(appName: appName)
         }
 
-        let pasteboard = NSPasteboard.general
-        let previousItems = copyPasteboardItems(from: pasteboard)
-
-        guard let bitmap = NSBitmapImageRep(cgImage: image),
-              let pngData = bitmap.representation(using: .png, properties: [:]) else {
-            throw AskDraftStagerError.imageEncodingFailed
+        let trimmedText = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        let needsImage = !progress.imagePasted
+        let needsText = !trimmedText.isEmpty && !progress.textPasted
+        guard needsImage || needsText else {
+            return "Everything was already placed in \(appName). Nothing was sent."
         }
 
-        let imageItem = NSPasteboardItem()
-        imageItem.setData(pngData, forType: .png)
-        pasteboard.clearContents()
-        pasteboard.writeObjects([imageItem])
-        postCommandV(to: targetApplication.processIdentifier)
-        // Attachment handling in the target is asynchronous; give it time
-        // before the text paste so the two don't interleave.
-        try await Task.sleep(nanoseconds: 600_000_000)
+        // PNG encoding is CPU-heavy; keep it off the main actor.
+        let pngData: Data = try await Task.detached(priority: .userInitiated) {
+            guard let bitmap = NSBitmapImageRep(cgImage: image),
+                  let data = bitmap.representation(using: .png, properties: [:]) else {
+                throw AskDraftStagerError.imageEncodingFailed
+            }
+            return data
+        }.value
 
-        let trimmedText = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        if !trimmedText.isEmpty {
-            guard NSWorkspace.shared.frontmostApplication?.processIdentifier == targetApplication.processIdentifier,
-                  isEditableComposerFocused(in: targetApplication.processIdentifier) else {
+        let staging = GeneralPasteboardStaging(pngData: pngData, text: trimmedText)
+        let ownership = AskClipboardOwnership(pasteboard: staging)
+
+        func assertTargetStillFocused() throws {
+            guard NSWorkspace.shared.frontmostApplication?.processIdentifier == targetPID,
+                  composerFocus.isStillFocused() else {
                 throw AskDraftStagerError.focusLostDuringInsertion(appName: appName)
             }
-            let textItem = NSPasteboardItem()
-            textItem.setString(trimmedText, forType: .string)
-            pasteboard.clearContents()
-            pasteboard.writeObjects([textItem])
-            postCommandV(to: targetApplication.processIdentifier)
-            try await Task.sleep(nanoseconds: 400_000_000)
         }
 
-        let stagedChangeCount = pasteboard.changeCount
-        if pasteboard.changeCount == stagedChangeCount {
-            restorePasteboard(pasteboard, items: previousItems)
-            return "Draft placed in \(appName). Review it there — nothing was sent."
+        do {
+            if needsImage {
+                try assertTargetStillFocused()
+                try ownership.stage(AskStagedPayload(kind: .image))
+                try ownership.assertOwnedBeforePaste()
+                postCommandV(to: targetPID)
+                progress.imagePasted = true
+                // Heuristic settle; see the limits in the file header.
+                try await Task.sleep(nanoseconds: imageSettleNanoseconds)
+            }
+
+            if needsText {
+                try assertTargetStillFocused()
+                try ownership.stage(AskStagedPayload(kind: .text))
+                try ownership.assertOwnedBeforePaste()
+                postCommandV(to: targetPID)
+                progress.textPasted = true
+                // Give the target time to read the pasteboard before restore.
+                try await Task.sleep(nanoseconds: restoreDelayNanoseconds)
+            }
+        } catch {
+            // Failure or cancellation: put the user's clipboard back if it
+            // is still ours, and never touch a newer copy.
+            ownership.restoreIfStillOwned()
+            if let clipboardError = error as? AskClipboardError, clipboardError == .clipboardChangedByOthers {
+                print("[Ask] clipboard changed during staging; stopped without overwriting it")
+                throw AskDraftStagerError.clipboardChangedDuringInsertion(appName: appName, pastedImage: progress.imagePasted)
+            }
+            throw error
         }
 
-        print("[Ask] pasteboard changed during staging; leaving the user's clipboard as-is")
-        return "Draft placed in \(appName). Your clipboard kept its newest copy instead of the previous contents. Nothing was sent."
+        let restored = ownership.restoreIfStillOwned()
+        let clipboardNote = restored
+            ? "Your previous clipboard was restored after a short delay."
+            : "Your clipboard kept a newer copy instead of the previous contents."
+        return "Draft placed in \(appName). TipTour can't confirm the app accepted every paste, so check the draft (images are app-dependent). \(clipboardNote) Nothing was sent."
     }
 
     /// Activates the target and verifies it actually came to the front;
@@ -160,43 +246,6 @@ enum AskDraftStager {
         throw AskDraftStagerError.targetAppDidNotBecomeFrontmost(bundleIdentifier: bundleIdentifier)
     }
 
-    /// The focused element in the target must be a text-editing role for a
-    /// composer paste to be safe. Electron apps expose their AX tree only
-    /// after AXManualAccessibility is set, which app-activation tracking in
-    /// CompanionManager already applies; when the tree stays unreadable
-    /// this returns false and the insert fails closed.
-    private static func isEditableComposerFocused(in processIdentifier: pid_t) -> Bool {
-        let applicationElement = AXUIElementCreateApplication(processIdentifier)
-        AXUIElementSetMessagingTimeout(applicationElement, 0.4)
-
-        var focusedValue: AnyObject?
-        guard AXUIElementCopyAttributeValue(
-            applicationElement,
-            kAXFocusedUIElementAttribute as CFString,
-            &focusedValue
-        ) == .success, let focusedValue, CFGetTypeID(focusedValue) == AXUIElementGetTypeID() else {
-            return false
-        }
-
-        let focusedElement = focusedValue as! AXUIElement
-        var roleValue: AnyObject?
-        guard AXUIElementCopyAttributeValue(
-            focusedElement,
-            kAXRoleAttribute as CFString,
-            &roleValue
-        ) == .success, let role = roleValue as? String else {
-            return false
-        }
-
-        let editableRoles: Set<String> = [
-            kAXTextAreaRole as String,
-            kAXTextFieldRole as String,
-            kAXComboBoxRole as String,
-            "AXSearchField"
-        ]
-        return editableRoles.contains(role)
-    }
-
     private static func postCommandV(to processIdentifier: pid_t) {
         let source = CGEventSource(stateID: .hidSystemState)
         let vKeyCode: CGKeyCode = 9
@@ -207,24 +256,52 @@ enum AskDraftStager {
         keyDown?.postToPid(processIdentifier)
         keyUp?.postToPid(processIdentifier)
     }
+}
 
-    private static func copyPasteboardItems(from pasteboard: NSPasteboard) -> [NSPasteboardItem] {
-        pasteboard.pasteboardItems?.map { item in
-            let copiedItem = NSPasteboardItem()
-            for type in item.types {
-                if let data = item.data(forType: type) {
-                    copiedItem.setData(data, forType: type)
-                } else if let string = item.string(forType: type) {
-                    copiedItem.setString(string, forType: type)
-                }
-            }
-            return copiedItem
-        } ?? []
+/// The exact focused window + element of a verified composer. Equality is
+/// object identity as reported by Accessibility (CFEqual), so a different
+/// field, tab or window in the same app does not pass.
+@MainActor
+private struct ComposerFocus {
+    let processIdentifier: pid_t
+    let window: AXUIElement
+    let element: AXUIElement
+
+    static func capture(in processIdentifier: pid_t) -> ComposerFocus? {
+        guard let (window, element) = currentFocus(in: processIdentifier),
+              let role = stringAttribute(kAXRoleAttribute, of: element) else {
+            return nil
+        }
+        let subrole = stringAttribute(kAXSubroleAttribute, of: element)
+        guard AskComposerPolicy.isComposerRole(role: role, subrole: subrole) else { return nil }
+        return ComposerFocus(processIdentifier: processIdentifier, window: window, element: element)
     }
 
-    private static func restorePasteboard(_ pasteboard: NSPasteboard, items: [NSPasteboardItem]) {
-        pasteboard.clearContents()
-        guard !items.isEmpty else { return }
-        pasteboard.writeObjects(items)
+    func isStillFocused() -> Bool {
+        guard let (currentWindow, currentElement) = Self.currentFocus(in: processIdentifier) else { return false }
+        return CFEqual(currentWindow, window) && CFEqual(currentElement, element)
+    }
+
+    private static func currentFocus(in processIdentifier: pid_t) -> (AXUIElement, AXUIElement)? {
+        let applicationElement = AXUIElementCreateApplication(processIdentifier)
+        AXUIElementSetMessagingTimeout(applicationElement, 0.4)
+        guard let element = elementAttribute(kAXFocusedUIElementAttribute, of: applicationElement),
+              let window = elementAttribute(kAXFocusedWindowAttribute, of: applicationElement) else {
+            return nil
+        }
+        return (window, element)
+    }
+
+    private static func elementAttribute(_ attribute: String, of element: AXUIElement) -> AXUIElement? {
+        var value: AnyObject?
+        guard AXUIElementCopyAttributeValue(element, attribute as CFString, &value) == .success,
+              let value, CFGetTypeID(value) == AXUIElementGetTypeID() else { return nil }
+        return (value as! AXUIElement)
+    }
+
+    private static func stringAttribute(_ attribute: String, of element: AXUIElement) -> String? {
+        var value: AnyObject?
+        guard AXUIElementCopyAttributeValue(element, attribute as CFString, &value) == .success else { return nil }
+        return value as? String
     }
 }

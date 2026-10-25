@@ -125,6 +125,8 @@ final class CompanionManager: ObservableObject {
     @Published private(set) var isFocusHighlightActive: Bool = false
     @Published private(set) var focusHighlightGlobalPoints: [CGPoint] = []
     @Published private(set) var lastFocusHighlightContext: FocusHighlightContext?
+    /// Points of a highlight committed by the ask chord, for the ask harness only.
+    private var askGestureTrail: (points: [CGPoint], committedAt: Date)?
     @Published private(set) var isRadialInputSwitcherVisible = false
     @Published private(set) var radialInputSwitcherCenter: CGPoint?
     @Published private(set) var highlightedRadialInputOption: RadialInputOption?
@@ -1720,18 +1722,17 @@ final class CompanionManager: ObservableObject {
         presentTransientOverlayHint("Hold Ctrl+Shift and drag to highlight")
     }
 
-    /// The markings the user means by "what I scribbled": the in-flight
-    /// focus highlight if one is active, otherwise a highlight committed
-    /// within the last few seconds. The window is short on purpose: an
-    /// older scribble over a freshly captured screen could show markings
-    /// on content that has since changed.
-    func currentScribbleTrail() -> (points: [CGPoint], committedAt: Date)? {
+    /// The markings the ask harness may draw, strictly bound to its own
+    /// gesture: the highlight still in flight when the chord is pressed, or
+    /// one that the ask chord itself committed a moment ago. Highlights
+    /// from earlier, separate gestures are never reused.
+    func currentScribbleTrail() -> [CGPoint]? {
         if isFocusHighlightActive, focusHighlightGlobalPoints.count >= 2 {
-            return (focusHighlightGlobalPoints, Date())
+            return focusHighlightGlobalPoints
         }
-        if let context = lastFocusHighlightContext,
-           Date().timeIntervalSince(context.createdAt) < 6 {
-            return (context.globalAppKitPoints, context.createdAt)
+        if let gestureTrail = askGestureTrail,
+           Date().timeIntervalSince(gestureTrail.committedAt) < 1.5 {
+            return gestureTrail.points
         }
         return nil
     }
@@ -1782,7 +1783,9 @@ final class CompanionManager: ObservableObject {
         case .moved(let globalPoint):
             appendFocusHighlightPoint(globalPoint)
         case .ended:
-            commitFocusHighlight()
+            commitFocusHighlight(committedByAskGesture: false)
+        case .endedByAskChord:
+            commitFocusHighlight(committedByAskGesture: true)
         }
     }
 
@@ -1792,6 +1795,7 @@ final class CompanionManager: ObservableObject {
         currentFocusHighlightWindowContext = Self.windowContext(at: globalPoint)
         updateTargetAppOverrideForFocusHighlightWindow()
         lastFocusHighlightContext = nil
+        askGestureTrail = nil
 
         if hasCompletedOnboarding && hasDesktopPermissions && !isOverlayVisible {
             overlayWindowManager.hasShownOverlayBefore = true
@@ -1814,8 +1818,15 @@ final class CompanionManager: ObservableObject {
         updateTargetAppOverrideForFocusHighlightWindow()
     }
 
-    private func commitFocusHighlight() {
+    private func commitFocusHighlight(committedByAskGesture: Bool) {
         guard isFocusHighlightActive else { return }
+        let committedPoints = focusHighlightGlobalPoints
+        // Ask-harness gesture: keep the markings local and never hand this
+        // highlight to a provider. Decided from the committing event's own
+        // modifier flags, so it holds whether or not Gemini is active.
+        askGestureTrail = committedByAskGesture && committedPoints.count >= 2
+            ? (committedPoints, Date())
+            : nil
         isFocusHighlightActive = false
 
         let highlightedBoundingRect = Self.boundingRect(for: focusHighlightGlobalPoints)
@@ -1853,6 +1864,7 @@ final class CompanionManager: ObservableObject {
         }
         focusHighlightGlobalPoints = []
         currentFocusHighlightWindowContext = nil
+        guard !committedByAskGesture else { return }
         Task { [weak self] in
             await self?.sendLatestFocusHighlightContextToGeminiIfPossible(
                 forceFreshScreenshot: true,

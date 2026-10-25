@@ -14,7 +14,9 @@ let package = Package(
     swiftLanguageModes: [.v5]
 )
 SWIFT
-cp "$project_dir/TipTour/Ask/AskCoordinateMapping.swift" "$test_dir/Sources/AskCore/"
+cp "$project_dir/TipTour/Ask/AskCoordinateMapping.swift" "$project_dir/TipTour/Ask/AskHarnessCore.swift" "$test_dir/Sources/AskCore/"
 sed 's/@testable import TipTour/@testable import AskCore/' \
     "$project_dir/TipTourTests/AskCoordinateMappingTests.swift" > "$test_dir/Tests/AskCoreTests/AskCoordinateMappingTests.swift"
+sed 's/@testable import TipTour/@testable import AskCore/' \
+    "$project_dir/TipTourTests/AskHarnessCoreTests.swift" > "$test_dir/Tests/AskCoreTests/AskHarnessCoreTests.swift"
 swift test --package-path "$test_dir"

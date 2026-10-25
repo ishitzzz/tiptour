@@ -12,19 +12,6 @@ import SwiftUI
 struct AskPreviewView: View {
     @ObservedObject var controller: AskHarnessController
 
-    private var captureTimingCaption: String {
-        guard let capturedAt = controller.capturedAt else { return "" }
-        let time = capturedAt.formatted(date: .omitted, time: .standard)
-        guard let markingsAt = controller.markingsCommittedAt else {
-            return "Screen captured at \(time). No markings."
-        }
-        let age = Int(capturedAt.timeIntervalSince(markingsAt).rounded())
-        if age <= 1 {
-            return "Screen captured at \(time) with your markings."
-        }
-        return "Screen captured at \(time). Markings are from a scribble made \(age)s earlier, over the content visible then."
-    }
-
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             Text("Ask with screenshot")
@@ -41,7 +28,7 @@ struct AskPreviewView: View {
                             .stroke(Color.primary.opacity(0.12), lineWidth: 1)
                     )
 
-                Text(captureTimingCaption)
+                Text(controller.captureCaption)
                     .font(.system(size: 10))
                     .foregroundColor(.secondary)
             }

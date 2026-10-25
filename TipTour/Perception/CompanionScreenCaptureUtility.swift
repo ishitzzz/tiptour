@@ -153,7 +153,9 @@ enum CompanionScreenCaptureUtility {
         try await captureCursorScreenAsCGImage().image
     }
 
-    static func captureCursorScreenAsCGImage() async throws -> CompanionScreenCGImageCapture {
+    /// `atNativePixelScale` is opt-in so existing callers keep their
+    /// point-sized captures; the ask harness requests native pixels.
+    static func captureCursorScreenAsCGImage(atNativePixelScale: Bool = false) async throws -> CompanionScreenCGImageCapture {
         let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
 
         guard !content.displays.isEmpty else {
@@ -184,9 +186,25 @@ enum CompanionScreenCaptureUtility {
 
         let filter = SCContentFilter(display: cursorDisplay, excludingWindows: ownAppWindows)
 
+        // SCDisplay.width/height are in points. Capture at the display's
+        // verified pixel scale instead: ScreenCaptureKit's own
+        // pointPixelScale for this filter, falling back to the NSScreen
+        // backing scale, so Retina captures keep their native resolution.
+        let verifiedScale: Double = !atNativePixelScale ? 1 : {
+            let info = SCShareableContent.info(for: filter)
+            let scale = Double(info.pointPixelScale)
+            if scale >= 1 { return scale }
+            return Double(nsScreenByDisplayID[cursorDisplay.displayID]?.backingScaleFactor ?? 1)
+        }()
+        let pixelSize = AskCaptureSizing.pixelSize(
+            pointWidth: Double(cursorDisplay.width),
+            pointHeight: Double(cursorDisplay.height),
+            scale: verifiedScale
+        )
+
         let configuration = SCStreamConfiguration()
-        configuration.width = cursorDisplay.width
-        configuration.height = cursorDisplay.height
+        configuration.width = pixelSize.width
+        configuration.height = pixelSize.height
 
         let image = try await SCScreenshotManager.captureImage(
             contentFilter: filter,
