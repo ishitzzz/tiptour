@@ -20,6 +20,8 @@ A macOS menu bar companion with two modes, powered by your own API keys.
 
 **JEV is selected by default.** On first launch, choose JEV or Gemini, save that mode’s API key, then grant its permissions. JEV does not require microphone access. You can switch later in **Settings → Models**, which shows only the selected mode’s key field. Keys stay in macOS Keychain. There are no shared keys, hosted key proxies, or keys loaded from other projects.
 
+**Gemini key pool (this fork).** Gemini mode accepts multiple API keys you supply — for example one per Google project. If a key is rate-limited or rejected, it cools down and the next available key is tried; when every key is busy, the error says when the earliest retry is. Cooldowns follow the server’s own retry hints, keys are only shown masked, and a rejected key is never deleted for you. Manage the list and per-key status in **Settings → Models**. Details: [docs/gemini-key-pool.md](docs/gemini-key-pool.md).
+
 Shortcuts activate only the selected mode. The primary menu-bar button and welcome hint follow your selection.
 
 ## Using TipTour

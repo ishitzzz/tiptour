@@ -58,6 +58,21 @@ enum GeminiLiveEvent {
     case error(Error)
 }
 
+/// A connect/reconnect failure carrying whatever transport details the
+/// websocket layer exposed. `httpStatus` and `retryAfter` come from the
+/// handshake response when the server rejects the upgrade; `closeCode`
+/// comes from the websocket close frame after a close. All optional —
+/// callers must classify defensively.
+struct GeminiLiveConnectError: Error, CustomStringConvertible, LocalizedError {
+    var httpStatus: Int?
+    var closeCode: Int?
+    var retryAfter: TimeInterval?
+    var underlying: String
+
+    var description: String { underlying }
+    var errorDescription: String? { underlying }
+}
+
 /// Intentionally NOT @MainActor. `sendAudioChunk` is called from the
 /// real-time audio thread (installTap callback) and cannot afford to
 /// hop to main on every buffer — that starves Core Audio and causes
@@ -100,6 +115,12 @@ final class GeminiLiveClient: @unchecked Sendable {
     /// `.unexpectedDisconnect` event (we don't want to trigger a reconnect
     /// when the user just released push-to-talk).
     private var _wasIntentionallyDisconnected: Bool = false
+
+    /// Set when the socket dies before setupComplete arrives. connect()'s
+    /// wait loop throws this instead of sitting out the full 10s timeout,
+    /// and it carries the handshake's HTTP status / Retry-After when the
+    /// server rejected the upgrade outright.
+    private var _handshakeFailure: GeminiLiveConnectError?
 
     /// Periodic no-op ping that prevents Gemini Live's silent idle
     /// disconnect. Per Google's docs the server closes the socket after
@@ -156,6 +177,7 @@ final class GeminiLiveClient: @unchecked Sendable {
             // a fresh connection. Any close from this point onward is
             // either user-initiated (sets the flag again) or unexpected.
             self._wasIntentionallyDisconnected = false
+            self._handshakeFailure = nil
         }
         task.resume()
         print("[GeminiLive] WebSocket opened")
@@ -334,12 +356,23 @@ final class GeminiLiveClient: @unchecked Sendable {
             ]
         ]
 
-        try await sendJSON(setupMessage)
+        do {
+            try await sendJSON(setupMessage)
+        } catch {
+            let structured = makeConnectError(from: error, task: task)
+            stateLock.withLock { self._handshakeFailure = structured }
+            disconnect()
+            throw structured
+        }
 
         // Wait for setupComplete before allowing audio/image input.
         // The receive loop will flip isSetupComplete and fire the .setupComplete event.
         let setupDeadline = Date().addingTimeInterval(10)
         while !isSetupComplete {
+            if let failure = stateLock.withLock({ self._handshakeFailure }) {
+                disconnect()
+                throw failure
+            }
             if Date() > setupDeadline {
                 disconnect()
                 throw NSError(domain: "GeminiLive", code: -2,
@@ -347,6 +380,38 @@ final class GeminiLiveClient: @unchecked Sendable {
             }
             try await Task.sleep(nanoseconds: 50_000_000) // 50ms
         }
+    }
+
+    /// Builds a structured error from the task's transport state. When the
+    /// server rejects the websocket upgrade, the handshake's HTTP response
+    /// (status code and any Retry-After header) is still attached to the
+    /// task; after an established socket closes, the close code is.
+    private func makeConnectError(from error: Error, task: URLSessionWebSocketTask?) -> GeminiLiveConnectError {
+        let response = task?.response as? HTTPURLResponse
+        let code = task?.closeCode
+        return GeminiLiveConnectError(
+            httpStatus: response?.statusCode,
+            closeCode: (code == .invalid) ? nil : code?.rawValue,
+            retryAfter: Self.parseRetryAfter(from: response),
+            underlying: error.localizedDescription
+        )
+    }
+
+    /// Parses a Retry-After header (delta-seconds or HTTP-date).
+    static func parseRetryAfter(from response: HTTPURLResponse?) -> TimeInterval? {
+        guard let response else { return nil }
+        for (key, value) in response.allHeaderFields {
+            guard let name = (key as? String)?.lowercased(), name == "retry-after",
+                  let raw = (value as? String)?.trimmingCharacters(in: .whitespaces) else { continue }
+            if let seconds = TimeInterval(raw) { return max(0, seconds) }
+            let formatter = DateFormatter()
+            formatter.locale = Locale(identifier: "en_US_POSIX")
+            formatter.dateFormat = "EEE, dd MMM yyyy HH:mm:ss zzz"
+            if let date = formatter.date(from: raw) {
+                return max(0, date.timeIntervalSinceNow)
+            }
+        }
+        return nil
     }
 
     /// Closes the WebSocket and cleans up state. Marks the disconnect as
@@ -543,8 +608,12 @@ final class GeminiLiveClient: @unchecked Sendable {
                         if wasIntentional {
                             print("[GeminiLive] Receive loop ended after intentional disconnect")
                         } else {
-                            print("[GeminiLive] Unexpected disconnect: \(error.localizedDescription)")
-                            self.dispatchEvent(.unexpectedDisconnect(error))
+                            let structured = self.makeConnectError(from: error, task: task)
+                            if !self.isSetupComplete {
+                                self.stateLock.withLock { self._handshakeFailure = structured }
+                            }
+                            print("[GeminiLive] Unexpected disconnect: \(error.localizedDescription) (httpStatus=\(structured.httpStatus.map { String($0) } ?? "none"), closeCode=\(structured.closeCode.map { String($0) } ?? "none"))")
+                            self.dispatchEvent(.unexpectedDisconnect(structured))
                             self.disconnect()
                         }
                     }

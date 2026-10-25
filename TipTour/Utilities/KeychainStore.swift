@@ -95,10 +95,50 @@ enum KeychainStore {
 
     // MARK: - TipTour-specific keys
 
-    /// Gemini API key the user has pasted directly into the app.
+    /// Legacy single Gemini API key slot. The Gemini key pool migrates
+    /// this into `geminiAPIKeys` on first read; kept so existing installs
+    /// keep working.
     static var geminiAPIKey: String? {
         get { get(forKey: "geminiAPIKey") }
         set { set(newValue ?? "", forKey: "geminiAPIKey") }
+    }
+
+    // MARK: - Gemini key pool
+
+    static let geminiAPIKeysName = "geminiAPIKeys"
+
+    /// All saved Gemini keys in user-managed order. The legacy single-key
+    /// slot migrates into the list on first read so existing installs keep
+    /// their key without re-pasting.
+    static var geminiAPIKeys: [String] {
+        get {
+            var keys = decodeGeminiAPIKeys()
+            if keys.isEmpty, let legacy = geminiAPIKey, !legacy.isEmpty {
+                keys = [legacy]
+                encodeGeminiAPIKeys(keys)
+                delete(forKey: "geminiAPIKey")
+            }
+            return keys
+        }
+        set { encodeGeminiAPIKeys(newValue) }
+    }
+
+    private static func decodeGeminiAPIKeys() -> [String] {
+        guard let raw = get(forKey: geminiAPIKeysName),
+              let data = raw.data(using: .utf8),
+              let list = try? JSONDecoder().decode([String].self, from: data) else { return [] }
+        return list.filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+    }
+
+    private static func encodeGeminiAPIKeys(_ keys: [String]) {
+        let cleaned = keys.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }
+        guard !cleaned.isEmpty,
+              let data = try? JSONEncoder().encode(cleaned),
+              let raw = String(data: data, encoding: .utf8) else {
+            delete(forKey: geminiAPIKeysName)
+            return
+        }
+        set(raw, forKey: geminiAPIKeysName)
     }
 
     /// TypeSafe API key for JEV text commands.

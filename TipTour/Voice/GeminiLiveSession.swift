@@ -175,22 +175,8 @@ final class GeminiLiveSession: ObservableObject {
 
         var startupCompleted = false
         defer { if !startupCompleted { stop() } }
-        let apiKey = try await fetchAPIKey()
-
-        try await RetryWithExponentialBackoff.run(
-            maxAttempts: 3,
-            initialDelay: 0.5,
-            operationName: "GeminiLive.connect"
-        ) { [weak self] in
-            guard let self else {
-                throw NSError(domain: "GeminiLiveSession", code: -13,
-                              userInfo: [NSLocalizedDescriptionKey: "Session deallocated during WebSocket connect"])
-            }
-            try await self.geminiClient.connect(
-                apiKey: apiKey,
-                systemPrompt: self.systemPrompt
-            )
-        }
+        keyPool.reloadKeys()
+        try await connectWithKeyPool()
 
         try Task.checkCancellation()
 
@@ -542,15 +528,73 @@ final class GeminiLiveSession: ObservableObject {
         }
     }
 
-    // MARK: - API Key Fetch
+    // MARK: - API Key Pool
 
-    private func fetchAPIKey() async throws -> String {
-        guard let key = KeychainStore.geminiAPIKey, !key.isEmpty else {
-            throw NSError(domain: "GeminiLiveSession", code: -9, userInfo: [
-                NSLocalizedDescriptionKey: "Add your Gemini API key in Settings → Models to use realtime voice."
-            ])
+    /// Pool of user-supplied Gemini keys with server-honoring cooldowns.
+    private let keyPool = GeminiKeyPool.shared
+
+    /// ID of the key behind the current/last connection. A transient blip
+    /// retries the same key (via `preferring:`) before the pool fails over.
+    private var activeKeyID: String?
+
+    /// Maps whatever the transport threw into classifier input for the pool.
+    private func connectionFailure(from error: Error) -> GeminiConnectionFailure {
+        if let structured = error as? GeminiLiveConnectError {
+            return GeminiConnectionFailure(httpStatus: structured.httpStatus,
+                                           closeCode: structured.closeCode,
+                                           retryAfter: structured.retryAfter,
+                                           message: structured.underlying)
         }
-        return key
+        return GeminiConnectionFailure(message: error.localizedDescription)
+    }
+
+    /// Opens the websocket through the key pool. Each attempt uses the next
+    /// available key; a failure cools (or parks) the key that produced it;
+    /// the loop is strictly bounded so it can never spin. When no key is
+    /// currently usable, the thrown PoolError carries the earliest retry
+    /// time for the UI to surface.
+    private func connectWithKeyPool() async throws {
+        guard keyPool.hasKeys else { throw GeminiKeyPool.PoolError.noKeys }
+        let maxAttempts = min(max(3, keyPool.entries.count * 2), 8)
+        var lastError: Error?
+        var lastTriedID: String?
+        for attempt in 1...maxAttempts {
+            let entry: GeminiKeyPool.Entry
+            do {
+                entry = try keyPool.acquireKey(preferring: lastTriedID)
+            } catch {
+                // No key ready right now — this error names the earliest
+                // retry time, which is more useful than the last raw error.
+                throw error
+            }
+            lastTriedID = entry.id
+            do {
+                try await geminiClient.connect(apiKey: entry.key, systemPrompt: systemPrompt)
+                keyPool.reportSuccess(entry.id)
+                activeKeyID = entry.id
+                return
+            } catch {
+                let failure = connectionFailure(from: error)
+                let kind = GeminiFailureClassifier.classify(failure)
+                keyPool.reportFailure(entry.id, failure: failure)
+                lastError = error
+                print("[GeminiLiveSession] connect with key \(GeminiKeyPool.masked(entry.key)) failed (\(kind)) — attempt \(attempt)/\(maxAttempts)")
+                if kind == .clientError {
+                    // Request-shape problem, not the key — failing over
+                    // would hit the same error on every key.
+                    throw error
+                }
+                if attempt < maxAttempts {
+                    // Jittered backoff, lengthened to the server's retry
+                    // hint when one exists (bounded so start() terminates).
+                    let base: TimeInterval = (kind == .transient || kind == .unknown) ? 0.5 : 2.0
+                    var wait = min(base * pow(2.0, Double(attempt - 1)), 15.0) * Double.random(in: 0.8...1.2)
+                    if let hint = failure.retryAfter { wait = max(wait, min(hint, 60.0)) }
+                    try await Task.sleep(nanoseconds: UInt64(wait * 1_000_000_000))
+                }
+            }
+        }
+        throw lastError ?? GeminiKeyPool.PoolError.allUnavailable(retryAt: keyPool.nextRetryDate)
     }
 
     // MARK: - Mic Capture
@@ -762,9 +806,10 @@ final class GeminiLiveSession: ObservableObject {
         stopMicCapture()
         geminiClient.disconnect()
 
+        var lastTriedID: String? = activeKeyID
         while reconnectAttemptIndex < Self.maxReconnectAttempts {
             reconnectAttemptIndex += 1
-            let backoffSeconds = pow(2.0, Double(reconnectAttemptIndex - 1)) * 0.5
+            let backoffSeconds = pow(2.0, Double(reconnectAttemptIndex - 1)) * 0.5 * Double.random(in: 0.8...1.2)
             print("[GeminiLiveSession] 🔁 reconnect attempt \(reconnectAttemptIndex)/\(Self.maxReconnectAttempts) in \(backoffSeconds)s")
             try? await Task.sleep(nanoseconds: UInt64(backoffSeconds * 1_000_000_000))
 
@@ -776,8 +821,11 @@ final class GeminiLiveSession: ObservableObject {
             }
 
             do {
-                let apiKey = try await fetchAPIKey()
-                try await geminiClient.connect(apiKey: apiKey, systemPrompt: systemPrompt)
+                let entry = try keyPool.acquireKey(preferring: lastTriedID)
+                lastTriedID = entry.id
+                try await geminiClient.connect(apiKey: entry.key, systemPrompt: systemPrompt)
+                keyPool.reportSuccess(entry.id)
+                activeKeyID = entry.id
                 // Gemini's server-side context was lost — force the next
                 // tick to send a fresh frame regardless of hash.
                 lastSentScreenshotHashByScreenLabel.removeAll()
@@ -788,8 +836,28 @@ final class GeminiLiveSession: ObservableObject {
                 reconnectAttemptIndex = 0
                 print("[GeminiLiveSession] ✅ reconnected successfully")
                 return
+            } catch let poolError as GeminiKeyPool.PoolError {
+                // No key is usable right now — surface the earliest retry
+                // time instead of spinning against cooling keys.
+                print("[GeminiLiveSession] reconnect stopped — \(poolError.localizedDescription)")
+                reconnectAttemptIndex = 0
+                onError?(poolError)
+                stop()
+                return
             } catch {
-                print("[GeminiLiveSession] reconnect attempt \(reconnectAttemptIndex) failed: \(error.localizedDescription)")
+                let failure = connectionFailure(from: error)
+                let kind = GeminiFailureClassifier.classify(failure)
+                if let lastTriedID {
+                    keyPool.reportFailure(lastTriedID, failure: failure)
+                }
+                print("[GeminiLiveSession] reconnect attempt \(reconnectAttemptIndex) failed (\(kind)): \(error.localizedDescription)")
+                if kind == .clientError {
+                    // Request-shape problem — retrying any key hits it again.
+                    reconnectAttemptIndex = 0
+                    onError?(error)
+                    stop()
+                    return
+                }
             }
         }
 

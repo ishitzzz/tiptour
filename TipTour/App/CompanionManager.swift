@@ -34,7 +34,13 @@ final class CompanionManager: ObservableObject {
     }
 
     func refreshProviderKeyStatus() {
-        hasSelectedModeKey = !(KeychainStore.get(forKey: selectedMode.keyName) ?? "").isEmpty
+        switch selectedMode {
+        case .gemini:
+            // Gemini voice runs on a pool of user-supplied keys.
+            hasSelectedModeKey = !KeychainStore.geminiAPIKeys.isEmpty
+        case .jev:
+            hasSelectedModeKey = !(KeychainStore.get(forKey: selectedMode.keyName) ?? "").isEmpty
+        }
     }
 
     func setSelectedMode(_ mode: TipTourMode) {
