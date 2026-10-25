@@ -42,11 +42,18 @@ final class JevPointerLoop {
         let message: String
         let steps: Int
         let inputTokens: Int
+        /// OpenRouter-reported spend summed across the run's calls; nil when the
+        /// connection never reported a cost. Never estimated locally.
+        let cost: Double?
+        /// OpenRouter-reported upstream provider of the last call, when present.
+        let provider: String?
     }
 
     func run(task: String, app: String?, maxSteps: Int = 12) async -> Outcome {
         var history: [String] = []
         var inputTokens = 0
+        var totalCost: Double?
+        var lastProvider: String?
         var snapshot = JevStepSnapshot(
             step: 0, task: task, detected: 0, done: 0, absent: 0, bars: [],
             actionKind: "click", note: "Looking at the screen", finished: false,
@@ -56,7 +63,8 @@ final class JevPointerLoop {
             snapshot.finished = true
             snapshot.note = message
             report(snapshot)
-            return Outcome(ok: ok, reason: reason, message: message, steps: history.count, inputTokens: inputTokens)
+            return Outcome(ok: ok, reason: reason, message: message, steps: history.count,
+                inputTokens: inputTokens, cost: totalCost, provider: lastProvider)
         }
         guard maxSteps > 0 else {
             return finish(reason: "step_budget", message: "No actions allowed.")
@@ -104,6 +112,8 @@ final class JevPointerLoop {
                 try Task.checkCancellation()
                 let decision = try JevGrounding.decision(from: answers, pool: request.pool, metrics: metrics)
                 inputTokens += metrics.inputTokens
+                if let cost = metrics.cost { totalCost = (totalCost ?? 0) + cost }
+                if let provider = metrics.provider { lastProvider = provider }
                 snapshot.done = decision.done
                 snapshot.absent = decision.absent
                 snapshot.inputTokens = inputTokens

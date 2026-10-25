@@ -95,7 +95,10 @@ nonisolated struct JevResponse: Decodable {
     }
 }
 
-/// What one call cost and how long it took, for the UI to show honestly.
+/// What one call reported: latency, billed input tokens, and — OpenRouter
+/// only — the upstream provider and cost. Cost is never estimated locally and
+/// there is no spend cap; the UI currently shows latency and input tokens only,
+/// and `JevPointerLoop.Outcome` carries cost/provider through for reporting.
 nonisolated struct JevCallMetrics {
     let milliseconds: Int
     let inputTokens: Int

@@ -47,10 +47,32 @@ struct JevTests {
     }
 
     @Test func selectedModeUsesItsOwnKeyAndShortcut() {
-        #expect(TipTourMode.jev.keyName == "jevAPIKey")
+        // Assert the explicit per-connection config, not the saved default:
+        // `TipTourMode.jev.keyName` follows `JevConnection.saved`, so reading it
+        // here would make the result depend on whatever a previous test saved.
+        #expect(JevConnection.typesafeDirect.keyName == "jevAPIKey")
+        #expect(JevConnection.openRouter.keyName == "openRouterJevAPIKey")
         #expect(TipTourMode.gemini.keyName == "geminiAPIKey")
         #expect(TipTourMode.jev.shortcut == "Ctrl+K")
         #expect(TipTourMode.gemini.shortcut == "Ctrl+Option")
+    }
+
+    @Test func jevKeyGateFollowsTheSavedConnection() {
+        // The key card and the run gate read the key for the *saved* connection,
+        // so saving OpenRouter must gate on the OpenRouter key, never the direct
+        // one. UserDefaults is isolated and restored so this stays deterministic.
+        let key = JevConnection.defaultsKey
+        let previous = UserDefaults.standard.string(forKey: key)
+        defer {
+            if let previous { UserDefaults.standard.set(previous, forKey: key) }
+            else { UserDefaults.standard.removeObject(forKey: key) }
+        }
+        UserDefaults.standard.set(JevConnection.typesafeDirect.rawValue, forKey: key)
+        #expect(TipTourMode.jev.keyName == "jevAPIKey")
+        #expect(!TipTourMode.jev.privacySummary.contains("OpenRouter"))
+        UserDefaults.standard.set(JevConnection.openRouter.rawValue, forKey: key)
+        #expect(TipTourMode.jev.keyName == "openRouterJevAPIKey")
+        #expect(TipTourMode.jev.privacySummary.contains("OpenRouter"))
     }
 
     @Test func requestsStayUnderAPILimitAndKeepNoneOption() {
@@ -97,6 +119,40 @@ struct JevTests {
         }
         #expect(throws: JevError.self) {
             try JevGrounding.decision(from: [:], pool: [candidate()], metrics: metrics)
+        }
+    }
+
+    @Test func pickWithoutProbabilitiesIsRejected() throws {
+        // A choice answer with no probability map is incomplete: the loop must
+        // refuse it rather than act on the bare choice.
+        var payload = try answers()
+        payload["pick"] = try JSONDecoder().decode(JevAnswer.self, from: Data(
+            #"{"choice":"save"}"#.utf8))
+        #expect(throws: JevError.self) {
+            try JevGrounding.decision(from: payload, pool: [candidate()], metrics: metrics)
+        }
+    }
+
+    @Test func invalidProbabilitiesAreRejected() throws {
+        // Out-of-range probability.
+        var over = try answers()
+        over["pick"] = try JSONDecoder().decode(JevAnswer.self, from: Data(
+            #"{"choice":"save","probabilities":{"save":1.5}}"#.utf8))
+        #expect(throws: JevError.self) {
+            try JevGrounding.decision(from: over, pool: [candidate()], metrics: metrics)
+        }
+        // The named choice must be the reported maximum; a response that picks
+        // the weaker option is rejected, not trusted.
+        var notTop = try answers()
+        notTop["pick"] = try JSONDecoder().decode(JevAnswer.self, from: Data(
+            #"{"choice":"save","probabilities":{"save":0.3,"cancel":0.7}}"#.utf8))
+        #expect(throws: JevError.self) {
+            try JevGrounding.decision(from: notTop,
+                pool: [candidate(), candidate("cancel", label: "Cancel")], metrics: metrics)
+        }
+        // Out-of-range noul probabilities are rejected too.
+        #expect(throws: JevError.self) {
+            try JevGrounding.decision(from: answers(absent: 1.4), pool: [candidate()], metrics: metrics)
         }
     }
 

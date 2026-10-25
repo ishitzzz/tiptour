@@ -40,8 +40,11 @@ final class CompanionManager: ObservableObject {
     func setJevConnection(_ connection: JevConnection) {
         guard jevConnection != connection else { return }
         cancelTextCommand()
-        jevConnection = connection
+        // Persist before publishing: the key card reads `JevConnection.saved`
+        // from defaults, so no refresh may observe the new connection with the
+        // old preference still stored.
         TipTourDefaults.jevConnection = connection
+        jevConnection = connection
         refreshProviderKeyStatus()
     }
 
@@ -2681,10 +2684,14 @@ final class CompanionManager: ObservableObject {
         guard textCommandRunID == runID else { return }
         textCommandActivityText = outcome.message
         if !outcome.ok { lastTranscript = outcome.message }
+        var metadata = ["steps": String(outcome.steps), "input_tokens": String(outcome.inputTokens),
+                        "reason": outcome.reason ?? ""]
+        // OpenRouter-reported values only — never estimated, and there is no spend cap.
+        if let cost = outcome.cost { metadata["cost_usd"] = String(cost) }
+        if let provider = outcome.provider { metadata["provider"] = provider }
         PipelineLogStore.shared.record(category: "jev_loop", name: "finished",
             status: outcome.ok ? "ok" : "stopped", message: outcome.message,
-            metadata: ["steps": String(outcome.steps), "input_tokens": String(outcome.inputTokens),
-                       "reason": outcome.reason ?? ""])
+            metadata: metadata)
     }
 
     private func currentPointerTargetAppName() -> String? {

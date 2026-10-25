@@ -57,7 +57,7 @@ Accessibility permission is needed to inspect and control apps. macOS Screen Rec
 
 Requires macOS 14.2+ and a current Xcode with Swift support. Open `tiptour-macos.xcodeproj`, select the TipTour scheme, set your signing team, and build/run in Xcode. Package dependencies resolve through Xcode.
 
-Use Xcode for app builds: terminal `xcodebuild` is prohibited by this repository's workflow to preserve the installed app's macOS permissions. Run `scripts/test-jev.sh` for isolated JEV decision tests without installing or launching the app.
+Use Xcode for app builds: terminal `xcodebuild` is prohibited by this repository's workflow to preserve the installed app's macOS permissions. Run `scripts/test-jev.sh` for isolated JEV decision tests without installing or launching the app. That harness requires macOS and a Swift 6.1+ toolchain (Xcode 16.4+); it checks both and explains what is missing.
 
 ## Code
 

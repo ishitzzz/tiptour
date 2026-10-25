@@ -68,9 +68,14 @@ struct JevConnectionPicker: View {
                         Image(systemName: isSelected ? "checkmark.circle.fill" : "circle").frame(width: 18)
                         VStack(alignment: .leading, spacing: 3) {
                             Text(connection.title).font(.system(size: 12, weight: .semibold))
-                            Text(connection.summary).font(.system(size: 11))
-                                .foregroundColor(DS.Colors.textSecondary)
-                                .fixedSize(horizontal: false, vertical: true)
+                            // Only the selected connection shows its full
+                            // description: the OpenRouter billing note is long,
+                            // and the 300px panel has no scroll room for both.
+                            if isSelected {
+                                Text(connection.summary).font(.system(size: 11))
+                                    .foregroundColor(DS.Colors.textSecondary)
+                                    .fixedSize(horizontal: false, vertical: true)
+                            }
                         }
                         Spacer(minLength: 0)
                     }
