@@ -130,3 +130,29 @@ Both build a scratch SPM package and run in seconds. The key-pool script also ru
 - Real websocket handshake classification against Google's actual Live error responses. In particular: whether macOS exposes the failed upgrade's HTTP status and `Retry-After` to URLSessionWebSocketTask is unverified — if it doesn't, classification falls back to close code and message text and cooldowns use the bounded backoff.
 - The Settings key-list card's and menu bar panel error banner's layout and interactions.
 - End-to-end failover with real keys from your projects.
+
+## Verification status (what has and has not been checked)
+
+- `scripts/test-ask.sh` runs only the pure ask-harness logic (coordinate
+  mapping, session core) in a temporary Swift package, with Swift language
+  mode 5 and a macOS 14 platform setting. Whether it also runs on a Linux
+  Swift toolchain is not proven by this repo; the script text allows it
+  but no run is recorded. It does not cover the native UI, paste, or
+  hotkey code.
+- Not verified on a Mac or against live services: the native UI, the paste
+  attempts, and the app as a whole. No Xcode build or Swift compile of the
+  app has been run for this branch. This applies to all three pieces, not
+  only the Gemini key pool.
+- OpenRouter/JEV: the real endpoint response, the `usage.cost` field, which
+  provider serves a request, and the runtime behaviour are unverified.
+  Cost figures in the app are never estimated locally: they are copied only
+  from values the OpenRouter response itself reports, and even then they are
+  a partial subtotal (successful, grounding-valid, cost-reporting calls
+  only - cancelled, failed or unreported calls are missing), not a spend
+  total, ledger or cap. They are unverified against a live endpoint. The
+  JEV package needs Swift 6.1.
+- Microphone: Gemini Live and the ask harness's speech recognition may both
+  want the mic at once. Concurrent use is untested. Do not assume it is
+  safe; test it and limit it to one at a time until it is checked.
+- If the merge step above conflicts with your local changes, those are
+  yours to resolve by hand. Nothing here auto-resolves them.
