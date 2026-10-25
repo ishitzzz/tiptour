@@ -175,8 +175,12 @@ struct GeminiKeyPoolCard: View {
                         .foregroundColor(DS.Colors.textSecondary)
                         .multilineTextAlignment(.trailing)
                     Button("Remove") {
-                        pool.removeKey(id: entry.id)
-                        onKeyChanged()
+                        if pool.removeKey(id: entry.id) {
+                            status = "Removed."
+                            onKeyChanged()
+                        } else {
+                            status = "Could not remove the key. Try again."
+                        }
                     }
                     .font(.system(size: 11))
                     .pointerCursor()
@@ -217,10 +221,15 @@ struct GeminiKeyPoolCard: View {
             status = "That key is already saved."
             return
         }
-        pool.addKey(trimmed)
-        input = ""
-        status = "Saved."
-        onKeyChanged()
+        // The pool persists first and only then updates in memory — a
+        // failed Keychain write must never show "Saved".
+        if pool.addKey(trimmed) {
+            input = ""
+            status = "Saved."
+            onKeyChanged()
+        } else {
+            status = "Could not save to Keychain. Try again."
+        }
     }
 
     private func statusText(for entry: GeminiKeyPool.Entry) -> String {

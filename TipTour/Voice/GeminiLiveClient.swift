@@ -122,6 +122,11 @@ final class GeminiLiveClient: @unchecked Sendable {
     /// server rejected the upgrade outright.
     private var _handshakeFailure: GeminiLiveConnectError?
 
+    /// The key used by the in-flight connect, kept only so thrown
+    /// transport errors (which can embed the request URL, key included)
+    /// can be scrubbed before logging or storage. Never logged itself.
+    private var _lastConnectKey: String?
+
     /// Periodic no-op ping that prevents Gemini Live's silent idle
     /// disconnect. Per Google's docs the server closes the socket after
     /// roughly 30 minutes of inactivity; we send a benign clientContent
@@ -178,6 +183,7 @@ final class GeminiLiveClient: @unchecked Sendable {
             // either user-initiated (sets the flag again) or unexpected.
             self._wasIntentionallyDisconnected = false
             self._handshakeFailure = nil
+            self._lastConnectKey = apiKey
         }
         task.resume()
         print("[GeminiLive] WebSocket opened")
@@ -386,14 +392,24 @@ final class GeminiLiveClient: @unchecked Sendable {
     /// server rejects the websocket upgrade, the handshake's HTTP response
     /// (status code and any Retry-After header) is still attached to the
     /// task; after an established socket closes, the close code is.
+    ///
+    /// UNVERIFIED on macOS: whether URLSessionWebSocketTask exposes the
+    /// failed upgrade's HTTPURLResponse here is not confirmed against
+    /// Google's servers. When it doesn't, httpStatus/retryAfter are nil
+    /// and classification falls back to the close code and message text —
+    /// nothing upstream may promise a Retry-After was available.
     private func makeConnectError(from error: Error, task: URLSessionWebSocketTask?) -> GeminiLiveConnectError {
         let response = task?.response as? HTTPURLResponse
         let code = task?.closeCode
+        let key = stateLock.withLock { _lastConnectKey }
         return GeminiLiveConnectError(
             httpStatus: response?.statusCode,
             closeCode: (code == .invalid) ? nil : code?.rawValue,
             retryAfter: Self.parseRetryAfter(from: response),
-            underlying: error.localizedDescription
+            // Transport errors can embed the request URL — which carries
+            // the raw key — so the message is scrubbed at this boundary.
+            underlying: GeminiKeyPool.sanitized(error.localizedDescription,
+                                                secrets: key.map { [$0] } ?? [])
         )
     }
 
@@ -426,6 +442,7 @@ final class GeminiLiveClient: @unchecked Sendable {
             _isConnected = false
             _isSetupComplete = false
             _wasIntentionallyDisconnected = true
+            _lastConnectKey = nil
             return taken
         }
         capturedReceiveTask?.cancel()

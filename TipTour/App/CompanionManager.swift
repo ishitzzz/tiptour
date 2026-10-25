@@ -26,6 +26,10 @@ enum CompanionVoiceState {
 @MainActor
 final class CompanionManager: ObservableObject {
     @Published private(set) var selectedMode = TipTourDefaults.selectedMode
+    /// Latest voice-connection problem shown in the panel — all keys
+    /// blocked with the earliest retry time, attempt budget exhausted, or
+    /// a scrubbed transport error. Cleared when a new session starts.
+    @Published private(set) var voiceErrorMessage: String?
     @Published private(set) var hasSelectedModeKey = false
     @Published private(set) var hasCompletedOnboarding = TipTourDefaults.hasCompletedOnboarding
 
@@ -293,8 +297,20 @@ final class CompanionManager: ObservableObject {
             self?.previousInputTranscriptLength = 0
             self?.lastTranscript = nil
         }
-        backend.onError = { error in
-            print("[VoiceBackend] Error: \(error.localizedDescription)")
+        backend.onError = { [weak self] error in
+            guard let self else { return }
+            // PoolErrors carry their own retry guidance and are
+            // secret-free; anything else passes through the pool's
+            // scrubber — transport errors can embed the websocket URL
+            // with the raw key in it.
+            if let poolError = error as? GeminiKeyPool.PoolError {
+                self.voiceErrorMessage = poolError.errorDescription
+                print("[VoiceBackend] Error: \(poolError.localizedDescription)")
+            } else {
+                let message = GeminiKeyPool.shared.sanitized(error.localizedDescription)
+                self.voiceErrorMessage = message
+                print("[VoiceBackend] Error: \(message)")
+            }
         }
     }
 
@@ -2551,6 +2567,7 @@ final class CompanionManager: ObservableObject {
             await Self.prefetchAccessibilityTreeForTargetApp()
         }
 
+        voiceErrorMessage = nil
         voiceStartTask = Task {
             defer { voiceStartTask = nil }
             do {
@@ -2558,8 +2575,15 @@ final class CompanionManager: ObservableObject {
             } catch {
                 guard !Task.isCancelled else { return }
                 voiceState = .idle
-                lastTranscript = error.localizedDescription
-                print("[GeminiLive] Failed to start session: \(error.localizedDescription)")
+                let message: String
+                if let poolError = error as? GeminiKeyPool.PoolError {
+                    message = poolError.errorDescription ?? poolError.localizedDescription
+                } else {
+                    message = GeminiKeyPool.shared.sanitized(error.localizedDescription)
+                }
+                voiceErrorMessage = message
+                lastTranscript = message
+                print("[GeminiLive] Failed to start session: \(message)")
             }
         }
     }

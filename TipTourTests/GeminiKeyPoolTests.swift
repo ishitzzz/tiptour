@@ -239,4 +239,268 @@ struct GeminiKeyPoolTests {
         #expect(GeminiKeyPool.fingerprint(key) == GeminiKeyPool.fingerprint(key))
         #expect(GeminiKeyPool.fingerprint(key) != GeminiKeyPool.fingerprint("other-key"))
     }
+
+    // MARK: - Failover runner (orchestration seam)
+
+    private func noWait(_: Int, _: GeminiKeyFailureKind, _: GeminiConnectionFailure) -> TimeInterval { 0 }
+
+    @Test func acquireRespectsRoundExclusions() throws {
+        let pool = makePool()
+        let a = try pool.acquireKey()
+        let b = try pool.acquireKey(preferring: a.id, excluding: [a.id])
+        #expect(b.id != a.id)
+    }
+
+    @Test func ninePlusKeysAllRateLimitedAreCoveredDistinctlyThenAllBlocked() async throws {
+        let keys = (1...12).map { "key-\($0)-secret-material-\($0)" }
+        let pool = makePool(keys: keys)
+        var attempted: [String] = []
+        do {
+            try await GeminiKeyFailover.run(
+                pool: pool,
+                policy: GeminiFailoverPolicy(maxRounds: 2, maxAttempts: max(4, keys.count * 2), wait: noWait),
+                isCancelled: { false },
+                sleep: { _ in },
+                failureFrom: { _ in GeminiConnectionFailure(httpStatus: 429, retryAfter: 30, message: "quota") },
+                attempt: { entry in
+                    attempted.append(entry.id)
+                    throw NSError(domain: "test", code: 1, userInfo: [NSLocalizedDescriptionKey: "quota"])
+                }
+            )
+            Issue.record("expected the run to throw")
+        } catch let error as GeminiKeyPool.PoolError {
+            guard case .allUnavailable(let retryAt) = error else {
+                Issue.record("expected allUnavailable, got \(error)")
+                return
+            }
+            #expect(retryAt == Date(timeIntervalSince1970: 1_000_000).addingTimeInterval(30))
+        }
+        // Round 1 tried every distinct key exactly once; round 2 found all
+        // of them cooling and stopped with the truthful "all blocked" error
+        // carrying the earliest retry time.
+        #expect(attempted.count == 12)
+        #expect(Set(attempted).count == 12)
+    }
+
+    @Test func transientFailuresAdvanceAcrossAllKeysInsteadOfBurningStrikesOnOne() async throws {
+        // The old flat 8-attempt cap plus same-key preference let one key's
+        // 3 transient strikes consume the budget and skip later ready keys.
+        let keys = (1...6).map { "key-\($0)-secret-material-\($0)" }
+        let pool = makePool(keys: keys)
+        var attempted: [String] = []
+        _ = try? await GeminiKeyFailover.run(
+            pool: pool,
+            policy: GeminiFailoverPolicy(maxRounds: 2, maxAttempts: max(4, keys.count * 2), wait: noWait),
+            isCancelled: { false },
+            sleep: { _ in },
+            failureFrom: { _ in GeminiConnectionFailure(message: "The network connection was lost") },
+            attempt: { entry in
+                attempted.append(entry.id)
+                throw NSError(domain: "test", code: 2, userInfo: [NSLocalizedDescriptionKey: "network down"])
+            }
+        )
+        #expect(Set(attempted).count == 6)   // every key tried in round 1
+        #expect(attempted.count == 12)       // one retry each in round 2
+    }
+
+    @Test func attemptsExhaustedIsDistinctFromAllBlocked() async throws {
+        let pool = makePool()
+        var attemptedCount = 0
+        do {
+            try await GeminiKeyFailover.run(
+                pool: pool,
+                policy: GeminiFailoverPolicy(maxRounds: 2, maxAttempts: 1, wait: noWait),
+                isCancelled: { false },
+                sleep: { _ in },
+                failureFrom: { _ in GeminiConnectionFailure(message: "The network connection was lost") },
+                attempt: { _ in
+                    attemptedCount += 1
+                    throw NSError(domain: "test", code: 3, userInfo: [NSLocalizedDescriptionKey: "network down"])
+                }
+            )
+            Issue.record("expected the run to throw")
+        } catch let error as GeminiKeyPool.PoolError {
+            guard case .attemptsExhausted(let triedKeys) = error else {
+                Issue.record("expected attemptsExhausted, got \(error)")
+                return
+            }
+            #expect(triedKeys == 1)
+        }
+        #expect(attemptedCount == 1)
+        // Keys that were never tried were never blamed — still ready.
+        #expect(pool.entries.allSatisfy { $0.state == .ready })
+    }
+
+    @Test func cancellationErrorNeverPenalizesAKey() async throws {
+        let pool = makePool(keys: ["key-alpha-1111", "key-beta-2222"])
+        var attemptedCount = 0
+        do {
+            try await GeminiKeyFailover.run(
+                pool: pool,
+                policy: GeminiFailoverPolicy(maxRounds: 2, maxAttempts: 10, wait: noWait),
+                isCancelled: { false },
+                sleep: { _ in },
+                failureFrom: { _ in GeminiConnectionFailure(message: "must not be used") },
+                attempt: { _ in
+                    attemptedCount += 1
+                    throw CancellationError()
+                }
+            )
+            Issue.record("expected CancellationError")
+        } catch is CancellationError {
+            // expected
+        }
+        #expect(attemptedCount == 1)
+        #expect(pool.entries.allSatisfy {
+            $0.state == .ready && $0.consecutiveRateLimits == 0 && $0.consecutiveTransients == 0
+        })
+    }
+
+    @Test func urlSessionCancelledNeverPenalizesAKey() async throws {
+        // NSURLErrorCancelled (-999) — user stopped or switched mode
+        // mid-connect. Compared by domain string for Linux portability.
+        let pool = makePool(keys: ["key-alpha-1111", "key-beta-2222"])
+        do {
+            try await GeminiKeyFailover.run(
+                pool: pool,
+                policy: GeminiFailoverPolicy(maxRounds: 2, maxAttempts: 10, wait: noWait),
+                isCancelled: { false },
+                sleep: { _ in },
+                failureFrom: { _ in GeminiConnectionFailure(message: "must not be used") },
+                attempt: { _ in throw NSError(domain: "NSURLErrorDomain", code: -999) }
+            )
+            Issue.record("expected CancellationError")
+        } catch is CancellationError {
+            // expected
+        }
+        #expect(pool.entries.allSatisfy {
+            $0.state == .ready && $0.consecutiveRateLimits == 0 && $0.consecutiveTransients == 0
+        })
+    }
+
+    @Test func staleSessionFlagNeverPenalizesAKey() async throws {
+        // User stopped / mode switched while a connect was in flight: the
+        // liveness flag flips before the error arrives.
+        let pool = makePool(keys: ["key-alpha-1111", "key-beta-2222"])
+        var stale = false
+        do {
+            try await GeminiKeyFailover.run(
+                pool: pool,
+                policy: GeminiFailoverPolicy(maxRounds: 2, maxAttempts: 10, wait: noWait),
+                isCancelled: { stale },
+                sleep: { _ in },
+                failureFrom: { _ in GeminiConnectionFailure(message: "The network connection was lost") },
+                attempt: { _ in
+                    stale = true
+                    throw NSError(domain: "test", code: 4, userInfo: [NSLocalizedDescriptionKey: "network down"])
+                }
+            )
+            Issue.record("expected CancellationError")
+        } catch is CancellationError {
+            // expected
+        }
+        #expect(pool.entries.allSatisfy {
+            $0.state == .ready && $0.consecutiveRateLimits == 0 && $0.consecutiveTransients == 0
+        })
+    }
+
+    @Test func clientErrorStopsImmediatelyWithoutBlamingAnyKey() async throws {
+        struct BadRequest: Error {}
+        let pool = makePool()
+        var attemptedCount = 0
+        do {
+            try await GeminiKeyFailover.run(
+                pool: pool,
+                policy: GeminiFailoverPolicy(maxRounds: 2, maxAttempts: 10, wait: noWait),
+                isCancelled: { false },
+                sleep: { _ in },
+                failureFrom: { _ in GeminiConnectionFailure(httpStatus: 400, message: "bad request") },
+                attempt: { _ in
+                    attemptedCount += 1
+                    throw BadRequest()
+                }
+            )
+            Issue.record("expected BadRequest")
+        } catch is BadRequest {
+            // expected — the original request error, not a pool error
+        }
+        #expect(attemptedCount == 1)
+        #expect(pool.entries.allSatisfy { $0.state == .ready })
+    }
+
+    @Test func secondRoundRetriesAKeyWhoseCooldownExpired() async throws {
+        final class Clock { var date = Date(timeIntervalSince1970: 1_000_000) }
+        let clock = Clock()
+        let pool = GeminiKeyPool(keys: ["key-alpha-1111"])
+        pool.now = { clock.date }
+        var attemptCount = 0
+        let entry = try await GeminiKeyFailover.run(
+            pool: pool,
+            policy: GeminiFailoverPolicy(maxRounds: 2, maxAttempts: 10,
+                                         wait: { _, _, failure in failure.retryAfter ?? 0 }),
+            isCancelled: { false },
+            sleep: { seconds in clock.date = clock.date.addingTimeInterval(seconds) },
+            failureFrom: { _ in GeminiConnectionFailure(httpStatus: 429, retryAfter: 30, message: "quota") },
+            attempt: { _ in
+                attemptCount += 1
+                if attemptCount == 1 {
+                    throw NSError(domain: "test", code: 5, userInfo: [NSLocalizedDescriptionKey: "quota"])
+                }
+            }
+        )
+        #expect(attemptCount == 2)
+        #expect(entry.masked.hasSuffix("1111"))
+        #expect(pool.entries[0].state == .ready)
+    }
+
+    // MARK: - Persistence honesty
+
+    @Test func failedPersistenceDoesNotTouchPoolOrReportSaved() {
+        let pool = makePool(keys: ["key-alpha-1111"])
+        pool.keyListWriter = { _ in false }
+        #expect(pool.addKey("key-beta-2222") == false)
+        #expect(pool.entries.count == 1)   // memory unchanged — UI cannot lie "Saved"
+
+        let id = pool.entries[0].id
+        #expect(pool.removeKey(id: id) == false)
+        #expect(pool.entries.count == 1)   // still there — no fake deletion
+    }
+
+    @Test func successfulPersistenceDrivesReload() {
+        final class Store { var keys: [String] = ["key-alpha-1111"] }
+        let store = Store()
+        let pool = makePool(keys: store.keys)
+        pool.keyListWriter = { store.keys = $0; return true }
+        pool.keyListReader = { store.keys }
+
+        #expect(pool.addKey("key-beta-2222") == true)
+        #expect(store.keys == ["key-alpha-1111", "key-beta-2222"])
+
+        // An outside change is picked up on reload, cooldowns preserved.
+        pool.reportFailure(pool.entries[0].id, failure: GeminiConnectionFailure(httpStatus: 403, message: ""))
+        store.keys.append("key-gamma-3333")
+        pool.reloadKeys()
+        #expect(pool.entries.count == 3)
+        guard case .parked = pool.entries[0].state else {
+            Issue.record("expected first key to stay parked across reload")
+            return
+        }
+    }
+
+    // MARK: - Error scrubbing
+
+    @Test func sanitizerStripsKeyURLsAndSecrets() {
+        let secret = "AIzaSySecretMaterial1234567890abcd"
+        let msg = "The operation couldn't be completed. wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent?key=\(secret)"
+        let out = GeminiKeyPool.sanitized(msg, secrets: [secret])
+        #expect(!out.contains(secret))
+        #expect(!out.contains("key=AIza"))
+
+        // Unknown keys embedded as URL params are scrubbed even without a
+        // supplied secret list.
+        let out2 = GeminiKeyPool.sanitized("connect failed: https://example.com/ws?key=SomeOtherKey123&x=1")
+        #expect(!out2.contains("SomeOtherKey123"))
+        #expect(out2.contains("key=••••"))
+        #expect(out2.contains("&x=1"))
+    }
 }

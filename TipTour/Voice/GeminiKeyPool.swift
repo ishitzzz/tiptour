@@ -132,7 +132,14 @@ final class GeminiKeyPool: GeminiKeyPoolObservable {
 
     enum PoolError: LocalizedError, Equatable {
         case noKeys
+        /// Every key is cooling down or parked — nothing can be tried
+        /// right now. `retryAt` is the earliest cooldown expiry when one
+        /// exists (parked keys have no automatic retry time).
         case allUnavailable(retryAt: Date?)
+        /// The connect run's attempt bounds were reached while keys were
+        /// still being handed out — distinct from `allUnavailable`, where
+        /// every key is actually blocked.
+        case attemptsExhausted(triedKeys: Int)
 
         var errorDescription: String? {
             switch self {
@@ -144,19 +151,29 @@ final class GeminiKeyPool: GeminiKeyPoolObservable {
                     return "All Gemini keys are cooling down or rejected right now. Earliest retry: \(time). Per-key status is in Settings → Models."
                 }
                 return "All Gemini keys are currently unavailable. Check each key's status in Settings → Models."
+            case .attemptsExhausted(let triedKeys):
+                return "Could not connect with any of the \(triedKeys) Gemini key\(triedKeys == 1 ? "" : "s") tried. Per-key status is in Settings → Models — try again."
             }
         }
     }
 
-    private(set) var entries: [Entry] = [] {
-        didSet { emitChange() }
-    }
+    private(set) var entries: [Entry] = []
 
+    /// Emitted AFTER the lock is released by every mutating method. Sending
+    /// synchronously while NSLock is held can deadlock a subscriber that
+    /// reads back into the pool (P3 fix — no didSet on `entries`).
     private func emitChange() {
         #if canImport(Combine)
         objectWillChange.send()
         #endif
     }
+
+    /// Durable key-list persistence. In the app these read from / write to
+    /// the Keychain; tests inject their own. The writer must return true
+    /// only when the list is durably stored — a failed write leaves the
+    /// pool's in-memory state (and any "Saved" UI) untouched.
+    var keyListWriter: (([String]) -> Bool)?
+    var keyListReader: (() -> [String])?
 
     /// Injectable clock for tests.
     var now: () -> Date = Date.init
@@ -165,6 +182,10 @@ final class GeminiKeyPool: GeminiKeyPoolObservable {
     private var nextHandoutIndex = 0
 
     init(keys: [String]) {
+        #if canImport(Security)
+        keyListWriter = { KeychainStore.setGeminiAPIKeys($0) }
+        keyListReader = { KeychainStore.geminiAPIKeys }
+        #endif
         applyKeyList(keys)
     }
 
@@ -173,13 +194,15 @@ final class GeminiKeyPool: GeminiKeyPoolObservable {
     #if canImport(Security)
     /// Shared pool backed by the app's Keychain list.
     static let shared = GeminiKeyPool(keys: KeychainStore.geminiAPIKeys)
-
-    /// Re-reads the stored key list, preserving cooldown state for keys
-    /// that are still present and dropping state for removed ones.
-    func reloadKeys() {
-        applyKeyList(KeychainStore.geminiAPIKeys)
-    }
     #endif
+
+    /// Re-reads the stored key list (when a persistence reader is
+    /// installed), preserving cooldown state for keys that are still
+    /// present and dropping state for removed ones.
+    func reloadKeys() {
+        guard let keyListReader else { return }
+        applyKeyList(keyListReader())
+    }
 
     private func applyKeyList(_ keys: [String]) {
         var seen = Set<String>()
@@ -199,25 +222,35 @@ final class GeminiKeyPool: GeminiKeyPoolObservable {
         }
         nextHandoutIndex = entries.isEmpty ? 0 : nextHandoutIndex % entries.count
         lock.unlock()
+        emitChange()
     }
 
-    #if canImport(Security)
-    func addKey(_ key: String) {
+    /// Adds a key to the durable list first, then the pool. Returns false
+    /// when the durable write fails — in that case nothing in memory or
+    /// the UI changes, so nobody is told "Saved" for a key that didn't
+    /// persist.
+    @discardableResult
+    func addKey(_ key: String) -> Bool {
         let trimmed = key.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return }
+        guard !trimmed.isEmpty else { return false }
         var keys = currentKeys()
-        guard !keys.contains(trimmed) else { return }
+        guard !keys.contains(trimmed) else { return true }
         keys.append(trimmed)
-        KeychainStore.geminiAPIKeys = keys
+        if let keyListWriter, !keyListWriter(keys) { return false }
         applyKeyList(keys)
+        return true
     }
 
-    func removeKey(id: String) {
+    /// Removes a key from the durable list first, then the pool. Returns
+    /// false when the durable write fails — the entry stays in place so
+    /// the UI never claims a deletion that didn't happen.
+    @discardableResult
+    func removeKey(id: String) -> Bool {
         let keys = currentKeys().filter { Self.fingerprint($0) != id }
-        KeychainStore.geminiAPIKeys = keys
+        if let keyListWriter, !keyListWriter(keys) { return false }
         applyKeyList(keys)
+        return true
     }
-    #endif
 
     private func currentKeys() -> [String] {
         lock.lock()
@@ -234,17 +267,23 @@ final class GeminiKeyPool: GeminiKeyPoolObservable {
     // MARK: - Acquisition
 
     /// The next key allowed to attempt a connection right now.
-    /// - Parameter preferredID: the key the caller was already talking to.
-    ///   Returned while still ready so a transient blip retries the same
-    ///   key before the pool fails over. When it is not ready, the handout
-    ///   continues at the key AFTER it so failover actually moves on.
-    func acquireKey(preferring preferredID: String? = nil) throws -> Entry {
+    /// - Parameters:
+    ///   - preferredID: the key the caller was already talking to.
+    ///     Returned while still ready so a transient blip retries the same
+    ///     key before the pool fails over. When it is not ready, the
+    ///     handout continues at the key AFTER it so failover moves on.
+    ///   - excludedIDs: keys already tried in the current failover round.
+    ///     They are skipped for both preference and scanning, so one
+    ///     key's repeated failures can never starve keys that were never
+    ///     tried.
+    func acquireKey(preferring preferredID: String? = nil, excluding excludedIDs: Set<String> = []) throws -> Entry {
         lock.lock()
         defer { lock.unlock() }
         guard !entries.isEmpty else { throw PoolError.noKeys }
         refreshCooldownsLocked()
 
         if let preferredID,
+           !excludedIDs.contains(preferredID),
            let entry = entries.first(where: { $0.id == preferredID }),
            isUsable(entry) {
             return entry
@@ -258,12 +297,22 @@ final class GeminiKeyPool: GeminiKeyPoolObservable {
         }
         for offset in 0..<entries.count {
             let idx = (startIndex + offset) % entries.count
-            if isUsable(entries[idx]) {
+            if !excludedIDs.contains(entries[idx].id), isUsable(entries[idx]) {
                 nextHandoutIndex = entries.index(after: idx) % entries.count
                 return entries[idx]
             }
         }
         throw PoolError.allUnavailable(retryAt: nextRetryDateLocked())
+    }
+
+    /// True when at least one key can attempt a connection right now,
+    /// ignoring any caller-side exclusions. Used to tell "every key is
+    /// blocked" apart from "this round already used the ready keys".
+    var hasUsableKey: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        refreshCooldownsLocked()
+        return entries.contains(where: isUsable)
     }
 
     private func isUsable(_ entry: Entry) -> Bool {
@@ -307,69 +356,120 @@ final class GeminiKeyPool: GeminiKeyPoolObservable {
 
     func reportSuccess(_ id: String) {
         lock.lock()
-        defer { lock.unlock() }
-        guard let idx = entries.firstIndex(where: { $0.id == id }) else { return }
+        guard let idx = entries.firstIndex(where: { $0.id == id }) else {
+            lock.unlock()
+            return
+        }
         entries[idx].state = .ready
         entries[idx].consecutiveRateLimits = 0
         entries[idx].consecutiveTransients = 0
+        lock.unlock()
+        emitChange()
     }
 
     func reportFailure(_ id: String, failure: GeminiConnectionFailure) {
         let kind = GeminiFailureClassifier.classify(failure)
+        var logLine: String?
+        var changed = false
         lock.lock()
-        defer { lock.unlock() }
-        guard let idx = entries.firstIndex(where: { $0.id == id }) else { return }
-        let masked = Self.masked(entries[idx].key)
-        switch kind {
-        case .rateLimited:
-            entries[idx].consecutiveRateLimits += 1
-            let n = entries[idx].consecutiveRateLimits
-            // Server hint wins. Otherwise bounded backoff with jitter; the
-            // 1-hour cap keeps an exhausted per-day quota from spinning
-            // every few seconds (repeated failures escalate the backoff)
-            // without the pool inventing a quota of its own.
-            let backoff = min(20 * pow(2.0, Double(n - 1)), 3600)
-            let cooldown = failure.retryAfter ?? Self.jittered(backoff)
-            let until = now().addingTimeInterval(cooldown)
-            entries[idx].state = .coolingDown(until: until, reason: "Rate limited by Google")
-            print("[GeminiKeyPool] \(masked) rate limited — cooling down \(Int(cooldown))s")
-        case .billingOrCredits:
-            entries[idx].state = .parked(reason: "Billing or prepaid credits exhausted (402). Keys whose projects share one Google billing account can hit this together.")
-            print("[GeminiKeyPool] \(masked) parked — billing/credits (402)")
-        case .keyOrProjectDenied:
-            entries[idx].state = .parked(reason: "Rejected by Google — check the key and its project")
-            print("[GeminiKeyPool] \(masked) parked — key/project denied")
-        case .clientError:
-            // Not the key's fault; leave its state untouched. The session
-            // surfaces this instead of burning through the pool.
-            print("[GeminiKeyPool] \(masked) request error (not key-related): \(failure.message)")
-        case .transient, .unknown:
-            entries[idx].consecutiveTransients += 1
-            let n = entries[idx].consecutiveTransients
-            if n >= 3 {
-                let cooldown = Self.jittered(min(5 * pow(2.0, Double(n - 3)), 60))
-                entries[idx].state = .coolingDown(until: now().addingTimeInterval(cooldown), reason: "Connection trouble")
-                print("[GeminiKeyPool] \(masked) transient failure x\(n) — cooling down \(Int(cooldown))s")
+        if let idx = entries.firstIndex(where: { $0.id == id }) {
+            let masked = Self.masked(entries[idx].key)
+            switch kind {
+            case .rateLimited:
+                entries[idx].consecutiveRateLimits += 1
+                let n = entries[idx].consecutiveRateLimits
+                // Server hint wins. Otherwise bounded backoff with jitter; the
+                // 1-hour cap keeps an exhausted per-day quota from spinning
+                // every few seconds (repeated failures escalate the backoff)
+                // without the pool inventing a quota of its own.
+                let backoff = min(20 * pow(2.0, Double(n - 1)), 3600)
+                let cooldown = failure.retryAfter ?? Self.jittered(backoff)
+                let until = now().addingTimeInterval(cooldown)
+                entries[idx].state = .coolingDown(until: until, reason: "Rate limited by Google")
+                changed = true
+                logLine = "[GeminiKeyPool] \(masked) rate limited — cooling down \(Int(cooldown))s"
+            case .billingOrCredits:
+                entries[idx].state = .parked(reason: "Billing or prepaid credits exhausted (402). Keys whose projects share one Google billing account can hit this together.")
+                changed = true
+                logLine = "[GeminiKeyPool] \(masked) parked — billing/credits (402)"
+            case .keyOrProjectDenied:
+                entries[idx].state = .parked(reason: "Rejected by Google — check the key and its project")
+                changed = true
+                logLine = "[GeminiKeyPool] \(masked) parked — key/project denied"
+            case .clientError:
+                // Not the key's fault; leave its state untouched. The session
+                // surfaces this instead of burning through the pool.
+                logLine = "[GeminiKeyPool] \(masked) request error (not key-related): \(failure.message)"
+            case .transient, .unknown:
+                entries[idx].consecutiveTransients += 1
+                changed = true
+                let n = entries[idx].consecutiveTransients
+                if n >= 3 {
+                    let cooldown = Self.jittered(min(5 * pow(2.0, Double(n - 3)), 60))
+                    entries[idx].state = .coolingDown(until: now().addingTimeInterval(cooldown), reason: "Connection trouble")
+                    logLine = "[GeminiKeyPool] \(masked) transient failure x\(n) — cooling down \(Int(cooldown))s"
+                }
             }
         }
+        lock.unlock()
+        if let logLine { print(logLine) }
+        if changed { emitChange() }
     }
 
     /// Makes every key eligible again (user action in Settings). Parked
     /// keys are re-tried on the next connection attempt.
     func resetStates() {
         lock.lock()
-        defer { lock.unlock() }
         for idx in entries.indices {
             entries[idx].state = .ready
             entries[idx].consecutiveRateLimits = 0
             entries[idx].consecutiveTransients = 0
         }
+        lock.unlock()
+        emitChange()
     }
 
     // MARK: - Helpers
 
     static func masked(_ key: String) -> String {
         "••••" + String(key.suffix(4))
+    }
+
+    /// Scrubs key material out of a message before it is logged, stored,
+    /// or shown in the UI. Transport errors can embed the websocket URL —
+    /// which carries the API key as `?key=` — so anything derived from a
+    /// thrown error passes through here first. Masks every supplied
+    /// secret plus any `key=` query value found in the text.
+    static func sanitized(_ message: String, secrets: [String] = []) -> String {
+        var result = message
+        for secret in secrets where secret.count >= 8 {
+            result = result.replacingOccurrences(of: secret, with: masked(secret))
+        }
+        // Advance past each replacement — the mask itself contains
+        // "key=" and must not match again (that would loop forever).
+        var searchStart = result.startIndex
+        while let range = result.range(of: #"key=[^&\s"']+"#, options: .regularExpression,
+                                       range: searchStart..<result.endIndex) {
+            let replacement = "key=••••"
+            result.replaceSubrange(range, with: replacement)
+            searchStart = result.index(range.lowerBound, offsetBy: replacement.count)
+        }
+        return result
+    }
+
+    /// `message` scrubbed of every key currently in the pool.
+    func sanitized(_ message: String) -> String {
+        Self.sanitized(message, secrets: currentKeys())
+    }
+
+    /// True for deliberate teardown: Task cancellation and URLSession's
+    /// cancelled error (NSURLErrorCancelled, -999). Compared by domain
+    /// string so it works without FoundationNetworking on Linux. A
+    /// cancelled attempt must never cost a key a failure strike.
+    static func isCancellation(_ error: Error) -> Bool {
+        if error is CancellationError { return true }
+        let nsError = error as NSError
+        return nsError.domain == "NSURLErrorDomain" && nsError.code == -999
     }
 
     static func jittered(_ base: TimeInterval) -> TimeInterval {
@@ -386,5 +486,130 @@ final class GeminiKeyPool: GeminiKeyPoolObservable {
             hash = hash &* 0x100000001b3
         }
         return String(format: "%016x", hash)
+    }
+}
+
+// MARK: - Bounded failover orchestration
+
+/// Bounds and pacing for one failover run. Pure value + closures so the
+/// whole policy is testable without any transport.
+struct GeminiFailoverPolicy {
+    /// How many full passes over the ready keys are allowed. Each pass
+    /// tries every distinct ready key at most once, so no key is starved
+    /// by another key's retries and no user key is silently dropped.
+    var maxRounds: Int
+    /// Absolute cap on connect attempts across all rounds.
+    var maxAttempts: Int
+    /// Wait after a failed attempt (attempt index is 1-based in the run).
+    var wait: (_ attempt: Int, _ kind: GeminiKeyFailureKind, _ failure: GeminiConnectionFailure) -> TimeInterval
+
+    /// First connect from a cold session: every ready key gets a fair
+    /// attempt (one per round, two rounds) and waits stay jittered and
+    /// capped so `start()` always terminates. A second round only helps
+    /// keys whose cooldown expired during the run.
+    static func initialConnect(keyCount: Int) -> GeminiFailoverPolicy {
+        GeminiFailoverPolicy(maxRounds: 2, maxAttempts: max(4, keyCount * 2)) { attempt, kind, failure in
+            let base: TimeInterval = (kind == .transient || kind == .unknown) ? 0.5 : 2.0
+            var wait = min(base * pow(2.0, Double(attempt - 1)), 15.0) * Double.random(in: 0.8...1.2)
+            if let hint = failure.retryAfter { wait = max(wait, min(hint, 60.0)) }
+            return wait
+        }
+    }
+
+    /// Transparent reconnect of a live session. The bound derives from
+    /// the pool size — never a flat global cap — so round 1 always covers
+    /// every ready key however many the user saved (a fixed 5-attempt cap
+    /// would starve keys 6+). Round 2 only revisits keys whose cooldown
+    /// expired during the run; when every key is blocked the runner stops
+    /// early with `allUnavailable` and its earliest retry time.
+    static func reconnect(keyCount: Int) -> GeminiFailoverPolicy {
+        GeminiFailoverPolicy(maxRounds: 2, maxAttempts: max(5, keyCount * 2)) { attempt, _, _ in
+            pow(2.0, Double(attempt - 1)) * 0.5 * Double.random(in: 0.8...1.2)
+        }
+    }
+}
+
+/// The testable orchestration seam shared by the initial connect and the
+/// reconnect loop. Transport-agnostic: callers inject the actual connect
+/// (`attempt`), the failure mapping (`failureFrom`), liveness
+/// (`isCancelled`), and sleeping. All pool rules live here exactly once:
+///
+/// - distinct-key coverage: each round tries every ready key at most
+///   once (a flat attempt cap plus same-key preference previously let
+///   one key's 3 transient strikes consume the whole budget and skip
+///   keys that were never tried),
+/// - cancellation (`isCancelled`, `CancellationError`,
+///   NSURLErrorCancelled) rethrows immediately and never costs a key a
+///   failure strike — user stops and mode switches are not key failures,
+/// - `.clientError` rethrows at once: the request shape is wrong, so
+///   failing over would hit the same error on every key,
+/// - terminal errors are truthful: `PoolError.allUnavailable` only when
+///   every key is actually cooling or parked (earliest retry attached
+///   when one exists), `PoolError.attemptsExhausted` when the run's
+///   bounds were reached first.
+enum GeminiKeyFailover {
+
+    @discardableResult
+    static func run(
+        pool: GeminiKeyPool,
+        policy: GeminiFailoverPolicy,
+        isCancelled: () -> Bool,
+        sleep: (TimeInterval) async throws -> Void,
+        failureFrom: (Error) -> GeminiConnectionFailure,
+        attempt: (GeminiKeyPool.Entry) async throws -> Void
+    ) async throws -> GeminiKeyPool.Entry {
+        var triedKeys = Set<String>()
+        var triedThisRound = Set<String>()
+        var lastTriedID: String?
+        var attempts = 0
+        var round = 1
+
+        while true {
+            if isCancelled() || Task.isCancelled { throw CancellationError() }
+            guard attempts < policy.maxAttempts else {
+                throw GeminiKeyPool.PoolError.attemptsExhausted(triedKeys: triedKeys.count)
+            }
+
+            let entry: GeminiKeyPool.Entry
+            do {
+                entry = try pool.acquireKey(preferring: lastTriedID, excluding: triedThisRound)
+            } catch {
+                // acquireKey throws allUnavailable both when every key is
+                // blocked AND when only already-tried-this-round keys are
+                // left. Only the first is truly terminal.
+                guard pool.hasUsableKey else { throw error }
+                round += 1
+                guard round <= policy.maxRounds else {
+                    throw GeminiKeyPool.PoolError.attemptsExhausted(triedKeys: triedKeys.count)
+                }
+                triedThisRound.removeAll()
+                continue
+            }
+
+            attempts += 1
+            triedThisRound.insert(entry.id)
+            triedKeys.insert(entry.id)
+            lastTriedID = entry.id
+
+            do {
+                try await attempt(entry)
+                pool.reportSuccess(entry.id)
+                return entry
+            } catch {
+                // A cancelled or stale caller is not a key failure: no
+                // strike, no cooldown, immediate rethrow.
+                if isCancelled() || Task.isCancelled || GeminiKeyPool.isCancellation(error) {
+                    throw CancellationError()
+                }
+                let failure = failureFrom(error)
+                let kind = GeminiFailureClassifier.classify(failure)
+                pool.reportFailure(entry.id, failure: failure)
+                if kind == .clientError { throw error }
+                if attempts < policy.maxAttempts {
+                    let wait = policy.wait(attempts, kind, failure)
+                    if wait > 0 { try await sleep(wait) }
+                }
+            }
+        }
     }
 }
