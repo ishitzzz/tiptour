@@ -54,8 +54,8 @@ struct GeminiKeyPoolTests {
 
         let second = try pool.acquireKey(preferring: first.id)
         #expect(second.id != first.id)
-        if case .coolingDown = first.state {} else {
-            Issue.record("expected first key to be cooling down, got \\(first.state)")
+        if case .coolingDown = state(of: first.id, in: pool) {} else {
+            Issue.record("expected first key to be cooling down")
         }
     }
 
