@@ -44,7 +44,7 @@ final class AskPreviewPanelManager {
         centerPanelOnCursorScreen()
         panel?.makeKeyAndOrderFront(nil)
         panel?.orderFrontRegardless()
-        NSApp.activate(ignoringOtherApps: true)
+        NSApp.activate()
     }
 
     func hide() {

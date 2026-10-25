@@ -189,9 +189,9 @@ enum AskDraftStager {
         }
 
         let editableRoles: Set<String> = [
-            kAXTextAreaRole,
-            kAXTextFieldRole,
-            kAXComboBoxRole,
+            kAXTextAreaRole as String,
+            kAXTextFieldRole as String,
+            kAXComboBoxRole as String,
             "AXSearchField"
         ]
         return editableRoles.contains(role)
