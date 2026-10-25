@@ -14,7 +14,7 @@ let package = Package(
     swiftLanguageModes: [.v5]
 )
 SWIFT
-cp "$project_dir/TipTour/Jev/JevClient.swift" "$project_dir/TipTour/Jev/JevGrounding.swift" \
+cp "$project_dir/TipTour/Jev/JevClient.swift" "$project_dir/TipTour/Jev/JevGrounding.swift" "$project_dir/TipTour/Jev/JevConnection.swift" \
    "$project_dir/TipTour/Perception/LocalTargetContinuity.swift" "$project_dir/TipTour/Core/TipTourMode.swift" "$project_dir/TipTour/Utilities/KeychainStore.swift" "$test_dir/Sources/JevCore/"
 sed 's/@testable import TipTour/@testable import JevCore/' \
     "$project_dir/TipTourTests/JevTests.swift" > "$test_dir/Tests/JevCoreTests/JevTests.swift"

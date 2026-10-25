@@ -33,6 +33,18 @@ final class CompanionManager: ObservableObject {
         selectedMode.permissionsReady(desktop: hasDesktopPermissions, microphone: hasMicrophonePermission)
     }
 
+    @Published private(set) var jevConnection = TipTourDefaults.jevConnection
+
+    /// Switch where JEV decisions come from. Stops any running JEV task first,
+    /// so a run never changes connection midway.
+    func setJevConnection(_ connection: JevConnection) {
+        guard jevConnection != connection else { return }
+        cancelTextCommand()
+        jevConnection = connection
+        TipTourDefaults.jevConnection = connection
+        refreshProviderKeyStatus()
+    }
+
     func refreshProviderKeyStatus() {
         hasSelectedModeKey = !(KeychainStore.get(forKey: selectedMode.keyName) ?? "").isEmpty
     }
@@ -2610,8 +2622,9 @@ final class CompanionManager: ObservableObject {
 
     func submitTextCommand(_ prompt: String) {
         guard !isTextCommandRunning, !prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
-        guard !(KeychainStore.jevAPIKey ?? "").isEmpty else {
-            textCommandActivityText = "Add your JEV key in Settings → Models"
+        let connection = jevConnection
+        guard !(KeychainStore.get(forKey: connection.keyName) ?? "").isEmpty else {
+            textCommandActivityText = "Add your \(connection.title) JEV key in Settings → Models"
             return
         }
         let runID = UUID()
@@ -2622,7 +2635,7 @@ final class CompanionManager: ObservableObject {
         stopVoiceSession()
         textCommandTask = Task { [weak self] in
             guard let self, self.textCommandRunID == runID, !Task.isCancelled else { return }
-            await self.runTextCommand(prompt, runID: runID)
+            await self.runTextCommand(prompt, runID: runID, connection: connection)
             guard self.textCommandRunID == runID else { return }
             self.finishTextCommand()
         }
@@ -2649,14 +2662,14 @@ final class CompanionManager: ObservableObject {
         textCommandFocusRequest = UUID()
     }
 
-    private func runTextCommand(_ prompt: String, runID: UUID) async {
+    private func runTextCommand(_ prompt: String, runID: UUID, connection: JevConnection) async {
         let trimmedPrompt = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
         PipelineLogStore.shared.record(category: "text_command", name: "submitted",
             status: "received", message: trimmedPrompt)
         voiceState = .processing
         textCommandActivityText = "JEV is looking at the screen"
         textCommandPanelManager.setTrackingFrozen(true)
-        let loop = JevPointerLoop(engine: engineFacade) { [weak self] snapshot in
+        let loop = JevPointerLoop(engine: engineFacade, client: JevClient(connection: connection)) { [weak self] snapshot in
             guard let self, self.textCommandRunID == runID else { return }
             self.jevStep = snapshot
             self.textCommandPanelManager.setResultsHeight(JevStepPanelView.height(for: snapshot))

@@ -65,9 +65,33 @@ nonisolated struct JevResponse: Decodable {
     let model: String?
     let usage: Usage?
 
+    /// OpenRouter adds `provider` and `usage.cost`. Both are read leniently so an
+    /// unexpected shape there can never fail an otherwise valid answer.
+    let provider: String?
+
     struct Usage: Decodable {
         let input_tokens: Int?
         let output_tokens: Int?
+        let cost: Double?
+
+        enum CodingKeys: String, CodingKey { case input_tokens, output_tokens, cost }
+
+        init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            input_tokens = try? container.decodeIfPresent(Int.self, forKey: .input_tokens)
+            output_tokens = try? container.decodeIfPresent(Int.self, forKey: .output_tokens)
+            cost = try? container.decodeIfPresent(Double.self, forKey: .cost)
+        }
+    }
+
+    enum CodingKeys: String, CodingKey { case answers, model, usage, provider }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        answers = try container.decode([String: JevAnswer].self, forKey: .answers)
+        model = try? container.decodeIfPresent(String.self, forKey: .model)
+        usage = try? container.decodeIfPresent(Usage.self, forKey: .usage)
+        provider = try? container.decodeIfPresent(String.self, forKey: .provider)
     }
 }
 
@@ -76,22 +100,31 @@ nonisolated struct JevCallMetrics {
     let milliseconds: Int
     let inputTokens: Int
     let model: String
+    /// Reported by OpenRouter only. Never estimated.
+    var cost: Double? = nil
+    var provider: String? = nil
 }
 
 nonisolated enum JevError: LocalizedError {
     case missingAPIKey
     case tooManyChoices(Int)
+    /// `body` is kept for debugging but never shown, so a key echoed by a server cannot reach the UI.
     case http(status: Int, body: String)
     case malformed(String)
 
     var errorDescription: String? {
         switch self {
         case .missingAPIKey:
-            return "No TypeSafe API key. Add one in TipTour settings to use the Jev loop."
+            return "No API key for the selected JEV connection. Add one in TipTour settings to use the Jev loop."
         case let .tooManyChoices(count):
             return "Jev accepts at most \(JevClient.maxChoices) options in one question; this call had \(count)."
         case let .http(status, body):
-            return "Jev returned \(status): \(body.prefix(300))"
+            switch status {
+            case 401, 403: return "Jev rejected the key (\(status)). Check the key for the selected connection."
+            case 402: return "Jev reported no credit (402). Add credit to your account, then try again."
+            case 429: return "Jev is rate limiting this key (429). Try again shortly."
+            default: return "Jev returned HTTP \(status)."
+            }
         case let .malformed(detail):
             return "Jev sent something unreadable: \(detail)"
         }
@@ -101,20 +134,24 @@ nonisolated enum JevError: LocalizedError {
 // MARK: - Client
 
 actor JevClient {
-    static let endpoint = URL(string: "https://api.typesafe.ai/v1/systemone")!
-    static let model = "jev-latest"
     static let maxChoices = 255
 
-    static let shared = JevClient()
+    /// TypeSafe direct, the original default.
+    static let shared = JevClient(connection: .typesafeDirect)
+
+    let connection: JevConnection
 
     private let session: URLSession
     private let apiKeyProvider: @MainActor @Sendable () -> String?
 
     init(
-        apiKeyProvider: @escaping @MainActor @Sendable () -> String? = { KeychainStore.jevAPIKey },
+        connection: JevConnection = .typesafeDirect,
+        apiKeyProvider: (@MainActor @Sendable () -> String?)? = nil,
         session: URLSession? = nil
     ) {
-        self.apiKeyProvider = apiKeyProvider
+        self.connection = connection
+        let keyName = connection.keyName
+        self.apiKeyProvider = apiKeyProvider ?? { KeychainStore.get(forKey: keyName) }
         if let session {
             self.session = session
         } else {
@@ -144,11 +181,11 @@ actor JevClient {
 
         let body: [String: Any] = [
             "state": state,
-            "model": Self.model,
+            "model": connection.model,
             "questions": questions.mapValues(\.payload)
         ]
 
-        var request = URLRequest(url: Self.endpoint)
+        var request = URLRequest(url: connection.endpoint)
         request.httpMethod = "POST"
         request.setValue("Bearer \(key)", forHTTPHeaderField: "authorization")
         request.setValue("application/json", forHTTPHeaderField: "content-type")
@@ -175,7 +212,9 @@ actor JevClient {
         let metrics = JevCallMetrics(
             milliseconds: elapsed,
             inputTokens: decoded.usage?.input_tokens ?? 0,
-            model: decoded.model ?? Self.model
+            model: decoded.model ?? connection.model,
+            cost: decoded.usage?.cost,
+            provider: decoded.provider
         )
         return (decoded.answers, metrics)
     }

@@ -6,7 +6,7 @@ nonisolated enum TipTourMode: String, CaseIterable, Identifiable {
 
     var id: String { rawValue }
     var title: String { self == .jev ? "JEV" : "Gemini" }
-    var keyName: String { self == .jev ? "jevAPIKey" : "geminiAPIKey" }
+    var keyName: String { self == .jev ? JevConnection.saved.keyName : "geminiAPIKey" }
     var shortcut: String { self == .jev ? "Ctrl+K" : "Ctrl+Option" }
     var systemImage: String { self == .jev ? "text.cursor" : "waveform" }
     var summary: String {
@@ -14,7 +14,7 @@ nonisolated enum TipTourMode: String, CaseIterable, Identifiable {
             : "Talk naturally. Gemini can click, type, and guide you."
     }
     var privacySummary: String {
-        self == .jev ? "Your task and detected screen labels go to TypeSafe. Images stay on your Mac."
+        self == .jev ? JevConnection.saved.privacySummary
             : "Your voice and optional screenshots go to Google."
     }
 

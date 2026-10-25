@@ -107,6 +107,12 @@ enum KeychainStore {
         set { set(newValue ?? "", forKey: "jevAPIKey") }
     }
 
+    /// OpenRouter API key for JEV through OpenRouter. Separate from the TypeSafe key.
+    static var openRouterJevAPIKey: String? {
+        get { get(forKey: "openRouterJevAPIKey") }
+        set { set(newValue ?? "", forKey: "openRouterJevAPIKey") }
+    }
+
     /// Elorian API key for "Learn from a video" tutorial tours. It is not a
     /// mode, so it works alongside whichever mode is selected.
     static let elorianAPIKeyName = "elorianAPIKey"
