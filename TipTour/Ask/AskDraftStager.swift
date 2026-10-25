@@ -23,8 +23,11 @@
 //    consumed a paste. The waits below are heuristics, not guarantees, and
 //    a slow app can miss a paste or read the clipboard after restore. The
 //    result text says so. Universal Clipboard may sync staged contents.
-//  - Retry: AskInsertionProgress records which pieces already went in so a
-//    retry never blindly pastes the same piece twice.
+//  - Retry: AskInsertionProgress records which pieces a paste was already
+//    ATTEMPTED for (an attempt, not confirmed acceptance - the app may
+//    have dropped it), so a retry never blindly pastes the same piece
+//    twice. After any partial failure the user reviews the draft in the
+//    target app and copies anything missing from the preview themselves.
 //
 
 import AppKit
@@ -33,7 +36,8 @@ enum AskDraftStagerError: LocalizedError {
     case accessibilityNotGranted
     case targetAppNotInstalled(bundleIdentifier: String)
     case targetAppDidNotBecomeFrontmost(bundleIdentifier: String)
-    case composerNotEditable(appName: String)
+    case composerNotFocused(appName: String)
+    case composerRoleUnsupported(appName: String, role: String?)
     case focusLostDuringInsertion(appName: String)
     case imageEncodingFailed
     case clipboardChangedDuringInsertion(appName: String, pastedImage: Bool)
@@ -46,14 +50,16 @@ enum AskDraftStagerError: LocalizedError {
             return "No installed app matches bundle identifier \(bundleIdentifier). Pick another target in the ask preview or in Settings."
         case .targetAppDidNotBecomeFrontmost(let bundleIdentifier):
             return "\(bundleIdentifier) did not come to the front, so nothing was pasted. The draft was not inserted."
-        case .composerNotEditable(let appName):
-            return "Couldn't confirm an editable composer is focused in \(appName). Click into its message field yourself, then press Insert as draft again."
+        case .composerNotFocused(let appName):
+            return "Couldn't find a focused message field in \(appName). Click into its message field yourself, then press Insert as draft again. Nothing was pasted."
+        case .composerRoleUnsupported(let appName, let role):
+            return "\(appName)'s focused field is not a multi-line text area (accessibility role: \(role ?? "unknown")), so TipTour will not paste into it. Clicking again cannot change the field's role: copy the draft from the preview yourself, or pick a different target app. Nothing was pasted."
         case .focusLostDuringInsertion(let appName):
-            return "Focus moved in \(appName) after the image was placed, so the question text was not pasted. Check the app before trying again."
+            return "Focus moved in \(appName) after the image paste was attempted, so the question text was not pasted. Check the draft in \(appName): inserting again skips the image and only attempts the question."
         case .imageEncodingFailed:
             return "Could not encode the captured image for the clipboard."
         case .clipboardChangedDuringInsertion(let appName, let pastedImage):
-            let state = pastedImage ? "The image may already be in \(appName)'s draft; check it before retrying (a retry will not paste the image again)." : "Nothing was pasted."
+            let state = pastedImage ? "The image paste was already attempted toward \(appName), and a retry will not attempt it again; check its draft to see whether it landed." : "Nothing was pasted."
             return "You copied something while the draft was being placed, so the insert stopped and your newer clipboard was kept. \(state)"
         }
     }
@@ -133,15 +139,21 @@ enum AskDraftStager {
         let appName = targetApplication.localizedName ?? targetBundleIdentifier
         let targetPID = targetApplication.processIdentifier
 
-        guard let composerFocus = ComposerFocus.capture(in: targetPID) else {
-            throw AskDraftStagerError.composerNotEditable(appName: appName)
+        let composerFocus: ComposerFocus
+        switch ComposerFocus.capture(in: targetPID) {
+        case .focused(let focus):
+            composerFocus = focus
+        case .unsupportedRole(let role, _):
+            throw AskDraftStagerError.composerRoleUnsupported(appName: appName, role: role)
+        case .noFocusedElement:
+            throw AskDraftStagerError.composerNotFocused(appName: appName)
         }
 
         let trimmedText = text.trimmingCharacters(in: .whitespacesAndNewlines)
         let needsImage = !progress.imagePasted
         let needsText = !trimmedText.isEmpty && !progress.textPasted
         guard needsImage || needsText else {
-            return "Everything was already placed in \(appName). Nothing was sent."
+            return "The image and question were already paste-attempted toward \(appName), so nothing was pasted again. Check the draft there and copy anything missing from this preview yourself. Nothing was sent."
         }
 
         // PNG encoding is CPU-heavy; keep it off the main actor.
@@ -198,7 +210,7 @@ enum AskDraftStager {
         let clipboardNote = restored
             ? "Your previous clipboard was restored after a short delay."
             : "Your clipboard kept a newer copy instead of the previous contents."
-        return "Draft placed in \(appName). TipTour can't confirm the app accepted every paste, so check the draft (images are app-dependent). \(clipboardNote) Nothing was sent."
+        return "Paste attempted into \(appName): the image and question went to its composer, but TipTour can't confirm the app accepted them. Check the draft in \(appName) yourself before sending (images are app-dependent). \(clipboardNote) Nothing was sent."
     }
 
     /// Activates the target and verifies it actually came to the front;
@@ -263,18 +275,34 @@ enum AskDraftStager {
 /// field, tab or window in the same app does not pass.
 @MainActor
 private struct ComposerFocus {
+    /// Why a composer capture succeeded or failed. The cases matter for the
+    /// user message: clicking into the field and retrying can fix a missing
+    /// focus, but it can never change a field's unsupported role.
+    enum CaptureResult {
+        case focused(ComposerFocus)
+        case unsupportedRole(role: String?, subrole: String?)
+        case noFocusedElement
+    }
+
     let processIdentifier: pid_t
     let window: AXUIElement
     let element: AXUIElement
 
-    static func capture(in processIdentifier: pid_t) -> ComposerFocus? {
-        guard let (window, element) = currentFocus(in: processIdentifier),
-              let role = stringAttribute(kAXRoleAttribute, of: element) else {
-            return nil
+    static func capture(in processIdentifier: pid_t) -> CaptureResult {
+        guard let (window, element) = currentFocus(in: processIdentifier) else {
+            return .noFocusedElement
+        }
+        // An unreadable role (AX error/timeout) means we cannot confirm
+        // what is focused at all: the retryable "click into the field"
+        // advice applies, not the unsupported-role verdict.
+        guard let role = stringAttribute(kAXRoleAttribute, of: element) else {
+            return .noFocusedElement
         }
         let subrole = stringAttribute(kAXSubroleAttribute, of: element)
-        guard AskComposerPolicy.isComposerRole(role: role, subrole: subrole) else { return nil }
-        return ComposerFocus(processIdentifier: processIdentifier, window: window, element: element)
+        guard AskComposerPolicy.isComposerRole(role: role, subrole: subrole) else {
+            return .unsupportedRole(role: role, subrole: subrole)
+        }
+        return .focused(ComposerFocus(processIdentifier: processIdentifier, window: window, element: element))
     }
 
     func isStillFocused() -> Bool {

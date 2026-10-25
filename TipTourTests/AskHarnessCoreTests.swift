@@ -18,6 +18,77 @@ private final class FakePasteboard: AskStagingPasteboard {
     func userCopies(_ value: String) { contents = value; changeCount += 1 }
 }
 
+
+// MARK: - Speech lifecycle test doubles
+
+/// A manually completed permission prompt: the coordinator's permission
+/// closure parks here until the test grants or denies it.
+private final class PermissionGate: @unchecked Sendable {
+    enum TestError: Error, Equatable { case speechDenied, micDenied, installFailed }
+
+    private var continuation: CheckedContinuation<Void, Error>?
+    var isWaiting: Bool { continuation != nil }
+
+    func wait() async throws {
+        try await withCheckedThrowingContinuation { continuation = $0 }
+    }
+
+    func grant() {
+        guard let continuation else { return }
+        self.continuation = nil
+        continuation.resume()
+    }
+
+    func deny(_ error: TestError) {
+        guard let continuation else { return }
+        self.continuation = nil
+        continuation.resume(throwing: error)
+    }
+}
+
+/// Hands each permission request its own gate, so overlapping starts can be
+/// completed independently (old start vs new start).
+private final class GateQueue: @unchecked Sendable {
+    private(set) var gates: [PermissionGate] = []
+    func next() -> PermissionGate {
+        let gate = PermissionGate()
+        gates.append(gate)
+        return gate
+    }
+}
+
+
+/// Mutable install counter shared with the coordinator's install closure.
+private final class InstallCounter: @unchecked Sendable {
+    var value = 0
+}
+
+private func awaitCondition(
+    _ condition: @escaping () -> Bool,
+    file: StaticString = #filePath,
+    line: UInt = #line
+) async {
+    for _ in 0..<200 where !condition() {
+        try? await Task.sleep(nanoseconds: 10_000_000)
+    }
+    XCTAssertTrue(condition(), "condition never became true", file: file, line: line)
+}
+
+private func assertSuperseded(
+    _ task: Task<Void, Error>,
+    file: StaticString = #filePath,
+    line: UInt = #line
+) async {
+    do {
+        try await task.value
+        XCTFail("expected supersession, got success", file: file, line: line)
+    } catch is AskSpeechStartCoordinator.Supersession {
+        // expected
+    } catch {
+        XCTFail("expected supersession, got \(error)", file: file, line: line)
+    }
+}
+
 final class AskHarnessCoreTests: XCTestCase {
 
     // MARK: clipboard ownership
@@ -163,5 +234,176 @@ final class AskHarnessCoreTests: XCTestCase {
         XCTAssertTrue(text.contains("0.3s"))
         let rejected = AskPreviewCaption.text(completedTimeText: "10:00:01", delaySeconds: 0.1, decision: .rejectedOffDisplay)
         XCTAssertTrue(rejected.contains("not drawn"))
+    }
+
+    // MARK: speech lifecycle seam
+
+    private func makeCoordinator(
+        speech: GateQueue,
+        mic: GateQueue,
+        installCount: InstallCounter
+    ) -> AskSpeechStartCoordinator {
+        AskSpeechStartCoordinator(
+            requestSpeechPermission: { try await speech.next().wait() },
+            requestMicrophonePermission: { try await mic.next().wait() },
+            installRecording: { installCount.value += 1 }
+        )
+    }
+
+    func testGrantedPermissionsInstallExactlyOnce() async {
+        let speech = GateQueue(), mic = GateQueue(), counter = InstallCounter()
+        let coordinator = makeCoordinator(speech: speech, mic: mic, installCount: counter)
+        let start = Task { try await coordinator.start() }
+        await awaitCondition { speech.gates.first?.isWaiting == true }
+        speech.gates[0].grant()
+        await awaitCondition { mic.gates.first?.isWaiting == true }
+        mic.gates[0].grant()
+        try? await start.value
+        XCTAssertEqual(counter.value, 1)
+        XCTAssertFalse(coordinator.hasPendingStart)
+    }
+
+    func testReleaseWhileSpeechPermissionPendingNeverInstalls() async {
+        let speech = GateQueue(), mic = GateQueue(), counter = InstallCounter()
+        let coordinator = makeCoordinator(speech: speech, mic: mic, installCount: counter)
+        let start = Task { try await coordinator.start() }
+        await awaitCondition { speech.gates.first?.isWaiting == true }
+        coordinator.invalidatePendingStart()  // user released mid-prompt
+        speech.gates[0].grant()
+        await assertSuperseded(start)
+        XCTAssertEqual(counter.value, 0, "no recording after stop supersession")
+        XCTAssertFalse(coordinator.hasPendingStart)
+    }
+
+    func testReleaseWhileMicPermissionPendingNeverInstalls() async {
+        let speech = GateQueue(), mic = GateQueue(), counter = InstallCounter()
+        let coordinator = makeCoordinator(speech: speech, mic: mic, installCount: counter)
+        let start = Task { try await coordinator.start() }
+        await awaitCondition { speech.gates.first?.isWaiting == true }
+        speech.gates[0].grant()
+        await awaitCondition { mic.gates.first?.isWaiting == true }
+        coordinator.invalidatePendingStart()  // user released on the second prompt
+        mic.gates[0].grant()
+        await assertSuperseded(start)
+        XCTAssertEqual(counter.value, 0)
+    }
+
+    func testNewStartSupersedesPendingStartAndInstallsExactlyOnce() async {
+        let speech = GateQueue(), mic = GateQueue(), counter = InstallCounter()
+        let coordinator = makeCoordinator(speech: speech, mic: mic, installCount: counter)
+        let first = Task { try await coordinator.start() }
+        await awaitCondition { speech.gates.first?.isWaiting == true }
+
+        // New press: a second start before the first one's prompt resolves.
+        let second = Task { try await coordinator.start() }
+        await awaitCondition { speech.gates.count == 2 && speech.gates[1].isWaiting }
+
+        speech.gates[0].grant()  // late answer for the old start
+        await assertSuperseded(first)
+
+        speech.gates[1].grant()
+        await awaitCondition { mic.gates.first?.isWaiting == true }
+        mic.gates[0].grant()
+        try? await second.value
+        XCTAssertEqual(counter.value, 1, "only the newer start may install")
+    }
+
+    func testSpeechDenialSurfacesEvenAfterRelease() async {
+        let speech = GateQueue(), mic = GateQueue(), counter = InstallCounter()
+        let coordinator = makeCoordinator(speech: speech, mic: mic, installCount: counter)
+        let start = Task { try await coordinator.start() }
+        await awaitCondition { speech.gates.first?.isWaiting == true }
+        coordinator.invalidatePendingStart()  // released, then the prompt was denied
+        speech.gates[0].deny(.speechDenied)
+        do {
+            try await start.value
+            XCTFail("expected speech denial")
+        } catch let error as PermissionGate.TestError {
+            XCTAssertEqual(error, .speechDenied, "denial is durable state and must surface, not be swallowed as supersession")
+        } catch {
+            XCTFail("expected speech denial, got \(error)")
+        }
+        XCTAssertEqual(counter.value, 0)
+        XCTAssertFalse(coordinator.hasPendingStart)
+    }
+
+    func testMicDenialThrowsAndNeverInstalls() async {
+        let speech = GateQueue(), mic = GateQueue(), counter = InstallCounter()
+        let coordinator = makeCoordinator(speech: speech, mic: mic, installCount: counter)
+        let start = Task { try await coordinator.start() }
+        await awaitCondition { speech.gates.first?.isWaiting == true }
+        speech.gates[0].grant()
+        await awaitCondition { mic.gates.first?.isWaiting == true }
+        mic.gates[0].deny(.micDenied)
+        do {
+            try await start.value
+            XCTFail("expected mic denial")
+        } catch let error as PermissionGate.TestError {
+            XCTAssertEqual(error, .micDenied)
+        } catch {
+            XCTFail("expected mic denial, got \(error)")
+        }
+        XCTAssertEqual(counter.value, 0)
+        XCTAssertFalse(coordinator.hasPendingStart)
+    }
+
+    func testInstallFailurePropagatesAndClearsPending() async {
+        let speech = GateQueue(), mic = GateQueue()
+        let coordinator = AskSpeechStartCoordinator(
+            requestSpeechPermission: { try await speech.next().wait() },
+            requestMicrophonePermission: { try await mic.next().wait() },
+            installRecording: { throw PermissionGate.TestError.installFailed }
+        )
+        let start = Task { try await coordinator.start() }
+        await awaitCondition { speech.gates.first?.isWaiting == true }
+        speech.gates[0].grant()
+        await awaitCondition { mic.gates.first?.isWaiting == true }
+        mic.gates[0].grant()
+        do {
+            try await start.value
+            XCTFail("expected install failure")
+        } catch let error as PermissionGate.TestError {
+            XCTAssertEqual(error, .installFailed)
+        } catch {
+            XCTFail("expected install failure, got \(error)")
+        }
+        XCTAssertFalse(coordinator.hasPendingStart)
+    }
+
+    func testInvalidateWithoutPendingStartIsHarmlessAndNextStartWorks() async {
+        let speech = GateQueue(), mic = GateQueue(), counter = InstallCounter()
+        let coordinator = makeCoordinator(speech: speech, mic: mic, installCount: counter)
+        coordinator.invalidatePendingStart()
+        coordinator.invalidatePendingStart()
+        let start = Task { try await coordinator.start() }
+        await awaitCondition { speech.gates.first?.isWaiting == true }
+        speech.gates[0].grant()
+        await awaitCondition { mic.gates.first?.isWaiting == true }
+        mic.gates[0].grant()
+        try? await start.value
+        XCTAssertEqual(counter.value, 1)
+    }
+
+    // MARK: transcript sink epochs
+
+    func testStaleRecordingResultsNeverContaminateNextTranscript() {
+        let sink = AskTranscriptSink()
+        let first = sink.beginNewRecording()
+        XCTAssertTrue(sink.accept("old words", isFinal: false, fromEpoch: first))
+        let second = sink.beginNewRecording()
+        XCTAssertFalse(sink.accept("old final", isFinal: true, fromEpoch: first))
+        sink.markFinal(fromEpoch: first)
+        XCTAssertEqual(sink.finish(), "", "stale epoch must not write into the new session")
+        XCTAssertFalse(sink.didReceiveFinal, "stale final flag must not leak")
+        XCTAssertTrue(sink.accept("new words", isFinal: true, fromEpoch: second))
+        XCTAssertEqual(sink.finish(), "new words")
+        XCTAssertTrue(sink.didReceiveFinal)
+    }
+
+    func testFinishTrimsWhitespace() {
+        let sink = AskTranscriptSink()
+        let epoch = sink.beginNewRecording()
+        sink.accept("  hello there\n", isFinal: false, fromEpoch: epoch)
+        XCTAssertEqual(sink.finish(), "hello there")
     }
 }

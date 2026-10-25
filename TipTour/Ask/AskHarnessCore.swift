@@ -140,9 +140,13 @@ final class AskClipboardOwnership<Pasteboard: AskStagingPasteboard> {
 
 // MARK: - Insertion progress (retry without blind duplicate paste)
 
-/// Which pieces of the current draft were already pasted into the target.
-/// A retry after a partial failure skips what already went in, instead of
-/// blindly pasting the image (or text) a second time.
+/// Which pieces of the current draft a paste was already ATTEMPTED for in
+/// the target. An attempt is not acceptance: the target app may have
+/// dropped the paste, and TipTour cannot observe that. User-facing text
+/// must never describe these flags as confirmed placement. A retry after a
+/// partial failure skips pieces already attempted (no blind duplicates);
+/// the user reviews the draft in the target app and copies anything
+/// missing from the preview themselves.
 struct AskInsertionProgress: Equatable {
     var imagePasted = false
     var textPasted = false
@@ -230,5 +234,146 @@ enum AskPreviewCaption {
             parts.append("Markings were not drawn: your scribble was not entirely on the captured display.")
         }
         return parts.joined(separator: " ")
+    }
+}
+
+
+// MARK: - Speech recording lifecycle
+
+/// Orders a single push-to-talk recording start against stop()/cancel and
+/// later starts. The problem it solves: starting speech recognition
+/// suspends on the Speech and microphone permission prompts, and a release
+/// or cancel (stop) - or a newer press (another start) - can land while
+/// the start is still suspended. Without an intent generation, the late
+/// start would resume and install a live microphone engine after its
+/// session already ended, unowned; a following start could then leak a
+/// second engine.
+///
+/// Every stage revalidates the start intent after each await, and once
+/// more immediately before install, so a superseded start never records.
+/// Confined to one serial context (the transcriber's MainActor in
+/// production; tests drive it one suspension at a time).
+final class AskSpeechStartCoordinator {
+    /// A stop/cancel or a newer start invalidated this start while it was
+    /// suspended on a permission prompt. Expected control flow: callers
+    /// must not surface it to the user.
+    enum Supersession: Error {
+        case superseded
+    }
+
+    /// Throwing marks denial/failure with the caller's own domain error,
+    /// which propagates even when the start was meanwhile superseded:
+    /// a denied permission is durable state the user must hear about.
+    private let requestSpeechPermission: () async throws -> Void
+    private let requestMicrophonePermission: () async throws -> Void
+    private let installRecording: () throws -> Void
+
+    private var intentVersion = 0
+    /// True while the current start is between entry and a finished install.
+    private(set) var hasPendingStart = false
+
+    init(
+        requestSpeechPermission: @escaping () async throws -> Void,
+        requestMicrophonePermission: @escaping () async throws -> Void,
+        installRecording: @escaping () throws -> Void
+    ) {
+        self.requestSpeechPermission = requestSpeechPermission
+        self.requestMicrophonePermission = requestMicrophonePermission
+        self.installRecording = installRecording
+    }
+
+    func start() async throws {
+        intentVersion &+= 1
+        let intent = intentVersion
+        hasPendingStart = true
+
+        do {
+            try await requestSpeechPermission()
+        } catch {
+            clearPending(intent)
+            throw error
+        }
+        try validate(intent)
+
+        do {
+            try await requestMicrophonePermission()
+        } catch {
+            clearPending(intent)
+            throw error
+        }
+
+        // Final gate, immediately before install: no recording may begin
+        // after stop()/cancel or after a newer start took over. There is
+        // no suspension point between this check and installRecording().
+        try validate(intent)
+
+        do {
+            try installRecording()
+        } catch {
+            clearPending(intent)
+            throw error
+        }
+        clearPending(intent)
+    }
+
+    /// stop()/cancel: kills any start still waiting on a permission prompt,
+    /// so it can never install audio afterwards. Idempotent: harmless when
+    /// nothing is pending or when called repeatedly.
+    func invalidatePendingStart() {
+        intentVersion &+= 1
+        hasPendingStart = false
+    }
+
+    private func validate(_ intent: Int) throws {
+        guard intent == intentVersion else {
+            throw Supersession.superseded
+        }
+    }
+
+    private func clearPending(_ intent: Int) {
+        if intent == intentVersion { hasPendingStart = false }
+    }
+}
+
+// MARK: - Epoch-keyed transcript sink
+
+/// Holds the latest transcript for the current recording epoch. Results
+/// from a superseded recording are dropped instead of contaminating the
+/// next session's transcript: recognition callbacks arrive asynchronously
+/// and can outlive the stop() that cancelled their task.
+final class AskTranscriptSink {
+    private(set) var epoch = 0
+    private(set) var latest = ""
+    private(set) var didReceiveFinal = false
+
+    /// Starts a new recording epoch and clears prior state. Returns the
+    /// epoch the new recording's callbacks must present.
+    @discardableResult
+    func beginNewRecording() -> Int {
+        epoch &+= 1
+        latest = ""
+        didReceiveFinal = false
+        return epoch
+    }
+
+    /// Accepts a transcript update only from the current epoch.
+    @discardableResult
+    func accept(_ text: String, isFinal: Bool, fromEpoch candidate: Int) -> Bool {
+        guard candidate == epoch else { return false }
+        latest = text
+        if isFinal { didReceiveFinal = true }
+        return true
+    }
+
+    /// Marks the stream finished (e.g. recognition ended with an error),
+    /// but only from the current epoch.
+    func markFinal(fromEpoch candidate: Int) {
+        guard candidate == epoch else { return }
+        didReceiveFinal = true
+    }
+
+    /// The transcript to publish, trimmed.
+    func finish() -> String {
+        latest.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 }

@@ -115,15 +115,40 @@ final class AskHarnessController: ObservableObject {
 
         Task { [weak self, transcriber] in
             do {
-                try await transcriber.start()
+                let epoch = try await transcriber.start()
+                await MainActor.run {
+                    guard let self else { return }
+                    // The session ended or was superseded while start was
+                    // in flight: this recording has no owner, so tear it
+                    // down - but only if it is still the current one. A
+                    // newer session's recording (different epoch) must
+                    // never be stopped here.
+                    guard self.sessionGate.isCurrent(generation),
+                          self.sessionGate.phase == .capturing else {
+                        Task { [transcriber] in
+                            _ = await transcriber.stopIfCurrent(epoch)
+                        }
+                        return
+                    }
+                }
             } catch {
                 await MainActor.run {
-                    guard let self, self.sessionGate.isCurrent(generation),
-                          self.sessionGate.phase == .capturing else { return }
-                    self.sessionGate.cancel()
-                    self.isCapturing = false
-                    self.activeSession?.capture.cancel()
-                    self.activeSession = nil
+                    guard let self else { return }
+                    // stop()/cancel or a newer press superseded this start
+                    // while it waited on a prompt: expected control flow,
+                    // nothing to report.
+                    if error is AskSpeechStartCoordinator.Supersession { return }
+                    // A genuine failure (permission denied, recognizer
+                    // gone, engine failed to start) is durable state: tell
+                    // the user even if they already released, so the
+                    // missing preview is explained instead of silent.
+                    if self.sessionGate.isCurrent(generation),
+                       self.sessionGate.phase == .capturing {
+                        self.sessionGate.cancel()
+                        self.isCapturing = false
+                        self.activeSession?.capture.cancel()
+                        self.activeSession = nil
+                    }
                     self.companionManager?.presentAskHarnessHint(error.localizedDescription)
                 }
             }
