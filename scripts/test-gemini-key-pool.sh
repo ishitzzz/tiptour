@@ -15,9 +15,13 @@ let package = Package(
     swiftLanguageModes: [.v5]
 )
 SWIFT
-# Only the pool itself: it gates Combine/Security/Keychain behind canImport,
-# so this package also builds with a plain Linux Swift toolchain.
+# The pool gates Combine/Security/Keychain behind canImport. On macOS those
+# sections compile and need KeychainStore.swift; on Linux they drop out and
+# KeychainStore (Security-only) must stay out of the package.
 cp "$project_dir/TipTour/Voice/GeminiKeyPool.swift" "$test_dir/Sources/KeyPoolCore/"
+if [[ "$(uname)" == "Darwin" ]]; then
+    cp "$project_dir/TipTour/Utilities/KeychainStore.swift" "$test_dir/Sources/KeyPoolCore/"
+fi
 sed 's/@testable import TipTour/@testable import KeyPoolCore/' \
     "$project_dir/TipTourTests/GeminiKeyPoolTests.swift" > "$test_dir/Tests/KeyPoolCoreTests/GeminiKeyPoolTests.swift"
 swift test --package-path "$test_dir"
