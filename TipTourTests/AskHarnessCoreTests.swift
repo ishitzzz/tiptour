@@ -415,6 +415,10 @@ final class AskCopyModeTests: XCTestCase {
 
     func testImageAndTextFallsBackToImageWhenQuestionIsEmpty() {
         XCTAssertEqual(AskCopyMode.imageAndText.flavors(hasText: false), [.png])
+        let confirmation = AskCopyMode.imageAndText.confirmation(hasText: false)
+        XCTAssertTrue(confirmation.contains("image only"))
+        XCTAssertTrue(confirmation.contains("question is empty"))
+        XCTAssertNotEqual(confirmation, AskCopyMode.imageOnly.confirmation(hasText: false))
     }
 
     func testTextOnlyWithEmptyQuestionCopiesNothing() {
@@ -424,5 +428,32 @@ final class AskCopyModeTests: XCTestCase {
 
     func testImageOnlyIgnoresText() {
         XCTAssertEqual(AskCopyMode.imageOnly.flavors(hasText: true), [.png])
+    }
+}
+
+final class AskCopyRequestGateTests: XCTestCase {
+    func testEditInvalidatesPendingEncodingEvenIfTextIsChangedBack() {
+        var gate = AskCopyRequestGate()
+        let pendingCopy = gate.begin()
+        gate.invalidate()
+        gate.invalidate()
+        XCTAssertFalse(gate.isCurrent(pendingCopy))
+    }
+
+    func testSlowerOldCopyCannotOverwriteNewerCopyOrPublishOldStatus() {
+        var gate = AskCopyRequestGate()
+        let slowImageCopy = gate.begin()
+        let newerTextCopy = gate.begin()
+        XCTAssertTrue(gate.isCurrent(newerTextCopy))
+        XCTAssertFalse(gate.isCurrent(slowImageCopy))
+    }
+
+    func testClosedOrReplacedPreviewInvalidatesPendingCopy() {
+        var gate = AskCopyRequestGate()
+        let pendingCopy = gate.begin()
+        gate.invalidate()
+        XCTAssertFalse(gate.isCurrent(pendingCopy))
+        let freshPreviewCopy = gate.begin()
+        XCTAssertTrue(gate.isCurrent(freshPreviewCopy))
     }
 }

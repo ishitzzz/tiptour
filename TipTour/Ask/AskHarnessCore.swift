@@ -140,7 +140,7 @@ final class AskClipboardOwnership<Pasteboard: AskStagingPasteboard> {
 
 // MARK: - Clipboard handoff (copy only, any target app)
 
-/// What a copy-to-clipboard action puts on the pasteboard. `.both` writes
+/// What a copy-to-clipboard action puts on the pasteboard. `.imageAndText` writes
 /// one pasteboard item carrying PNG and text flavors; which flavor an app
 /// reads is the app's choice, so image-only and text-only exist as exact
 /// alternatives.
@@ -162,6 +162,9 @@ enum AskCopyMode: Equatable {
         case [.png, .text]:
             return "Copied the marked image and your question together. Paste where you like. If the app only takes one of them, use Copy image or Copy text. Your clipboard now holds this copy."
         case [.png]:
+            if self == .imageAndText {
+                return "Copied the marked image only: your question is empty. Add a question and copy again to include it. Your clipboard now holds the image."
+            }
             return "Copied the marked image. Paste where you like. Your clipboard now holds it."
         case [.text]:
             return "Copied your question. Paste where you like. Your clipboard now holds it."
@@ -169,6 +172,20 @@ enum AskCopyMode: Equatable {
             return "Nothing to copy: the question is empty."
         }
     }
+}
+
+/// A copy may encode an image off the main actor. Only the latest request
+/// for the unchanged preview may write the clipboard or publish a result.
+struct AskCopyRequestGate {
+    private(set) var generation = 0
+
+    mutating func begin() -> Int {
+        generation += 1
+        return generation
+    }
+
+    mutating func invalidate() { generation += 1 }
+    func isCurrent(_ candidate: Int) -> Bool { candidate == generation }
 }
 
 // MARK: - Insertion progress (retry without blind duplicate paste)

@@ -1,13 +1,14 @@
-# Ask harness: scribble + voice to any app's composer (draft)
+# Ask harness: scribble + voice clipboard handoff
 
-Branch: `feature/ask-scribble-harness` (built on upstream `c1d2731`).
+Branch: `fix/clipboard-copy-state` (built on clipboard candidate `699d4bc`).
 
 Hold **Ctrl+Option+Shift**, say your question out loud, release. TipTour
 captures the screen under your cursor, draws your scribble (the
 Ctrl+Shift focus highlight) onto the image, transcribes what you said
-on-device, and opens a preview. From the preview you pick a target app
-and press **Insert as draft**: the image and the question text land in
-that app's composer. Nothing is ever sent - sending stays with you.
+on-device, and opens a preview. Use **Copy both**, **Copy image** or
+**Copy text**, then paste yourself. The receiving app decides whether it
+accepts image, text or both. Direct insertion is optional and off by
+default. Nothing is ever sent - sending stays with you.
 
 Scribble first with the existing Ctrl+Shift highlight, then add Option
 while keeping Ctrl+Shift held: the highlight commits and the capture
@@ -41,7 +42,7 @@ starts with those markings. Capturing without a scribble works too.
   `requiresOnDeviceRecognition = true`. If the active locale reports
   `supportsOnDeviceRecognition == false`, the flow stops with an
   explanation instead of sending audio to a network service.
-- **Clipboard handoff (any app)**: the preview has **Copy both**, **Copy image** and **Copy text**. They leave the marked image and/or your question on the system clipboard (the clipboard is not restored afterwards, so the copy stays until you paste) and work with any app, site or guide. **Copy both** writes one item with PNG and text flavors; which flavor an app reads is the app's choice, so use the single-flavor buttons when an app takes only one. Direct insertion into a named app is optional and off by default (no ChatGPT default).
+- **Clipboard handoff (any app)**: the preview has **Copy both**, **Copy image** and **Copy text**. They leave the marked image and/or your question on the system clipboard (the clipboard is not restored afterwards, so the copy stays until you paste) for you to paste into your chosen app or site; acceptance depends on that app or site. **Copy both** writes one item with PNG and text flavors; which flavor an app reads is the app's choice, so use the single-flavor buttons when an app takes only one. Direct insertion into a named app is optional and off by default (no ChatGPT default). Copy both with an empty question explicitly reports image-only copying. Editing the preview clears the old copy confirmation. A pending copy is invalidated by edits, closing the preview or a newer copy request, and cannot overwrite the clipboard after that invalidation; copy again after editing. A copy failure is reported, not shown as success.
 - **Preview**: floating panel with the image, editable transcript and a
   target-app picker (running apps plus the configured default).
 - **Insertion**: the target app is activated and verified frontmost. The
@@ -68,9 +69,10 @@ starts with those markings. Capturing without a scribble works too.
    - **Accessibility** (already used) for the global hotkey and Cmd+V.
    - **Microphone** and **Speech Recognition** (new prompt on first use)
      for on-device transcription.
-3. Settings > Advanced > **Ask Draft Target App** sets the default
-   target bundle identifier (`com.openai.chat` = ChatGPT Mac app). The
-   preview's picker overrides it per use and remembers the choice.
+3. Settings > Advanced > **Ask Draft Target App** is empty by default.
+   Leave it empty to copy and paste yourself. For optional direct
+   insertion, enter an installed app's bundle identifier or pick a
+   running app in the preview; the choice is remembered.
 
 ## Honest limits
 

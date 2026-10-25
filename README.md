@@ -35,7 +35,7 @@ Settings also contains desktop action access, screenshot privacy, permissions, a
 
 ## Ask with a scribble (this branch)
 
-Hold **Ctrl+Option+Shift**, speak your question, release. TipTour captures the screen you scribbled on (Ctrl+Shift highlight), transcribes the question on-device, shows a preview, and inserts image + text as a **draft** into the composer of an app you choose (default: the ChatGPT Mac app). Nothing is sent automatically, and no provider keys or network calls are involved. Details and setup: [docs/ask-harness.md](docs/ask-harness.md).
+Hold **Ctrl+Option+Shift**, speak your question, release. TipTour captures the screen you scribbled on (Ctrl+Shift highlight), transcribes the question on-device, shows a preview, and lets you **Copy both**, **Copy image** or **Copy text** to paste yourself. The receiving app or site decides whether it accepts image, text or both. Direct insertion is optional and off by default, with no preset target app. Nothing is sent automatically, and no provider keys or network calls are involved. Details and setup: [docs/ask-harness.md](docs/ask-harness.md).
 
 ## Learn from a video
 

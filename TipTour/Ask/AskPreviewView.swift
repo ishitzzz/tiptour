@@ -76,7 +76,7 @@ struct AskPreviewView: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
 
-            Text("Copy puts the marked image and your question on the clipboard so you can paste them into any app, site or guide. Nothing is sent. Transcription ran on this Mac.")
+            Text("Copy puts the marked image and/or question on your clipboard. The app or site you paste into decides whether it accepts image, text or both. Nothing is sent. Transcription ran on this Mac.")
                 .font(.system(size: 11))
                 .foregroundColor(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -90,12 +90,12 @@ struct AskPreviewView: View {
                 Spacer()
 
                 Button("Copy image") { controller.copyToClipboard(.imageOnly) }
-                    .disabled(controller.draftImage == nil)
+                    .disabled(controller.isInserting || controller.draftImage == nil)
                 Button("Copy text") { controller.copyToClipboard(.textOnly) }
-                    .disabled(controller.draftText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    .disabled(controller.isInserting || controller.draftText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                 Button("Copy both") { controller.copyToClipboard(.imageAndText) }
                     .keyboardShortcut(.defaultAction)
-                    .disabled(controller.draftImage == nil)
+                    .disabled(controller.isInserting || controller.draftImage == nil)
 
                 Button(action: { controller.insertDraft() }) {
                     if controller.isInserting {

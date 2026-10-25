@@ -24,13 +24,20 @@ struct AskTargetApp: Identifiable, Equatable {
 @MainActor
 final class AskHarnessController: ObservableObject {
     @Published private(set) var isCapturing = false
-    @Published var draftImage: NSImage?
-    @Published var draftText: String = ""
+    @Published var draftImage: NSImage? {
+        didSet { invalidateCopyForPreviewEdit() }
+    }
+    @Published var draftText: String = "" {
+        didSet {
+            if draftText != oldValue { invalidateCopyForPreviewEdit() }
+        }
+    }
     @Published var targetBundleIdentifier: String = TipTourDefaults.askTargetBundleIdentifier
     @Published private(set) var targetApps: [AskTargetApp] = []
     @Published private(set) var insertionStatus: String?
     @Published private(set) var copyConfirmation: String?
     @Published private(set) var isInserting = false
+    @Published private(set) var isCopying = false
     @Published private(set) var captureCaption: String = ""
 
     private weak var companionManager: CompanionManager?
@@ -50,6 +57,8 @@ final class AskHarnessController: ObservableObject {
     private var activeSession: ActiveSession?
     private var finishTask: Task<Void, Never>?
     private var insertionProgress = AskInsertionProgress()
+    private var copyRequestGate = AskCopyRequestGate()
+    private var hasCopyOutcome = false
 
     init(companionManager: CompanionManager) {
         self.companionManager = companionManager
@@ -267,18 +276,61 @@ final class AskHarnessController: ObservableObject {
         TipTourDefaults.askTargetBundleIdentifier = targetBundleIdentifier
     }
 
+    private func invalidateCopyForPreviewEdit() {
+        copyRequestGate.invalidate()
+        if isCopying || hasCopyOutcome {
+            insertionStatus = "The preview changed. Copy again to put the current image and question on the clipboard."
+        }
+        isCopying = false
+        hasCopyOutcome = false
+        copyConfirmation = nil
+    }
+
     func copyToClipboard(_ mode: AskCopyMode) {
-        guard !isInserting,
-              let image = draftImage?.cgImage(forProposedRect: nil, context: nil, hints: nil) else { return }
+        guard !isInserting else {
+            insertionStatus = "Wait for insertion to finish, then copy again."
+            return
+        }
+        let generation = copyRequestGate.begin()
+        hasCopyOutcome = true
+        copyConfirmation = nil
+        isCopying = false
         let text = draftText
+        let hasText = !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        guard !mode.flavors(hasText: hasText).isEmpty else {
+            insertionStatus = mode.confirmation(hasText: false)
+            return
+        }
+        // Text-only must not depend on converting the preview image.
+        let image = mode == .textOnly ? nil
+            : draftImage?.cgImage(forProposedRect: nil, context: nil, hints: nil)
+        guard mode == .textOnly || image != nil else {
+            insertionStatus = AskDraftStagerError.copyImageUnavailable.localizedDescription
+            return
+        }
+        isCopying = true
+        insertionStatus = "Copying to clipboard..."
         Task { [weak self] in
             do {
-                let message = try await AskClipboardHandoff.copy(image: image, text: text, mode: mode)
-                self?.copyConfirmation = message
-                self?.insertionStatus = nil
+                let message = try await AskClipboardHandoff.copy(
+                    image: image, text: text, mode: mode,
+                    isCurrent: { [weak self] in
+                        self?.copyRequestGate.isCurrent(generation) == true
+                    }
+                )
+                guard let self, self.copyRequestGate.isCurrent(generation) else { return }
+                self.isCopying = false
+                if mode == .imageAndText && !hasText {
+                    self.insertionStatus = message
+                } else {
+                    self.copyConfirmation = message
+                    self.insertionStatus = nil
+                }
             } catch {
-                self?.copyConfirmation = nil
-                self?.insertionStatus = error.localizedDescription
+                guard let self, self.copyRequestGate.isCurrent(generation) else { return }
+                self.isCopying = false
+                self.copyConfirmation = nil
+                self.insertionStatus = error.localizedDescription
             }
         }
     }
@@ -291,6 +343,9 @@ final class AskHarnessController: ObservableObject {
         guard !isInserting,
               let image = draftImage?.cgImage(forProposedRect: nil, context: nil, hints: nil) else { return }
 
+        copyRequestGate.invalidate()
+        isCopying = false
+        hasCopyOutcome = false
         isInserting = true
         insertionStatus = nil
         copyConfirmation = nil
