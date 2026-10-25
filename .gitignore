@@ -15,3 +15,7 @@ releases/
 # Local profiling and JEV experiments
 *.profraw
 harnesses/jev-loop/*.jsonl
+
+# Python cache
+__pycache__/
+*.pyc

@@ -35,8 +35,9 @@ fallback path.
 ```bash
 git fetch origin
 command -v python3
-git show origin/fix/combined-docs-safe-update:scripts/local-backup.py > /tmp/tiptour-local-backup.py
-python3 /tmp/tiptour-local-backup.py
+HELPER=$(mktemp /tmp/tiptour-local-backup.XXXXXX)   # unique, private (0600), never an existing file
+git show origin/fix/combined-docs-safe-update:scripts/local-backup.py > "$HELPER"
+python3 "$HELPER"
 ```
 
 Keep the backup folder private: never zip, upload, push or paste it.
