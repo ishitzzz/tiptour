@@ -29,13 +29,17 @@ starts with those markings. Capturing without a scribble works too.
 - **Preview**: floating panel with the image, editable transcript and a
   target-app picker (running apps plus the configured default).
 - **Insertion**: the target app is activated and verified frontmost
-  (aborting if not, so nothing lands in the wrong window), then image
-  and text are staged on the pasteboard and pasted with a synthesized
-  Cmd+V to the target's pid. Return is never pressed. The previous
-  clipboard contents are restored only if the pasteboard's changeCount
-  shows nothing else was copied while staged; a skipped restore is
-  logged and reported. Keep in mind Universal Clipboard can sync staged
-  content to your other devices during the short staging window.
+  (aborting if not, so nothing lands in the wrong window), and its
+  focused accessibility element must be an editable text role before
+  anything is pasted - if the composer can't be confirmed, the insert
+  fails closed and asks you to click into the message field and retry.
+  Focus is re-verified between the image and text pastes. Image and text
+  are staged on the pasteboard and pasted with a synthesized Cmd+V to
+  the target's pid. Return is never pressed. The previous clipboard
+  contents are restored only if the pasteboard's changeCount shows
+  nothing else was copied while staged; a skipped restore is logged and
+  reported. Keep in mind Universal Clipboard can sync staged content to
+  your other devices during the short staging window.
 
 ## Setup on your Mac
 
@@ -61,7 +65,11 @@ starts with those markings. Capturing without a scribble works too.
 - "On-device" covers transcription only. The target app may sync its own
   drafts, and macOS may sync the staged clipboard - see above.
 - The trail fades on screen a few seconds after you finish scribbling;
-  the composited image always shows the markings at full opacity, using
-  the last scribble from the previous 30 seconds.
+  the composited image always shows the markings at full opacity. The
+  screenshot and the markings are frozen at the same moment (hotkey
+  press); a scribble committed more than ~6 seconds earlier is not
+  reused, so markings never overlay content that changed since. The
+  preview labels the capture time and flags when markings came from an
+  earlier scribble.
 - The harness is independent of the Gemini/JEV modes and uses no
   provider keys or network calls.
