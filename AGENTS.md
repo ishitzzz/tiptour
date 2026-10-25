@@ -15,6 +15,8 @@ JEV is the default selected mode. Onboarding is Choose mode → Save that mode�
 
 No Claude/Hermes integration, separate Flash Lite matcher, image-generation service, screen-recording pipeline, or Worker proxy is bundled. Do not reintroduce them without an explicit user request.
 
+**Ask harness** (`feature/ask-scribble-harness` branch, any mode, no provider keys): Ctrl+Option+Shift captures the cursor screen with the committed focus highlight composited on, transcribes the held spoken question on-device (`SFSpeechRecognizer`, `requiresOnDeviceRecognition`; fail closed when unsupported), previews image + text, and inserts them as a draft into a chosen app's composer (Settings → Advanced target bundle, default `com.openai.chat`). Insertion verifies frontmost app and an editable focused AX element, pastes via Cmd+V, never presses Return. Microphone and Speech Recognition permissions are needed when it is used, not only for Gemini.
+
 ## Architecture
 
 - `CompanionManager` persists the selected mode, initializes Gemini only when used, gates mode-specific shortcuts, and coordinates hotkeys, provider sessions, focus highlight, permissions, and overlay state. It owns the cancellable JEV task and prevents overlapping text/voice runs.
