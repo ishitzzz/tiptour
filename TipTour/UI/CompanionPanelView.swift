@@ -175,9 +175,12 @@ struct CompanionPanelView: View {
                     .font(.system(size: 11)).foregroundColor(DS.Colors.textTertiary)
                     .fixedSize(horizontal: false, vertical: true)
             case .key:
+                if companionManager.selectedMode == .jev {
+                    JevConnectionPicker(companionManager: companionManager)
+                }
                 ProviderKeyCard(mode: companionManager.selectedMode,
                     onKeyChanged: companionManager.refreshProviderKeyStatus)
-                    .id(companionManager.selectedMode)
+                    .id("\(companionManager.selectedMode.rawValue)-\(companionManager.jevConnection.rawValue)")
             case .permissions:
                 Text(companionManager.selectedMode == .jev
                     ? "JEV needs access to see screen controls and click them. No microphone needed."

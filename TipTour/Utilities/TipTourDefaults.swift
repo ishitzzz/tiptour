@@ -43,6 +43,11 @@ enum TipTourDefaults {
         set { UserDefaults.standard.set(newValue.rawValue, forKey: "selectedMode") }
     }
 
+    static var jevConnection: JevConnection {
+        get { JevConnection.saved }
+        set { UserDefaults.standard.set(newValue.rawValue, forKey: JevConnection.defaultsKey) }
+    }
+
     static var hasCompletedOnboarding: Bool {
         get { bool(for: .hasCompletedOnboarding) }
         set { set(newValue, for: .hasCompletedOnboarding) }
