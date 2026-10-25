@@ -15,6 +15,8 @@ What it does:
 - Scans backed-up files with fixed secret patterns and reports only the file
   names that matched; it never prints file contents. The scan is a safety
   net, not a guarantee.
+- The ignored-file name list covers common key/secret names but is NOT
+  complete; do not treat it as a guarantee every secret was included.
 - Prints only file names and counts.
 - Exits nonzero on any error. A nonzero exit means STOP: do not run any
   git add, switch, merge or commit afterwards.
@@ -28,8 +30,9 @@ import sys
 import time
 
 SKIP_PREFIXES = ("DerivedData/", ".build/", "build/", "node_modules/", ".git/")
-SECRET_NAME_PARTS = (".env", ".pem", ".key", "secret", "credential",
-                     "apikey", "api-key", "token")
+SECRET_NAME_PARTS = (".env", ".dev.vars", ".pem", ".key", ".p8", ".p12",
+                     ".xcconfig", ".mobileprovision", ".netrc", "id_rsa",
+                     "secret", "credential", "apikey", "api-key", "token")
 MAX_SECRET_IGNORED_BYTES = 5 * 1024 * 1024
 MAX_SCAN_BYTES = 5 * 1024 * 1024
 SECRET_CONTENT = [

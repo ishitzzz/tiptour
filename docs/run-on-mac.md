@@ -26,11 +26,14 @@ staged. STOP and report those names only - do not commit, reset or unstage
 them, and do not continue.
 
 2. Fetch, then run the private backup helper. It copies modified/untracked
-files plus small secret-named ignored files into a chmod-700 folder outside
-git (recording deletions and symlinks without copying them), verifies every
-copied file's hash, and scans contents privately, reporting names only.
-If python3 is missing or the helper exits nonzero, STOP - there is no
-fallback path.
+files plus small ignored files with common secret names (`.env*`,
+`.dev.vars`, `*.pem`, `*.key`, `*.p8`, `*.p12`, `*.xcconfig`,
+`*.mobileprovision`, `.netrc`, `id_rsa`, `*secret*`, `*credential*`,
+`*apikey*`, `*token*` - a common-names list, not a complete guarantee)
+into a chmod-700 folder outside git (recording deletions and symlinks
+without copying them), verifies every copied file's hash, and scans
+contents privately, reporting names only. If python3 is missing or the
+helper exits nonzero, STOP - there is no fallback path.
 
 ```bash
 git fetch origin
@@ -64,11 +67,14 @@ git switch -c "local-integration-combined-$TS"   # unique branch from your curre
 git merge origin/fix/combined-docs-safe-update
 ```
 
-If the merge conflicts, STOP and report the conflicted file names only.
-Do not use `-X theirs/ours`, do not drop the key pool, and do not resolve
-by hand - we will work through the conflicts together. The combined branch
-reorganised files into subfolders, so conflicts with flat local paths are
-possible. Your old branch and the private backup keep your state.
+If the merge stops for ANY reason - a conflict, or git refusing because
+local changes or untracked files would be overwritten - STOP and report
+the affected file names only. Do not stash, reset, or checkout over
+anything, do not use `-X theirs/ours`, do not drop the key pool, and do
+not resolve by hand - we will work through it together. The combined
+branch reorganised files into subfolders, so conflicts with flat local
+paths are possible. Your old branch and the private backup keep your
+state.
 
 ## Get the code
 
