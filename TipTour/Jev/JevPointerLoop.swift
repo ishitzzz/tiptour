@@ -42,11 +42,15 @@ final class JevPointerLoop {
         let message: String
         let steps: Int
         let inputTokens: Int
-        /// OpenRouter-reported spend summed across the run's calls; nil when the
-        /// connection never reported a cost. Never estimated locally.
-        let cost: Double?
-        /// OpenRouter-reported upstream provider of the last call, when present.
-        let provider: String?
+        /// Partial subtotal of OpenRouter-reported costs, summed only over calls
+        /// that succeeded AND passed grounding validation AND reported a cost.
+        /// Cancelled, failed or unreported calls are missing, so this can
+        /// undercount real spend: it is not a ledger, a total, or a budget cap.
+        /// Never estimated locally; nil when no call reported a cost.
+        let reportedCostSubtotal: Double?
+        /// Provider of the last call that reported one; stays from an earlier
+        /// call when later calls omit it. Nil when no call reported a provider.
+        let lastReportedProvider: String?
     }
 
     func run(task: String, app: String?, maxSteps: Int = 12) async -> Outcome {
@@ -64,7 +68,7 @@ final class JevPointerLoop {
             snapshot.note = message
             report(snapshot)
             return Outcome(ok: ok, reason: reason, message: message, steps: history.count,
-                inputTokens: inputTokens, cost: totalCost, provider: lastProvider)
+                inputTokens: inputTokens, reportedCostSubtotal: totalCost, lastReportedProvider: lastProvider)
         }
         guard maxSteps > 0 else {
             return finish(reason: "step_budget", message: "No actions allowed.")
@@ -112,6 +116,9 @@ final class JevPointerLoop {
                 try Task.checkCancellation()
                 let decision = try JevGrounding.decision(from: answers, pool: request.pool, metrics: metrics)
                 inputTokens += metrics.inputTokens
+                // Accumulated only after grounding validation succeeds, so a
+                // billed call whose decision fails validation is not counted
+                // here; the subtotal stays a partial observed figure.
                 if let cost = metrics.cost { totalCost = (totalCost ?? 0) + cost }
                 if let provider = metrics.provider { lastProvider = provider }
                 snapshot.done = decision.done

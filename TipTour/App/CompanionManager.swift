@@ -2717,8 +2717,10 @@ final class CompanionManager: ObservableObject {
         var metadata = ["steps": String(outcome.steps), "input_tokens": String(outcome.inputTokens),
                         "reason": outcome.reason ?? ""]
         // OpenRouter-reported values only — never estimated, and there is no spend cap.
-        if let cost = outcome.cost { metadata["cost_usd"] = String(cost) }
-        if let provider = outcome.provider { metadata["provider"] = provider }
+        // The subtotal is partial (successful, grounding-valid, cost-reporting calls
+        // only) and cancellation can skip this event, so this log is not a cost ledger.
+        if let cost = outcome.reportedCostSubtotal { metadata["reported_cost_subtotal_usd"] = String(cost) }
+        if let provider = outcome.lastReportedProvider { metadata["last_reported_provider"] = provider }
         PipelineLogStore.shared.record(category: "jev_loop", name: "finished",
             status: outcome.ok ? "ok" : "stopped", message: outcome.message,
             metadata: metadata)

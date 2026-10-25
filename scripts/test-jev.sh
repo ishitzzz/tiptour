@@ -5,8 +5,8 @@
 # compiler failure):
 #   - macOS: the copied sources use Apple's Security framework (KeychainStore)
 #     and CoreGraphics, so this harness is not portable to Linux.
-#   - Swift toolchain >= 6.1 (Xcode 16.4+): the sources use type-level
-#     `nonisolated`, which earlier toolchains reject.
+#   - Swift toolchain >= 6.1: the sources use type-level `nonisolated`,
+#     which earlier toolchains reject.
 set -euo pipefail
 
 if [ "$(uname -s)" != "Darwin" ]; then
@@ -14,7 +14,7 @@ if [ "$(uname -s)" != "Darwin" ]; then
     exit 1
 fi
 if ! command -v swift >/dev/null 2>&1; then
-    echo "error: no Swift toolchain found. Install Xcode 16.4+ (Swift 6.1) or select it with xcode-select." >&2
+    echo "error: no Swift toolchain found. Install a Swift 6.1+ toolchain or select it with xcode-select." >&2
     exit 1
 fi
 swift_version="$(swift --version 2>/dev/null | sed -n 's/.*Swift version \([0-9][0-9.]*\).*/\1/p' | head -n 1)"
