@@ -8,56 +8,66 @@ ask-harness clipboard copy fixes. The notes below cover all three.
 
 If this repo is already on your Mac with your own edits, do not hard-reset,
 stash-drop, or `git add -A` / `git add -u`. Tracked files can hold keys too,
-so check contents, not only filenames.
+so check contents, not only filenames. Push NOTHING: no local backup,
+integration or combined branch is ever pushed.
 
-1. Look first. Note your current branch (or detached HEAD) and what changed:
+1. Look first. Note your current branch (or detached HEAD) and what changed.
+   Set the timestamp ONCE; later steps reuse it:
 
 ```bash
 cd tiptour
+TS=$(date +%Y%m%d-%H%M%S)
 git status --short --branch
-git diff --stat
+git diff --cached --name-only
 ```
 
-2. Back up everything uncommitted to a private folder outside git, with
-restricted permissions. This includes any key files. Do not zip or upload it.
+If `git diff --cached --name-only` lists anything, something is already
+staged. STOP and report those names only - do not commit, reset or unstage
+them, and do not continue.
+
+2. Fetch, then run the private backup helper. It copies modified/untracked
+files plus small secret-named ignored files into a chmod-700 folder outside
+git (recording deletions and symlinks without copying them), verifies every
+copied file's hash, and scans contents privately, reporting names only.
+If python3 is missing or the helper exits nonzero, STOP - there is no
+fallback path.
 
 ```bash
-B="$HOME/tiptour-backup-$(date +%Y%m%d-%H%M%S)"
-mkdir -m 700 "$B"
-git ls-files -m -o --exclude-standard -z | xargs -0 -I{} cp --parents -p {} "$B"/
-git ls-files -o -i --exclude-standard -z | xargs -0 -I{} cp --parents -p {} "$B"/
+git fetch origin
+command -v python3
+git show origin/fix/combined-docs-safe-update:scripts/local-backup.py > /tmp/tiptour-local-backup.py
+python3 /tmp/tiptour-local-backup.py
 ```
 
-(On macOS use `ditto` or `rsync -R` if `cp --parents` is missing.)
+Keep the backup folder private: never zip, upload, push or paste it.
 
 3. Optional local safety branch. Stage only files you have reviewed
-(`git diff <file>`) and that contain no keys, by name:
+(`git diff <file>`) and that contain no keys, by name. Skip any file with
+`.env*`, `*.pem`, `*.key`, `*secret*`, `*credential*`, `*apikey*`, or
+key-looking contents; those stay in the private backup only. If a tracked
+file already holds a key, do not commit it: keep the private copy and ask
+for help. Skip this step entirely when there is nothing safe to commit.
 
 ```bash
-TS=$(date +%Y%m%d-%H%M%S)
-git branch "backup-$TS"                              # marks the current commit, no checkout
-git switch -c "local-integration-backup-$TS"         # new unique branch from where you are (works on detached HEAD too)
+git branch "backup-$TS"                       # marks the current commit, no checkout
+git switch -c "local-integration-backup-$TS"  # unique branch from where you are (detached HEAD works)
 git add path/to/reviewed-file1 path/to/reviewed-file2
+git diff --cached --name-only                 # must list EXACTLY those files; anything else: STOP, report names only
 git commit -m "Local state before combined branch"
 ```
-
-Skip any file with `.env*`, `*.pem`, `*.key`, `*secret*`, `*credential*`,
-`*apikey*`, or key-looking contents. They stay in the private backup only.
-If a tracked file already holds a key, do not commit it: keep the private
-copy and ask for help.
 
 4. Bring in the combined branch without replacing your work:
 
 ```bash
-git fetch origin
-git switch -c "local-integration-combined-$TS"    # new unique branch from your current state
+git switch -c "local-integration-combined-$TS"   # unique branch from your current state
 git merge origin/fix/combined-docs-safe-update
 ```
 
-If the merge conflicts, stop. Do not use `-X theirs/ours` and do not drop
-the key pool. Your old branch and the private backup keep your state.
-The combined branch reorganised files into subfolders, so conflicts with
-flat local paths are possible.
+If the merge conflicts, STOP and report the conflicted file names only.
+Do not use `-X theirs/ours`, do not drop the key pool, and do not resolve
+by hand - we will work through the conflicts together. The combined branch
+reorganised files into subfolders, so conflicts with flat local paths are
+possible. Your old branch and the private backup keep your state.
 
 ## Get the code
 
@@ -133,11 +143,17 @@ Both build a scratch SPM package and run in seconds. The key-pool script also ru
 ## Verification status (what has and has not been checked)
 
 - `scripts/test-ask.sh` runs only the pure ask-harness logic (coordinate
-  mapping, session core) in a temporary Swift package, with Swift language
-  mode 5 and a macOS 14 platform setting. Whether it also runs on a Linux
-  Swift toolchain is not proven by this repo; the script text allows it
-  but no run is recorded. It does not cover the native UI, paste, or
-  hotkey code.
+  mapping, session generations, clipboard ownership with a fake pasteboard,
+  copy-mode flavors, the copy-request gate, copy-outcome reset rules,
+  composer role policy, chord provenance, markings and sizing decisions)
+  in a temporary Swift package, with Swift language mode 5 and a macOS 14
+  platform setting. During review on 2026-10-25, the same package the
+  script builds (same Package.swift, sources and test rewrite) passed
+  41/41 tests on the official Swift 6.1.2 Linux toolchain via a direct
+  XCTest run; the script itself was not executed end-to-end there. The
+  key-pool suite builds on Linux but was not re-run in that pass (its
+  author previously recorded 19/19 passing on Linux Swift 6.1.2). These
+  tests do not cover the native UI, paste, or hotkey code.
 - Not verified on a Mac or against live services: the native UI, the paste
   attempts, and the app as a whole. No Xcode build or Swift compile of the
   app has been run for this branch. This applies to all three pieces, not
