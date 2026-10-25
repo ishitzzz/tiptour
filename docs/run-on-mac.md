@@ -1,14 +1,40 @@
-# Run this branch locally on your Mac
+# Run the combined branch locally on your Mac
+
+This branch (`feature/combined-jev-or-keypool-clipboard`) combines three
+reviewed pieces on top of `main`: the Gemini multi-key pool, the
+TypeSafe-Jev-via-OpenRouter connection option, and the ask-harness
+clipboard copy fixes. The notes below cover all three.
+
+## Updating an existing local build without losing your changes
+
+If you already have this repo checked out on your Mac with your own
+edits (tracked or untracked), keep them safe first - do not hard-reset
+or stash-drop them:
+
+```bash
+cd tiptour
+git checkout -b backup-before-combined   # new local safety branch
+git add -A                               # stage tracked AND untracked changes
+git commit -m "Local state before combined branch"
+git checkout main                        # or whatever you had checked out
+git fetch origin
+git checkout feature/combined-jev-or-keypool-clipboard
+```
+
+Your old state stays recoverable on `backup-before-combined`. If you want
+your local edits on top of the combined branch later, merge or cherry-pick
+from that backup branch.
+
 
 ## Get the code
 
 ```bash
 git clone https://github.com/ishitzzz/tiptour.git
 cd tiptour
-git checkout feature/gemini-key-pool
+git checkout feature/combined-jev-or-keypool-clipboard
 ```
 
-Or, in an existing clone: `git fetch origin && git checkout feature/gemini-key-pool`.
+Or, in an existing clone: `git fetch origin && git checkout feature/combined-jev-or-keypool-clipboard`.
 
 ## Build
 
@@ -18,9 +44,28 @@ Or, in an existing clone: `git fetch origin && git checkout feature/gemini-key-p
 
 ## Permissions the app will ask for
 
-- **Accessibility** — inspect and control apps (both modes).
-- **Screen Recording / Screen Content** — screenshots and local screen detection.
-- **Microphone** — Gemini voice mode only.
+- **Accessibility** — inspect and control apps (both modes); also the ask-harness hotkey and optional paste.
+- **Screen Recording / Screen Content** — screenshots and local screen detection; also the ask-harness capture.
+- **Microphone** — Gemini voice mode, and the ask harness's spoken question.
+- **Speech Recognition** — ask harness only; transcription is on-device.
+
+## Ask harness (scribble + voice, copy to clipboard)
+
+Hold **Ctrl+Option+Shift**, say your question, release. The preview opens
+with the captured screen and your transcribed question; use **Copy both**,
+**Copy image** or **Copy text**, then paste where you want. Direct
+insertion into an app is optional and off by default (Settings → Advanced
+→ Ask Direct Insert App). Details and honest limits:
+[docs/ask-harness.md](docs/ask-harness.md). Not yet run on a Mac.
+
+## JEV through OpenRouter (optional)
+
+Settings → Models → JEV connection: TypeSafe direct (default, unchanged)
+or OpenRouter. Each connection has its own Keychain key. The OpenRouter
+connection bills input tokens to your OpenRouter balance (output free);
+no automatic fallback or top-up. Per-call latency and input tokens show
+in the JEV step view; a run's partial reported cost subtotal and last
+reported provider go to the pipeline log (not a spend ledger or cap).
 
 ## Add your Gemini keys
 

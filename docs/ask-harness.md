@@ -1,6 +1,6 @@
 # Ask harness: scribble + voice clipboard handoff
 
-Branch: `fix/ask-preview-close-copy-gate` (built on `a4993b2`).
+Branch: `feature/combined-jev-or-keypool-clipboard` (clipboard fixes originally from `fix/ask-preview-close-copy-gate`).
 
 Hold **Ctrl+Option+Shift**, say your question out loud, release. TipTour
 captures the screen under your cursor, draws your scribble (the
