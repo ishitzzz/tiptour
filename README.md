@@ -33,6 +33,10 @@ Shortcuts activate only the selected mode. The primary menu-bar button and welco
 
 Settings also contains desktop action access, screenshot privacy, permissions, and optional debug visuals. TipTour does not record your screen and has no video creation or image-generation pipeline.
 
+## Ask with a scribble (this branch)
+
+Hold **Ctrl+Option+Shift**, speak your question, release. TipTour captures the screen you scribbled on (Ctrl+Shift highlight), transcribes the question on-device, shows a preview, and inserts image + text as a **draft** into the composer of an app you choose (default: the ChatGPT Mac app). Nothing is sent automatically, and no provider keys or network calls are involved. Details and setup: [docs/ask-harness.md](docs/ask-harness.md).
+
 ## Learn from a video
 
 Paste a tutorial link (YouTube, Loom, or a direct `.mp4`) into **Learn from a video** in the menu bar panel, or choose a video file. [Elorian](https://elorian.ai) watches the tutorial and turns it into a step-by-step tour; press play and TipTour points at each control on your own screen and waits for you to click it, type, or press the shortcut. There are no Next buttons: a step moves on when you do it, and **Escape** stops the tour. TipTour never clicks for you in a tour.

@@ -93,6 +93,17 @@ enum TipTourDefaults {
         set { set(newValue, for: .isScreenshotStreamingEnabled) }
     }
 
+    /// Bundle identifier of the app the ask harness inserts drafts into.
+    /// Editable in Settings; defaults to the ChatGPT Mac app.
+    static var askTargetBundleIdentifier: String {
+        get {
+            let stored = UserDefaults.standard.string(forKey: "askTargetBundleIdentifier")?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            return stored?.isEmpty == false ? stored! : "com.openai.chat"
+        }
+        set { UserDefaults.standard.set(newValue, forKey: "askTargetBundleIdentifier") }
+    }
+
     static func reset(_ key: Key) {
         UserDefaults.standard.removeObject(forKey: key.rawValue)
     }

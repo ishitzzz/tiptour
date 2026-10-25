@@ -8,5 +8,7 @@
 	<string>TipTour uses your microphone so you can talk to it.</string>
 	<key>NSScreenCaptureUsageDescription</key>
 	<string>TipTour needs screen recording access to see what's on your screen and point at the right elements.</string>
+	<key>NSSpeechRecognitionUsageDescription</key>
+	<string>TipTour transcribes your spoken question on this Mac so it can place it with your screenshot as a draft in the app you choose. Recognition runs on-device only.</string>
 </dict>
 </plist>

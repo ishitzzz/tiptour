@@ -792,13 +792,14 @@ final class CuaActionDriver: TipTourActionDriver {
 
         pasteboard.clearContents()
         pasteboard.writeObjects([stagedTextItem])
+        let stagedChangeCount = pasteboard.changeCount
 
         do {
             try KeyboardInput.hotkey(["cmd", "v"], toPid: targetProcessIdentifier)
             try await Task.sleep(nanoseconds: 150_000_000)
-            restorePasteboard(pasteboard, items: previousPasteboardItems)
+            restorePasteboard(pasteboard, items: previousPasteboardItems, stagedChangeCount: stagedChangeCount)
         } catch {
-            restorePasteboard(pasteboard, items: previousPasteboardItems)
+            restorePasteboard(pasteboard, items: previousPasteboardItems, stagedChangeCount: stagedChangeCount)
             throw error
         }
     }
@@ -835,10 +836,19 @@ final class CuaActionDriver: TipTourActionDriver {
         } ?? []
     }
 
+    /// Restores the clipboard only when the pasteboard's changeCount shows
+    /// nothing else was copied since staging. Restoring unconditionally
+    /// would clobber a copy the user made in the meantime; leaving the
+    /// staged content is the safer failure and is logged.
     private func restorePasteboard(
         _ pasteboard: NSPasteboard,
-        items: [NSPasteboardItem]
+        items: [NSPasteboardItem],
+        stagedChangeCount: Int
     ) {
+        guard pasteboard.changeCount == stagedChangeCount else {
+            print("[ActionExecutor] pasteboard changed during staging; leaving the user's clipboard as-is")
+            return
+        }
         pasteboard.clearContents()
         guard !items.isEmpty else { return }
         pasteboard.writeObjects(items)

@@ -1,0 +1,112 @@
+//
+//  AskPreviewView.swift
+//  TipTour
+//
+//  Preview of the captured screenshot (with the scribble composited) and
+//  the transcribed question. The user picks the target app, edits the
+//  text if recognition misheard, and inserts the pair as a draft.
+//
+
+import SwiftUI
+
+struct AskPreviewView: View {
+    @ObservedObject var controller: AskHarnessController
+
+    private var captureTimingCaption: String {
+        guard let capturedAt = controller.capturedAt else { return "" }
+        let time = capturedAt.formatted(date: .omitted, time: .standard)
+        guard let markingsAt = controller.markingsCommittedAt else {
+            return "Screen captured at \(time). No markings."
+        }
+        let age = Int(capturedAt.timeIntervalSince(markingsAt).rounded())
+        if age <= 1 {
+            return "Screen captured at \(time) with your markings."
+        }
+        return "Screen captured at \(time). Markings are from a scribble made \(age)s earlier, over the content visible then."
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Ask with screenshot")
+                .font(.system(size: 15, weight: .semibold))
+
+            if let image = controller.draftImage {
+                Image(nsImage: image)
+                    .resizable()
+                    .aspectRatio(contentMode: .fit)
+                    .frame(maxWidth: .infinity, maxHeight: 240)
+                    .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 8, style: .continuous)
+                            .stroke(Color.primary.opacity(0.12), lineWidth: 1)
+                    )
+
+                Text(captureTimingCaption)
+                    .font(.system(size: 10))
+                    .foregroundColor(.secondary)
+            }
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Your question")
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundColor(.secondary)
+                TextEditor(text: $controller.draftText)
+                    .font(.system(size: 13))
+                    .frame(minHeight: 64, maxHeight: 96)
+                    .padding(4)
+                    .background(Color.primary.opacity(0.04))
+                    .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+            }
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Insert into")
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundColor(.secondary)
+                Picker("Insert into", selection: $controller.targetBundleIdentifier) {
+                    ForEach(controller.targetApps) { target in
+                        Text(target.isInstalled ? target.name : "\(target.name) (not installed)")
+                            .tag(target.bundleIdentifier)
+                    }
+                }
+                .labelsHidden()
+                .onChange(of: controller.targetBundleIdentifier) { _, _ in
+                    controller.persistTargetSelection()
+                }
+            }
+
+            if let status = controller.insertionStatus {
+                Text(status)
+                    .font(.system(size: 12))
+                    .foregroundColor(.orange)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            Text("The image and text are placed in the app's composer as a draft. Nothing is sent. Transcription ran on this Mac.")
+                .font(.system(size: 11))
+                .foregroundColor(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            HStack {
+                Button("Cancel") {
+                    controller.cancelPreview()
+                }
+                .keyboardShortcut(.cancelAction)
+
+                Spacer()
+
+                Button(action: { controller.insertDraft() }) {
+                    if controller.isInserting {
+                        ProgressView()
+                            .controlSize(.small)
+                    } else {
+                        Text("Insert as draft")
+                    }
+                }
+                .keyboardShortcut(.defaultAction)
+                .disabled(controller.isInserting || controller.draftImage == nil)
+            }
+        }
+        .padding(16)
+        .frame(width: 460, height: 560)
+    }
+}

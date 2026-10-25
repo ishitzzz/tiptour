@@ -235,8 +235,38 @@ struct TipTourSettingsView: View {
         }
     }
 
+    private var askTargetAppRow: some View {
+        HStack(alignment: .center, spacing: 12) {
+            rowIcon("cursorarrow.rays")
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Ask Draft Target App")
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundColor(DS.Colors.textSecondary)
+                Text("Ctrl+Option+Shift captures your scribbled screen and spoken question, then offers to insert them as a draft in this app's composer (bundle identifier).")
+                    .font(.system(size: 11))
+                    .foregroundColor(DS.Colors.textTertiary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+
+            TextField(
+                "com.openai.chat",
+                text: Binding(
+                    get: { TipTourDefaults.askTargetBundleIdentifier },
+                    set: { TipTourDefaults.askTargetBundleIdentifier = $0 }
+                )
+            )
+            .textFieldStyle(.roundedBorder)
+            .font(.system(size: 12, design: .monospaced))
+            .frame(width: 180)
+        }
+    }
+
     private var advancedSection: some View {
         VStack(alignment: .leading, spacing: 10) {
+            askTargetAppRow
+
             settingsRow(
                 title: "Neko Mode",
                 subtitle: "Use the pixel-art cursor instead of the standard pointer.",

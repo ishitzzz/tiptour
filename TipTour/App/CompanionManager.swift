@@ -137,12 +137,15 @@ final class CompanionManager: ObservableObject {
     let globalTextCommandShortcutMonitor = GlobalTextCommandShortcutMonitor()
     let globalRadialInputShortcutMonitor = GlobalRadialInputShortcutMonitor()
     let globalHighlightShortcutMonitor = GlobalHighlightShortcutMonitor()
+    let globalAskHarnessShortcutMonitor = GlobalAskHarnessShortcutMonitor()
     let overlayWindowManager = OverlayWindowManager()
+    lazy var askHarnessController = AskHarnessController(companionManager: self)
 
     private var shortcutTransitionCancellable: AnyCancellable?
     private var textCommandShortcutCancellable: AnyCancellable?
     private var radialInputShortcutCancellable: AnyCancellable?
     private var highlightTransitionCancellable: AnyCancellable?
+    private var askHarnessShortcutCancellable: AnyCancellable?
     private var accessibilityCheckTimer: Timer?
     private var voiceAudioPowerCancellable: AnyCancellable?
     private var voiceModelSpeakingCancellable: AnyCancellable?
@@ -1050,6 +1053,7 @@ final class CompanionManager: ObservableObject {
         bindTextCommandShortcut()
         bindRadialInputShortcut()
         bindHighlightTransitions()
+        bindAskHarnessShortcut()
         beginTrackingUserTargetApp()
 
         // Wire the autopilot toggle into the workflow runner. The
@@ -1083,11 +1087,14 @@ final class CompanionManager: ObservableObject {
         globalTextCommandShortcutMonitor.stop()
         globalRadialInputShortcutMonitor.stop()
         globalHighlightShortcutMonitor.stop()
+        globalAskHarnessShortcutMonitor.stop()
+        askHarnessController.cancelActiveCapture()
         overlayWindowManager.hideOverlay()
         shortcutTransitionCancellable?.cancel()
         textCommandShortcutCancellable?.cancel()
         radialInputShortcutCancellable?.cancel()
         highlightTransitionCancellable?.cancel()
+        askHarnessShortcutCancellable?.cancel()
         accessibilityCheckTimer?.invalidate()
         accessibilityCheckTimer = nil
         voiceAudioPowerCancellable?.cancel()
@@ -1355,11 +1362,13 @@ final class CompanionManager: ObservableObject {
             globalTextCommandShortcutMonitor.start()
             globalRadialInputShortcutMonitor.start()
             globalHighlightShortcutMonitor.start()
+            globalAskHarnessShortcutMonitor.start()
         } else {
             globalPushToTalkShortcutMonitor.stop()
             globalTextCommandShortcutMonitor.stop()
             globalRadialInputShortcutMonitor.stop()
             globalHighlightShortcutMonitor.stop()
+            globalAskHarnessShortcutMonitor.stop()
         }
 
         hasScreenRecordingPermission = WindowPositionManager.hasScreenRecordingPermission()
@@ -1474,6 +1483,15 @@ final class CompanionManager: ObservableObject {
             .receive(on: DispatchQueue.main)
             .sink { [weak self] transition in
                 self?.handleHighlightTransition(transition)
+            }
+    }
+
+    private func bindAskHarnessShortcut() {
+        askHarnessShortcutCancellable = globalAskHarnessShortcutMonitor
+            .shortcutTransitionPublisher
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] transition in
+                self?.askHarnessController.handleTransition(transition)
             }
     }
 
@@ -1700,6 +1718,26 @@ final class CompanionManager: ObservableObject {
         }
 
         presentTransientOverlayHint("Hold Ctrl+Shift and drag to highlight")
+    }
+
+    /// The markings the user means by "what I scribbled": the in-flight
+    /// focus highlight if one is active, otherwise a highlight committed
+    /// within the last few seconds. The window is short on purpose: an
+    /// older scribble over a freshly captured screen could show markings
+    /// on content that has since changed.
+    func currentScribbleTrail() -> (points: [CGPoint], committedAt: Date)? {
+        if isFocusHighlightActive, focusHighlightGlobalPoints.count >= 2 {
+            return (focusHighlightGlobalPoints, Date())
+        }
+        if let context = lastFocusHighlightContext,
+           Date().timeIntervalSince(context.createdAt) < 6 {
+            return (context.globalAppKitPoints, context.createdAt)
+        }
+        return nil
+    }
+
+    func presentAskHarnessHint(_ message: String) {
+        presentTransientOverlayHint(message)
     }
 
     private func presentTransientOverlayHint(_ message: String) {
