@@ -1,9 +1,8 @@
 # Run the combined branch locally on your Mac
 
-This branch (`feature/combined-jev-or-keypool-clipboard`) combines three
-reviewed pieces on top of `main`: the Gemini multi-key pool, the
-TypeSafe-Jev-via-OpenRouter connection option, and the ask-harness
-clipboard copy fixes. The notes below cover all three.
+This branch combines three reviewed pieces on top of `main`: the Gemini
+multi-key pool, the TypeSafe-Jev-via-OpenRouter connection option, and the
+ask-harness clipboard copy fixes. The notes below cover all three.
 
 ## Updating an existing local build without losing your changes
 
@@ -65,10 +64,10 @@ flat local paths are possible.
 ```bash
 git clone https://github.com/ishitzzz/tiptour.git
 cd tiptour
-git checkout feature/combined-jev-or-keypool-clipboard
+git checkout fix/combined-docs-safe-update
 ```
 
-Or, in an existing clone: `git fetch origin && git checkout feature/combined-jev-or-keypool-clipboard`.
+Or, in an existing clone: `git fetch origin && git checkout fix/combined-docs-safe-update`.
 
 ## Build
 
