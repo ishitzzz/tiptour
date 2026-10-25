@@ -594,7 +594,7 @@ final class GeminiLiveSession: ObservableObject {
                 guard let self else { return true }
                 return self.sessionGeneration != generation
             },
-            sleep: { try await Task.sleep(nanoseconds: UInt64($0 * 1_000_000_000)) },
+            sleep: { try await Task.sleep(nanoseconds: GeminiKeyFailover.sleepNanoseconds($0)) },
             failureFrom: { [weak self] error in
                 self?.failoverFailure(from: error)
                     ?? GeminiConnectionFailure(message: GeminiKeyPool.sanitized(error.localizedDescription))
@@ -828,7 +828,7 @@ final class GeminiLiveSession: ObservableObject {
                     guard let self else { return true }
                     return !self.isActive || self.sessionGeneration != generation
                 },
-                sleep: { try await Task.sleep(nanoseconds: UInt64($0 * 1_000_000_000)) },
+                sleep: { try await Task.sleep(nanoseconds: GeminiKeyFailover.sleepNanoseconds($0)) },
                 failureFrom: { [weak self] error in
                     self?.failoverFailure(from: error)
                         ?? GeminiConnectionFailure(message: GeminiKeyPool.sanitized(error.localizedDescription))

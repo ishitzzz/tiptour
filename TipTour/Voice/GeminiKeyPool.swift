@@ -510,8 +510,8 @@ struct GeminiFailoverPolicy {
     static func initialConnect(keyCount: Int) -> GeminiFailoverPolicy {
         GeminiFailoverPolicy(maxRounds: 2, maxAttempts: max(4, keyCount * 2)) { attempt, kind, failure in
             let base: TimeInterval = (kind == .transient || kind == .unknown) ? 0.5 : 2.0
-            var wait = min(base * pow(2.0, Double(attempt - 1)), 15.0) * Double.random(in: 0.8...1.2)
-            if let hint = failure.retryAfter { wait = max(wait, min(hint, 60.0)) }
+            var wait = min(base * pow(2.0, Double(max(attempt, 1) - 1)), 15.0) * Double.random(in: 0.8...1.2)
+            if let hint = failure.retryAfter, hint.isFinite, hint > 0 { wait = max(wait, min(hint, 60.0)) }
             return wait
         }
     }
@@ -523,8 +523,19 @@ struct GeminiFailoverPolicy {
     /// expired during the run; when every key is blocked the runner stops
     /// early with `allUnavailable` and its earliest retry time.
     static func reconnect(keyCount: Int) -> GeminiFailoverPolicy {
-        GeminiFailoverPolicy(maxRounds: 2, maxAttempts: max(5, keyCount * 2)) { attempt, _, _ in
-            pow(2.0, Double(attempt - 1)) * 0.5 * Double.random(in: 0.8...1.2)
+        GeminiFailoverPolicy(maxRounds: 2, maxAttempts: max(5, keyCount * 2)) { attempt, _, failure in
+            // Same bounded shape as the initial connect: exponential growth
+            // capped at 15 s with jitter (18 s worst case). An uncapped
+            // doubling turned a large pool's late attempts into multi-hour
+            // sleeps whose nanosecond conversion then trapped in
+            // Double -> UInt64; the cap keeps every wait short and finite.
+            var wait = min(0.5 * pow(2.0, Double(max(attempt, 1) - 1)), 15.0) * Double.random(in: 0.8...1.2)
+            // A server retry hint is honored separately on top of the base
+            // backoff, under its own 60 s cap, exactly as in initialConnect.
+            if let hint = failure.retryAfter, hint.isFinite, hint > 0 {
+                wait = max(wait, min(hint, 60.0))
+            }
+            return wait
         }
     }
 }
@@ -548,6 +559,16 @@ struct GeminiFailoverPolicy {
 ///   when one exists), `PoolError.attemptsExhausted` when the run's
 ///   bounds were reached first.
 enum GeminiKeyFailover {
+
+    /// Seconds -> nanoseconds for `Task.sleep` that can never trap:
+    /// non-finite or negative waits become 0, and anything above a generous
+    /// ceiling is clamped. The policies cap real waits at 18 s (60 s with a
+    /// server hint); this conversion is the last line of defense so a wait
+    /// bug can never crash a live session with a Double -> UInt64 overflow.
+    static func sleepNanoseconds(_ seconds: TimeInterval) -> UInt64 {
+        guard seconds.isFinite, seconds > 0 else { return 0 }
+        return UInt64(min(seconds, 300) * 1_000_000_000)
+    }
 
     @discardableResult
     static func run(

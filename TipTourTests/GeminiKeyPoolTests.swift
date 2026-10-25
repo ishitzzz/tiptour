@@ -453,6 +453,102 @@ struct GeminiKeyPoolTests {
         #expect(pool.entries[0].state == .ready)
     }
 
+    // MARK: - Reconnect backoff bounds
+
+    @Test func reconnectBackoffStartsSmallAndStaysCappedAtLargeAttempts() {
+        let policy = GeminiFailoverPolicy.reconnect(keyCount: 3)
+        // First retry: ~0.5 s base with jitter — a blip, not a pause.
+        for _ in 0..<50 {
+            let wait = policy.wait(1, .transient, GeminiConnectionFailure(message: "boom"))
+            #expect(wait.isFinite && wait >= 0.4 && wait <= 0.6)
+        }
+        // Later attempts in any pool: growth is capped at 15 s base
+        // (18 s with jitter). The uncapped doubling this replaces reached
+        // multi-hour sleeps by the late attempts of a large pool.
+        for attempt in [2, 5, 10, 37, 100, 10_000] {
+            for _ in 0..<20 {
+                let wait = policy.wait(attempt, .transient, GeminiConnectionFailure(message: "boom"))
+                #expect(wait.isFinite && wait >= 0 && wait <= 18.0)
+            }
+        }
+    }
+
+    @Test func reconnectBackoffExtremeIndicesStayFiniteAndBounded() {
+        let policy = GeminiFailoverPolicy.reconnect(keyCount: 1)
+        // Degenerate and absurd indices must never yield NaN, infinity, or
+        // a wait that overflows the nanosecond conversion at the call site.
+        for attempt in [0, -1, -100, Int.max] {
+            let wait = policy.wait(attempt, .unknown, GeminiConnectionFailure(message: "boom"))
+            #expect(wait.isFinite && wait >= 0 && wait <= 18.0)
+        }
+    }
+
+    @Test func reconnectHonorsServerRetryHintSeparatelyWithItsOwnCap() {
+        let policy = GeminiFailoverPolicy.reconnect(keyCount: 2)
+        // A hint longer than the capped base wins, exactly as in the
+        // initial connect.
+        #expect(policy.wait(1, .rateLimited,
+                            GeminiConnectionFailure(httpStatus: 429, retryAfter: 45, message: "quota")) == 45)
+        // An absurd hint is clamped to its own 60 s cap, not slept raw.
+        #expect(policy.wait(1, .rateLimited,
+                            GeminiConnectionFailure(httpStatus: 429, retryAfter: 3_600, message: "quota")) == 60)
+        // A non-finite hint is ignored, leaving the capped base wait.
+        let nanHint = policy.wait(1, .rateLimited,
+                                  GeminiConnectionFailure(httpStatus: 429, retryAfter: .nan, message: "quota"))
+        #expect(nanHint.isFinite && nanHint >= 0 && nanHint <= 18.0)
+    }
+
+    @Test func largePoolReconnectRunSleepsOnlyBoundedWaits() async throws {
+        // 21 keys (attempt bound 42) — a pool size where the old uncapped
+        // exponential slept for hours and then trapped converting the wait
+        // to nanoseconds. Every sleep must be finite and capped, and the
+        // run must still terminate with the truthful terminal error.
+        let keys = (1...21).map { "key-\($0)-secret-material-\($0)" }
+        let pool = makePool(keys: keys)
+        var sleeps: [TimeInterval] = []
+        var attempted: [String] = []
+        do {
+            try await GeminiKeyFailover.run(
+                pool: pool,
+                policy: .reconnect(keyCount: keys.count),
+                isCancelled: { false },
+                sleep: { seconds in
+                    #expect(seconds.isFinite && seconds >= 0 && seconds <= 60)
+                    sleeps.append(seconds)
+                },
+                failureFrom: { _ in GeminiConnectionFailure(httpStatus: 429, retryAfter: 5, message: "quota") },
+                attempt: { entry in
+                    attempted.append(entry.id)
+                    throw NSError(domain: "test", code: 6, userInfo: [NSLocalizedDescriptionKey: "quota"])
+                }
+            )
+            Issue.record("expected the run to throw")
+        } catch let error as GeminiKeyPool.PoolError {
+            guard case .allUnavailable(let retryAt) = error else {
+                Issue.record("expected allUnavailable, got \(error)")
+                return
+            }
+            #expect(retryAt == Date(timeIntervalSince1970: 1_000_000).addingTimeInterval(5))
+        }
+        // Round 1 tried every one of the 21 keys exactly once — no ready
+        // key skipped — then round 2 found all of them cooling.
+        #expect(attempted.count == 21)
+        #expect(Set(attempted).count == 21)
+        #expect(sleeps.count == 21)
+    }
+
+    @Test func sleepNanosecondsNeverTrapsOnBadInput() {
+        #expect(GeminiKeyFailover.sleepNanoseconds(.nan) == 0)
+        #expect(GeminiKeyFailover.sleepNanoseconds(.infinity) == 0)
+        #expect(GeminiKeyFailover.sleepNanoseconds(-.infinity) == 0)
+        #expect(GeminiKeyFailover.sleepNanoseconds(-5) == 0)
+        #expect(GeminiKeyFailover.sleepNanoseconds(0) == 0)
+        #expect(GeminiKeyFailover.sleepNanoseconds(1) == 1_000_000_000)
+        // Absurd values clamp to the defensive ceiling instead of trapping
+        // the Double -> UInt64 conversion.
+        #expect(GeminiKeyFailover.sleepNanoseconds(1e300) == 300_000_000_000)
+    }
+
     // MARK: - Persistence honesty
 
     @Test func failedPersistenceDoesNotTouchPoolOrReportSaved() {
