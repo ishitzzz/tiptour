@@ -342,17 +342,17 @@ def main():
                                 log("stale-frame check: %.1f%% of frame pixels, %.1f%% around the target changed since the pinned frame (heuristic, not proof of freshness)" % (_fr * 100, _tf * 100))
                                 if _fr > float(os.environ.get("TIPTOUR_STALE_FRAME_MAX", "0.03")) or _tf > float(os.environ.get("TIPTOUR_STALE_TARGET_MAX", "0.06")): refuse = "the screen content changed since the screenshot this answer was based on (frame %.0f%%, around target %.0f%%); ask again" % (_fr * 100, _tf * 100); done = True
                             except Exception as _e: log("stale-frame check unavailable: %s" % type(_e).__name__)
-                        # Mac ElementResolver.exactLocalTargetResolution (:95): an explicit target_id / target_mark in the plan step binds to the cache entry first
-                        _tid = step.get("target_id") or step.get("targetID"); _tmk = step.get("target_mark") if step.get("target_mark") is not None else step.get("targetMark")
-                        if not done and (_tid or _tmk is not None):
-                            _tt = TARGET_CACHE.current_targets(); _m = next((t for t in _tt if (t["id"] == str(_tid).strip() if _tid and str(_tid).strip() else t["mark"] == _tmk)), None)
-                            if _m: px = (round(_m["global_center"][0]), round(_m["global_center"][1])); src = "target_cache:exact(%s)" % _m["source"]; done = True; arm_rect = (_m["global_box"][0], _m["global_box"][1], _m["global_box"][2] - _m["global_box"][0], _m["global_box"][3] - _m["global_box"][1])
-                            else: log("target_id/target_mark not in the fresh target list; falling through to label resolution")
                         # Mac modal gate (WorkflowRunner :586): if the plan's target app currently shows a blocking dialog, pause instead of resolving (pause reason modalDialogPresented, text "dialog appeared: <title>")
                         if not done and not refuse and args.get("app") and atspi_resolver:
                             _ms, _mt = await asyncio.to_thread(atspi_resolver.modal_title, args.get("app"))
                             log("modal check: %s" % ("dialog present" if _mt is not None else ("none" if _ms == "ok" else "unavailable (not treated as 'no dialog')")))
                             if _mt is not None: refuse = "dialog appeared" + (": " + _mt if _mt else "") + " (paused; deal with it, then ask again)"; done = True; click_events.append({"pause": "modalDialogPresented", "title": _mt})
+                        # Mac ElementResolver.exactLocalTargetResolution (:95): an explicit target_id / target_mark in the plan step binds to the cache entry first
+                        _tid = step.get("target_id") or step.get("targetID"); _tmk = step.get("target_mark") if step.get("target_mark") is not None else step.get("targetMark")
+                        if not done and (_tid or _tmk is not None):
+                            _tt = TARGET_CACHE.current_targets(); _m = next((t for t in _tt if (t["id"] == str(_tid).strip() if _tid and str(_tid).strip() else t["mark"] == _tmk)), None)
+                            if _m: px = (_half_up(_m["global_center"][0]), _half_up(_m["global_center"][1])); src = "target_cache:exact(%s)" % _m["source"]; done = True; arm_rect = (_m["global_box"][0], _m["global_box"][1], _m["global_box"][2] - _m["global_box"][0], _m["global_box"][3] - _m["global_box"][1])
+                            else: log("target_id/target_mark not in the fresh target list; falling through to label resolution")
                         # Mac ElementResolver.resolve:218 preferLocalHintBeforeAccessibility: a step that carries a spatial hint (point_2d/box_2d) tries the LOCAL perception cache (label only, anchor = previous step point or cursor) BEFORE AX/CDP
                         if not done and pt and not nohint and lab:
                             _lr = _local_resolve(lab)
@@ -390,7 +390,7 @@ def main():
                         if not done and not refuse and detector:
                             _tr = _local_resolve(lab)  # Mac tier 3 (after AX and CDP): label-only cache resolve, anchor = previous step point or cursor, NOT the model point
                             if _tr: px = (_half_up(_tr["global_point"][0]), _half_up(_tr["global_point"][1])); src = "target_cache:" + _tr["source"]; arm_rect = tuple(_tr["global_rect"])
-                            ref = None if _tr else perception.refine_coordinate(model_px, lab, yolo, ocr_el)  # Linux-only fallback (not Mac semantics)
+                            ref = None if (_tr or nohint) else perception.refine_coordinate(model_px, lab, yolo, ocr_el)  # nohint: refine would anchor on the placeholder; Mac: no hint + miss -> unresolved  # Linux-only fallback (not Mac semantics)
                             if ref: px = (round(ref["center"][0]), round(ref["center"][1])); src = "yolo_ocr:" + ref["rule"]
                         if nohint and not refuse and src == "model_box": refuse = "could not resolve \"%s\": no matching control and no spatial hint (Mac: resolve returns nothing); not pointing" % lab
                         if not refuse and not (0 <= px[0] < size[0] and 0 <= px[1] < size[1]): refuse = "the model's coordinate (%d,%d) is outside the %dx%d screen; not pointing" % (px[0], px[1], size[0], size[1])
@@ -486,7 +486,7 @@ def main():
                         if refuse: GLib.idle_add(overlay.hide)  # a refusal must not leave the previous answer's cursor on screen
                         if not refuse: log('render cursor at', px, 'src', src); GLib.idle_add(overlay.point_to, px[0], px[1], ("? " if unconf else "") + step.get("label", ""))
                         if ambiguous and src == "model_box": src = "model_box(UNCONFIRMED:%d DOM candidates)" % ambiguous
-                        tool_seen = {"label": step.get("label"), "point_2d": pt, "px": px, "model_px": model_px, "source": src}
+                        tool_seen = {"label": step.get("label"), "point_2d": (None if nohint else pt), "no_hint": nohint, "px": px, "model_px": (None if nohint else model_px), "source": src}
                         if _cd_status: tool_seen["click_detector"] = _cd_status
                         if refuse: tool_seen["source"] = "REFUSED"; tool_seen["refused"] = refuse; log("refused to point (reason in debug log only)"); dlog("refused to point:", refuse)
                         if refuse: resp = {"ok": False, "status": "not_pointed", "error": refuse}
