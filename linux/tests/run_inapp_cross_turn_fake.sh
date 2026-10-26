@@ -1,4 +1,4 @@
-cd /home/sandbox/tiptour/linux
+cd "${TT_TREE:-/home/sandbox/tiptour/linux}"
 export TIPTOUR_TEST_MODE=1 TIPTOUR_DEBUG_LOG=1
 export TIPTOUR_CLIENT_FACTORY=fake_client:make PYTHONPATH=$PWD/tests TIPTOUR_FAKE_TOOLCALL=1
 export TIPTOUR_DEBUG_ATSPI=1 ACCESSIBILITY_ENABLED=1 TIPTOUR_GIR_PATH=$HOME/atspi-root/usr/lib/x86_64-linux-gnu/girepository-1.0

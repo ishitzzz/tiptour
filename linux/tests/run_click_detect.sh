@@ -3,7 +3,7 @@
 # Turn1 point "Save changes": click far away (must NOT fire), click on target (fires, pointer dismissed).
 # Turn2 point "Cancel": click Save (miss, no fire), then click Cancel (fires).
 # Turn3 point "Save changes" then immediately a new turn "cancel" re-arms: click on old Save target must NOT fire (disarmed/new plan).
-cd /home/sandbox/tiptour/linux
+cd "${TT_TREE:-/home/sandbox/tiptour/linux}"
 O=${RUN_DIR:?new unique dir}; [ -e $O ] && { echo exists; exit 2; }; mkdir -p $O
 . tests/clean_env.sh; tools/snapshot_tree.sh $O
 export TIPTOUR_TEST_MODE=1 TIPTOUR_DEBUG_LOG=1 TIPTOUR_CLIENT_FACTORY=fake_client:make PYTHONPATH=$PWD/tests TIPTOUR_FAKE_TOOLCALL=1

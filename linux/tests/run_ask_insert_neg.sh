@@ -1,6 +1,6 @@
 #!/bin/bash
 # REAL X11 clipboard-preservation and negative-insert test. Owned GTK entry only. No model, no key.
-cd /home/sandbox/tiptour/linux
+cd "${TT_TREE:-/home/sandbox/tiptour/linux}"
 O=${RUN_DIR:?new unique dir}; [ -e $O ] && { echo exists; exit 2; }; mkdir -p $O
 . tests/clean_env.sh; tools/snapshot_tree.sh $O
 export ENTRY_DUMP=$O/entry.txt DISPLAY=:78 OUT=$O

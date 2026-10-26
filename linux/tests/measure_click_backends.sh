@@ -1,6 +1,6 @@
 #!/bin/bash
 # Ships the actual measurement behind the "poll 0/20 vs xi2 20/20" claim: 20 back-to-back xdotool clicks per backend on Xvfb (synthetic input).
-cd /home/sandbox/tiptour/linux; O=${RUN_DIR:?new dir}; [ -e $O ] && { echo exists; exit 2; }; mkdir -p $O
+cd "${TT_TREE:-/home/sandbox/tiptour/linux}"; O=${RUN_DIR:?new dir}; [ -e $O ] && { echo exists; exit 2; }; mkdir -p $O
 Xvfb :96 -screen 0 1280x800x24 -noreset >/dev/null 2>&1 & XP=$!; sleep 1.5
 for B in poll xi2; do
 DISPLAY=:96 TIPTOUR_CLICK_BACKEND=$([ $B = poll ] && echo poll || echo auto) PYTHONPATH=. python3 - <<'PY' | tee -a $O/measure.txt

@@ -1,4 +1,4 @@
-cd /home/sandbox/tiptour/linux
+cd "${TT_TREE:-/home/sandbox/tiptour/linux}"
 export TIPTOUR_KEYS_GLOB='/home/sandbox/.vault/gemini-*/password'
 O=/tmp/sv3; mkdir -p $O; rm -f $O/fifo
 . tests/browser_env.sh https://en.wikipedia.org/wiki/Neural_network_\(machine_learning\) $O

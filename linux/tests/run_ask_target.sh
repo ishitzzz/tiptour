@@ -1,6 +1,6 @@
 #!/bin/bash
 # Ask target chooser, real X11 (Xvfb+xfwm4): focus window B at press, preview preset to insert into app A's WM_CLASS (via settings file; the combo click itself is NOT driven).
-cd /home/sandbox/tiptour/linux
+cd "${TT_TREE:-/home/sandbox/tiptour/linux}"
 O=${RUN_DIR:?new unique dir}; [ -e $O ] && { echo exists; exit 2; }; mkdir -p $O
 . tests/clean_env.sh; tools/snapshot_tree.sh $O
 export TIPTOUR_MIC_SOURCE=tt_in.monitor TIPTOUR_VOSK_MODEL=/tmp/vosk-model/vosk-model-small-en-us-0.15 ENTRY_DUMP=$O/entryA.txt ENTRY_DUMP_B=$O/entryB.txt DISPLAY=:79

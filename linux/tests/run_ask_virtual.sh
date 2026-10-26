@@ -1,6 +1,6 @@
 #!/bin/bash
 # Ask harness real-X11 test: virtual mic (tt_in) + synthetic speech, owned GTK entry as the insert target. NOT a physical mic/keyboard.
-cd /home/sandbox/tiptour/linux
+cd "${TT_TREE:-/home/sandbox/tiptour/linux}"
 O=${RUN_DIR:?new unique dir}; [ -e $O ] && { echo exists; exit 2; }; mkdir -p $O
 . tests/clean_env.sh; tools/snapshot_tree.sh $O
 export TIPTOUR_MIC_SOURCE=tt_in.monitor TIPTOUR_VOSK_MODEL=/tmp/vosk-model/vosk-model-small-en-us-0.15 ENTRY_DUMP=$O/entry.txt DISPLAY=:77

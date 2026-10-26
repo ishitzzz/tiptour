@@ -1,6 +1,6 @@
 #!/bin/bash
 # Real fresh Chrome on Xvfb, owned fixtures only, NO app, NO model. Exercises the page preflight: 1 positive + 3 negative (error page, wrong page/title, required control missing).
-cd /home/sandbox/tiptour/linux
+cd "${TT_TREE:-/home/sandbox/tiptour/linux}"
 B=${RUN_DIR:?base dir}; [ -e $B ] && { echo exists; exit 2; }; mkdir -p $B
 run() { # name url title ids expected_rc
   local O=$B/$1; mkdir -p $O

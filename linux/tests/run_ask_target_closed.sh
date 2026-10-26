@@ -1,6 +1,6 @@
 #!/bin/bash
 # Saved target app is NOT open: opening Ask must keep the saved preference, and Insert must fail closed (no fallback to another app). Real Xvfb+xfwm4, owned entry B only.
-cd /home/sandbox/tiptour/linux
+cd "${TT_TREE:-/home/sandbox/tiptour/linux}"
 O=${RUN_DIR:?new unique dir}; [ -e $O ] && { echo exists; exit 2; }; mkdir -p $O
 . tests/clean_env.sh; tools/snapshot_tree.sh $O
 export TIPTOUR_MIC_SOURCE=tt_in.monitor TIPTOUR_VOSK_MODEL=/tmp/vosk-model/vosk-model-small-en-us-0.15 ENTRY_DUMP=$O/entryB.txt DISPLAY=:81 TIPTOUR_CONFIG_DIR=$O/cfg

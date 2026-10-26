@@ -1,4 +1,4 @@
-cd /home/sandbox/tiptour/linux
+cd "${TT_TREE:-/home/sandbox/tiptour/linux}"
 export TIPTOUR_DEBUG_ATSPI=1 ACCESSIBILITY_ENABLED=1 TIPTOUR_GIR_PATH=$HOME/atspi-root/usr/lib/x86_64-linux-gnu/girepository-1.0
 export TIPTOUR_KEYS_GLOB='/home/sandbox/.vault/gemini-*/password'
 dbus-run-session -- bash -c '

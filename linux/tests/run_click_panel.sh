@@ -1,6 +1,6 @@
 #!/bin/bash
 # On-screen pause panel: no-op click -> panel (Retry/Skip) visible; REAL xdotool click on the Retry button re-arms; click no-op again; REAL click on Skip dismisses panel+pointer. Owned page, fake model, --act OFF.
-cd /home/sandbox/tiptour/linux
+cd "${TT_TREE:-/home/sandbox/tiptour/linux}"
 O=${RUN_DIR:?new unique dir}; [ -e $O ] && { echo exists; exit 2; }; mkdir -p $O
 . tests/clean_env.sh; tools/snapshot_tree.sh $O
 export TIPTOUR_TEST_MODE=1 TIPTOUR_DEBUG_LOG=1 TIPTOUR_CLIENT_FACTORY=fake_client:make PYTHONPATH=$PWD/tests TIPTOUR_FAKE_TOOLCALL=1

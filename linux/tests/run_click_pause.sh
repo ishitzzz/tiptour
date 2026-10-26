@@ -4,7 +4,7 @@
 # old header: T1 "Open settings": click -> AT-SPI state changes -> validator 'changed' -> pointer dismissed
 # T2 "No-op action": click -> nothing changes -> validator 'unchanged_paused' (pointer kept)
 # T3a stale-a: target moved during an 8s model delay (label resolves live -> follows, no refusal expected). T3b staleb: target removed + region repainted, model point on the old target -> expect refusal, no cursor, no arm
-cd /home/sandbox/tiptour/linux
+cd "${TT_TREE:-/home/sandbox/tiptour/linux}"
 O=${RUN_DIR:?new unique dir}; [ -e $O ] && { echo exists; exit 2; }; mkdir -p $O
 . tests/clean_env.sh; tools/snapshot_tree.sh $O
 export TIPTOUR_TEST_MODE=1 TIPTOUR_DEBUG_LOG=1 TIPTOUR_CLIENT_FACTORY=fake_client:make PYTHONPATH=$PWD/tests TIPTOUR_FAKE_TOOLCALL=1
