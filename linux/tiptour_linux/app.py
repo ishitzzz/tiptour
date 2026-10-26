@@ -62,7 +62,7 @@ def main():
         if os.environ.get("TIPTOUR_DEBUG_LOG") == "1": log(*x)
     overlay = PointerOverlay(); overlay.show_all(); overlay.move(900-overlay.CX, 500-overlay.CY)
     from .overlay import PausePanel
-    panel = PausePanel(lambda: (lambda t: threading.Thread(target=lambda: _control('retry', t), daemon=True).start())(panel.tok), lambda: (lambda t: threading.Thread(target=lambda: _control('skip', t), daemon=True).start())(panel.tok))
+    panel = PausePanel(lambda: (lambda t: _control_post('retry', t))(panel.tok), lambda: (lambda t: _control_post('skip', t))(panel.tok))
     hl = {"loop": None, "q": None, "mon": None, "trail": None}
     if a.highlight:
         from . import highlight as _hl
@@ -130,6 +130,11 @@ def main():
         if not ov['hidden'] and not ov.get('covered'): on_gtk(lambda: (overlay.show_all(), overlay.move(overlay.tip[0]-overlay.CX, overlay.tip[1]-overlay.CY)))
         return r
 
+    def _control_post(cmd, tok=None):
+        """All pause controls (FIFO / panel buttons) are applied ON the asyncio loop thread, so they are ordered with resolve/arm/render (which are synchronous after their last await) like the Mac's @MainActor."""
+        lp = hl.get("loop")
+        if lp: lp.call_soon_threadsafe(_control, cmd, tok)
+        else: _control(cmd, tok)
     def _control(cmd, tok=None):
         """Pause controls for a target whose click was seen but whose effect is unverified/unchanged. Not routed through the model."""
         if cmd in ("retry", "resume") and hl.get("replay"):  # Mac retryCurrentStep()/resume(): re-capture + rerun the full cascade for the active step (resume only while paused, like `guard pausedReason != nil`)
@@ -139,14 +144,16 @@ def main():
             if cmd == "resume" and not _paused:
                 click_events.append({"control": "resume_refused", "reason": "not paused"}); log("control resume refused: not paused"); return
             click_events.append({"control": cmd, "mode": "replay_full_cascade", "label": cur.get("label")}); GLib.idle_add(lambda: panel.hide_panel() and False); cur["paused"] = None
-            hl["replay"](cmd); return
+            hl["replay"](cmd, plan_tok["n"]); return
         with glock:
             if tok is not None and tok != plan_tok["n"]:  # a panel button queued/clicked for an earlier target or pause episode must never act on a newer one
                 click_events.append({"control": cmd + "_refused", "reason": "stale panel"}); log("control %s refused: stale panel (belongs to an earlier target/pause)" % cmd); return
             if not cur.get("label") or not cur.get("armed"):
                 click_events.append({"control": cmd + "_refused", "reason": "no current target"}); log("control %s refused: no current target" % cmd); return
+            if cmd == "skip" and hl.get("advance") and (hl.get('last_call') or {}).get("args") and (hl.get('last_call') or {}).get("idx", 0) + 1 < len(hl["last_call"]["args"].get("steps") or []):
+                click_events.append({"control": "skip", "mode": "advance"}); GLib.idle_add(lambda: panel.hide_panel() and False); hl["advance"]("skip", plan_tok["n"]); return
             if cmd == "skip":
-                plan_tok["n"] += 1; clicks.disarm(); ov['hidden'] = True; ov['covered'] = False; GLib.idle_add(overlay.hide); cur['armed'] = False; cur['paused'] = None
+                plan_tok["n"] += 1; clicks.disarm(); ov['hidden'] = True; ov['covered'] = False; GLib.idle_add(overlay.hide); cur['armed'] = False; cur['paused'] = None; (hl.get('last_call') or {}).clear(); PREV_STEP_POINT['p'] = None  # plan ended: a queued/late Retry/Resume must not revive it
                 click_events.append({"control": "skip", "label": cur["label"]}); GLib.idle_add(lambda: panel.hide_panel() and False); log("control skip: pointer dismissed, target skipped (%r)" % cur["label"]); return
         v = validators[-1].verdict if validators else None
         if ov['hidden'] and cur.get('paused') != 'app_switch':
@@ -201,7 +208,7 @@ def main():
                     with open(a.serve) as f:
                         for line in f:
                             line = line.strip()
-                            if line in ('@skip', '@retry', '@resume'): _control(line[1:]); continue
+                            if line in ('@skip', '@retry', '@resume'): _control_post(line[1:]); continue
                             if line == '@quit': loop.call_soon_threadsafe(q.put_nowait, ('voice_stop', None))  # a live voice turn must not block shutdown
                             if line: loop.call_soon_threadsafe(serve_q.put_nowait, line)
             threading.Thread(target=_reader, daemon=True).start()
@@ -235,9 +242,9 @@ def main():
                         if player: player.close()
                         return
                     yield t
-        async def _resolve_step(v, args, text):
+        async def _resolve_step(v, args, text, idx=0):
             tool_seen = None; resp = None
-            step = (args.get("steps") or [{}])[0]
+            step = (args.get("steps") or [{}])[idx]
             pt = step.get("point_2d")
             if not pt and step.get("box_2d"):
                 y1, x1, y2, x2 = step["box_2d"]; pt = [(y1 + y2) // 2, (x1 + x2) // 2]
@@ -247,7 +254,7 @@ def main():
                 px = norm_to_px(pt, size); model_px = px; src = "model_box"
                 lab = step.get("label", ""); done = False; ambiguous = 0; refuse = None; bound_rect = None; arm_rect = None; arm_app = None
                 if step.get("targetContext") in ("currentSelection", "focusedElement"): refuse = "targetContext %s is not implemented on Linux yet (native selection / focused-element binding is a known gap vs the Mac); not pointing" % step.get("targetContext")  # explicit, never silently ignored
-                clicks.disarm(); plan_tok["n"] += 1
+                clicks.disarm(); plan_tok["n"] += 1; _gen0 = plan_tok["n"]  # a skip/cancel/new ask/new target bumps plan_tok: anything resolved under an older generation must not arm or render
                 now_id = ident(); dlog('identity pinned=%r now=%r' % (frame_id['v'], now_id))
                 if frame_id["v"] and now_id != frame_id["v"]:
                     refuse = "focused window, title or geometry changed since the screenshot (%s -> %s); ask again" % (frame_id["v"][2], now_id[2]); done = True
@@ -301,6 +308,7 @@ def main():
                                 refuse = "the browser is not the foreground app; bring it to the front before pointing into it"
                         log("cdp stage:", st)
                     except Exception as e: log("cdp resolver error", type(e).__name__)
+                if not refuse and plan_tok["n"] != _gen0: refuse = "superseded by a skip, cancel or newer request while resolving"
                 if refuse: done = True
                 if not done and not refuse and detector:
                     _tr = _local_resolve(lab)  # Mac tier 3 (after AX and CDP): label-only cache resolve, anchor = previous step point or cursor, NOT the model point
@@ -397,9 +405,12 @@ def main():
                     return _cd_status
                 _cd_status = _arm_block(step, px, arm_rect, arm_app, src, refuse, None)
                 cur.update(label=step.get("label"), step=step, px=px, rect=arm_rect, app=arm_app, src=src, armed=not refuse, pin=clicks._pin, rearm=(lambda s=step, p=px, r=arm_rect, ap=arm_app, sc=src: _arm_block(s, p, r, ap, sc, None, None)))
-                ov['hidden'] = bool(refuse); ov['covered'] = False; GLib.idle_add(lambda: panel.hide_panel() and False)
-                if refuse: GLib.idle_add(overlay.hide)  # a refusal must not leave the previous answer's cursor on screen
-                if not refuse: log('render cursor at', px, 'src', src); GLib.idle_add(overlay.point_to, px[0], px[1], ("? " if unconf else "") + step.get("label", ""))
+                with glock:  # atomic with the control thread/guard threads: final generation check + commit of hidden state + render post
+                    if not refuse and plan_tok["n"] != _gen0:
+                        refuse = "superseded by a skip, cancel or newer request while resolving"; clicks.disarm()
+                    ov['hidden'] = bool(refuse); ov['covered'] = False; GLib.idle_add(lambda: panel.hide_panel() and False)
+                    if refuse: GLib.idle_add(overlay.hide)  # a refusal must not leave the previous answer's cursor on screen
+                    if not refuse: PREV_STEP_POINT['p'] = (px[0], px[1]); log('render cursor at', px, 'src', src); GLib.idle_add(overlay.point_to, px[0], px[1], ("? " if unconf else "") + step.get("label", ""))
                 if ambiguous and src == "model_box": src = "model_box(UNCONFIRMED:%d DOM candidates)" % ambiguous
                 tool_seen = {"label": step.get("label"), "point_2d": (None if nohint else pt), "no_hint": nohint, "px": px, "model_px": (None if nohint else model_px), "source": src}
                 if _cd_status: tool_seen["click_detector"] = _cd_status
@@ -425,8 +436,8 @@ def main():
             log('perception: %d yolo boxes, %d ocr lines' % (len(yolo), len(ocr_el)))
             TARGET_CACHE.update([{'bbox': [b['bbox'][0], b['bbox'][1], b['bbox'][0] + b['bbox'][2], b['bbox'][1] + b['bbox'][3]], 'label': b.get('label') or '', 'source': 'yolo', 'conf': b.get('conf', 0)} for b in yolo] + [{'bbox': [e['bbox'][0], e['bbox'][1], e['bbox'][0] + e['bbox'][2], e['bbox'][1] + e['bbox'][3]], 'label': e.get('label') or '', 'source': 'ocr', 'conf': e.get('conf', 0)} for e in ocr_el], size, (0, 0, size[0], size[1]))  # Mac: LocalPerceptionTargetCache.update after each perception pass
             return yolo, ocr_el
-        last_call = {}
-        async def _replay_step(kind):
+        last_call = {}; hl['last_call'] = last_call
+        async def _replay_step(kind, tok0=None):
             """Mac WorkflowRunner.retryCurrentStep() / resume(): re-capture the screen and rerun the FULL resolver cascade for the active step. No model round-trip, no tool_response."""
             nonlocal full, jpeg, size, yolo, ocr_el
             c = dict(last_call)
@@ -435,18 +446,45 @@ def main():
                 await asyncio.sleep(0.1)
             if gate['turn'] or gate['replay']: click_events.append({"control": kind + "_refused", "reason": "turn or replay still in progress after 30s"}); log("control %s refused: turn or replay still in progress after 30s" % kind); return
             if not c: click_events.append({"control": kind + "_refused", "reason": "no active step"}); log("control %s refused: no active step" % kind); return
+            if tok0 is not None and tok0 != plan_tok['n']: click_events.append({"control": kind + "_refused", "reason": "superseded"}); log("control %s refused: superseded by a skip or a newer target while waiting" % kind); return
             gate['replay'] = True
             try:
                 pause_rs['r'] = None
                 full, jpeg, size = await asyncio.to_thread(capture_clean, True)
                 yolo, ocr_el = await asyncio.to_thread(_perceive, full)
-                resp, ts = await _resolve_step(c["v"], c["args"], c["text"])
+                if tok0 is not None and tok0 != plan_tok['n']: click_events.append({"control": kind + "_refused", "reason": "superseded after capture"}); log("control %s refused: superseded by a skip or a newer target during capture" % kind); return
+                resp, ts = await _resolve_step(c["v"], c["args"], c["text"], c.get("idx", 0))
             finally: gate['replay'] = False
             click_events.append({"control": kind + "_replay", "status": (resp or {}).get("status"), "source": (ts or {}).get("source"), "refused": (ts or {}).get("refused")}); log("control %s: re-resolved the active step from a fresh capture -> %s" % (kind, (ts or {}).get("source")))
-        hl['replay'] = lambda kind: asyncio.run_coroutine_threadsafe(_replay_step(kind), loop)
+        async def _advance_step(kind, tok0=None):
+            """Mac WorkflowRunner advance (skipCurrentStep / a successful click): next step of the SAME plan, fresh capture + perception, previous-step point as the cache anchor. No model round-trip. Past the last step the plan is complete."""
+            nonlocal full, jpeg, size, yolo, ocr_el
+            for _w in range(300):
+                if not gate['turn'] and not gate['replay']: break
+                await asyncio.sleep(0.1)
+            if gate['turn'] or gate['replay']: log("control %s refused: turn or replay still in progress after 30s" % kind); return
+            c = dict(last_call)
+            if not c: click_events.append({"control": kind + "_refused", "reason": "no active step"}); return
+            if tok0 is not None and tok0 != plan_tok['n']: click_events.append({"advance": kind, "refused": "superseded"}); log("advance (%s) refused: superseded by a skip or a newer target while waiting" % kind); return
+            n = len(c["args"].get("steps") or [])
+            gate['replay'] = True
+            try:
+                if c["idx"] + 1 >= n:
+                    with glock:
+                        plan_tok["n"] += 1; clicks.disarm(); ov['hidden'] = True; ov['covered'] = False; GLib.idle_add(overlay.hide); cur['armed'] = False; cur['paused'] = None; pause_rs['r'] = None; last_call.clear(); PREV_STEP_POINT['p'] = None
+                    click_events.append({"advance": kind, "plan_complete": True}); log("advance (%s): no next step, plan complete" % kind); return
+                last_call["idx"] = c["idx"] + 1; pause_rs['r'] = None
+                full, jpeg, size = await asyncio.to_thread(capture_clean, True)
+                yolo, ocr_el = await asyncio.to_thread(_perceive, full)
+                if tok0 is not None and tok0 != plan_tok['n']: last_call["idx"] = c["idx"]; click_events.append({"advance": kind, "refused": "superseded after capture"}); log("advance (%s) refused: superseded during capture" % kind); return
+                resp, ts = await _resolve_step(c["v"], c["args"], c["text"], c["idx"] + 1)
+                click_events.append({"advance": kind, "to_step": c["idx"] + 1, "of": n, "source": (ts or {}).get("source"), "refused": (ts or {}).get("refused")}); log("advance (%s): step %d of %d resolved -> %s" % (kind, c["idx"] + 2, n, (ts or {}).get("source")))
+            finally: gate['replay'] = False
+        hl['advance'] = lambda kind, tok0=None: asyncio.run_coroutine_threadsafe(_advance_step(kind, tok0), loop)
+        hl['replay'] = lambda kind, tok0=None: asyncio.run_coroutine_threadsafe(_replay_step(kind, tok0), loop)
         i = -1
         async for text in _asks():
-            i += 1; pause_rs['r'] = None
+            i += 1; pause_rs['r'] = None; PREV_STEP_POINT['p'] = None
             voice_turn = text in ("@voice", "@voice-next"); in_tr = []; pending = []
             if voice_turn:
                 if not (mic and mic.active): continue  # toggled off before this turn started
@@ -538,7 +576,7 @@ def main():
                         _resp = _hlg.suppressed_payload(text, hl.get("last_ctx"))
                         await client.tool_response(v["id"], v["name"], _resp)
                         continue
-                    last_call.update(v=v, args=args, text=text)
+                    last_call.update(v=v, args=args, text=text, idx=0)
                     resp, tool_seen = await _resolve_step(v, args, text)
                     await client.tool_response(v["id"], v["name"], resp)
                 elif k == "turnComplete":
