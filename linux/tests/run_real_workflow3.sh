@@ -6,7 +6,7 @@ KEYFILE=${KEYFILE:?path of the single key file}
 . tests/clean_env.sh; tools/snapshot_tree.sh $O
 export TIPTOUR_LOG_MS=1 TIPTOUR_KEYS_GLOB=$KEYFILE TIPTOUR_DEBUG_LOG=1 TIPTOUR_DEBUG_ATSPI=1 ACCESSIBILITY_ENABLED=1 TIPTOUR_GIR_PATH=$HOME/atspi-root/usr/lib/x86_64-linux-gnu/girepository-1.0 REC_FPS=${REC_FPS:-30} WIZ_OFF=$O/wiz_off.json
 if [ -n "$DRY" ]; then  # bounded dry-run of the PROCEDURE only: FAKE model (never counted as a Gemini result)
-  export TIPTOUR_TEST_MODE=1 TIPTOUR_CLIENT_FACTORY=fake_client:make PYTHONPATH=$PWD/tests TIPTOUR_FAKE_TOOLCALL=1 TIPTOUR_FAKE_TRIGGER=point TIPTOUR_FAKE_TYPES=${FAKE_TYPES:-click} TIPTOUR_FAKE_STEPS='"'"'{"start order":"Start order","choose size":"Choose size","add toppings":"Add toppings","review order":"Review order","place test":"Place test order"}'"'"'
+  export TIPTOUR_TEST_MODE=1 TIPTOUR_CLIENT_FACTORY=fake_client:make PYTHONPATH=$PWD/tests TIPTOUR_FAKE_TOOLCALL=1 TIPTOUR_FAKE_TRIGGER=point TIPTOUR_FAKE_TYPES=${FAKE_TYPES:-click} TIPTOUR_FAKE_STEPS='{"start order":"Start order","choose size":"Choose size","add toppings":"Add toppings","review order":"Review order","place test":"Place test order"}'
 fi
 export O
 dbus-run-session -- bash -c '
@@ -21,7 +21,7 @@ pagelog() { W log; }
 has() { pagelog | grep -c "\"$1\""; }
 waitlog() { for i in $(seq ${2:-60}); do [ $(has "$1") -ge 1 ] && return 0; sleep 0.5; done; return 1; }
 INSIDE=0
-ask() { n=$(nrender); ev "ASK[$2] $1 | page: $(pagelog)"; echo "$1" > $O/fifo; for i in $(seq 120); do [ $(nrender) -gt $n ] && break; sleep 0.5; done
+ask() { n=$(nrender); ev "ASK[$2] $1 | page: $(pagelog) | expected control state at SEND time ($2): $(W state $2)"; echo "$1" > $O/fifo; for i in $(seq 120); do [ $(nrender) -gt $n ] && break; sleep 0.5; done
   if [ $(nrender) -gt $n ]; then sleep 3.5; P=$(lastpx); T=$(lasttype); R=$(W rect $2); ev "RENDER at $P plans=$T oracle_rect($2)=$R"
     INSIDE=$(python3 - "$P" "$R" <<PY
 import sys,json
@@ -30,7 +30,7 @@ print(1 if r and len(p)==2 and r[0]<=int(p[0])<=r[0]+r[2] and r[1]<=int(p[1])<=r
 PY
 ); ev "INSIDE expected control rect: $INSIDE"
   else P=""; INSIDE=0; ev "NO RENDER within 60s (model answered without pointing or stalled)"; fi; }
-userclick() { if [ "$INSIDE" = 1 ]; then set -- $P; xdotool mousemove $1 $2; sleep 0.3; xdotool click 1; ev "USER CLICK at $1 $2 (inside expected rect)"; else ev "NO USER CLICK (pointer not on the expected control)"; fi; sleep 2; }
+userclick() { if [ "$INSIDE" = 1 ]; then set -- $P; xdotool mousemove $1 $2; sleep 0.3; xdotool click 1; ev "MANUAL USER ACTION (simulated human following the pointer, NOT an engine/--act click; plans emitted: $T) click at $1 $2, inside the expected rect"; else ev "NO USER CLICK (pointer not on the expected control)"; fi; sleep 2; }
 stepdone() { waitlog "step$1" 6 && ev "page reached step$1" && return 0; ev "page did NOT reach step$1: $(pagelog)"; return 1; }
 ( sleep 20; W calib >> $O/script_events.txt
   # step 1
