@@ -17,6 +17,18 @@ from .detector import IconDetector
 from . import perception, workflow
 from .target_cache import LocalPerceptionTargetCache
 TARGET_CACHE = LocalPerceptionTargetCache()
+
+def _mouse_location():
+    """Mac: NSEvent.mouseLocation = proximity anchor when there is no previous-step point (ElementResolver.localPerceptionResolution)."""
+    import subprocess
+    try:
+        o = subprocess.run(["xdotool", "getmouselocation", "--shell"], capture_output=True, text=True, timeout=2).stdout
+        d = dict(l.split("=", 1) for l in o.split() if "=" in l); return (float(d["X"]), float(d["Y"]))
+    except Exception: return None
+PREV_STEP_POINT = {"p": None}  # Mac previousStepResolvedGlobalScreenPoint (voice flow is one step per turn, so it stays None unless a multi-step runner sets it)
+def _local_resolve(lab):
+    anchor = PREV_STEP_POINT["p"] or _mouse_location()
+    return TARGET_CACHE.resolve(lab, prefer_near_global_point=anchor)
 try:
     from . import atspi_resolver
 except Exception as _e:
@@ -330,6 +342,10 @@ def main():
                             _tt = TARGET_CACHE.current_targets(); _m = next((t for t in _tt if (t["id"] == str(_tid).strip() if _tid and str(_tid).strip() else t["mark"] == _tmk)), None)
                             if _m: px = (round(_m["global_center"][0]), round(_m["global_center"][1])); src = "target_cache:exact(%s)" % _m["source"]; done = True; arm_rect = (_m["global_box"][0], _m["global_box"][1], _m["global_box"][2] - _m["global_box"][0], _m["global_box"][3] - _m["global_box"][1])
                             else: log("target_id/target_mark not in the fresh target list; falling through to label resolution")
+                        # Mac ElementResolver.resolve:218 preferLocalHintBeforeAccessibility: a step that carries a spatial hint (point_2d/box_2d) tries the LOCAL perception cache (label only, anchor = previous step point or cursor) BEFORE AX/CDP
+                        if not done and pt and lab:
+                            _lr = _local_resolve(lab)
+                            if _lr: px = (round(_lr["global_point"][0]), round(_lr["global_point"][1])); src = "target_cache(hint-first):" + _lr["source"]; done = True
                         # Mac order: AX (here AT-SPI) -> local YOLO+OCR refinement -> raw Gemini coordinate
                         if atspi_resolver and os.environ.get("TIPTOUR_USE_ATSPI", "1") == "1":
                             try:
@@ -361,7 +377,7 @@ def main():
                             except Exception as e: log("cdp resolver error", type(e).__name__)
                         if refuse: done = True
                         if not done and not refuse and detector:
-                            _tr = TARGET_CACHE.resolve(lab, prefer_near_global_point=model_px)  # Mac detector tier: LocalPerceptionTargetCache.resolve (label score + source bonus + proximity)
+                            _tr = _local_resolve(lab)  # Mac tier 3 (after AX and CDP): label-only cache resolve, anchor = previous step point or cursor, NOT the model point
                             if _tr: px = (round(_tr["global_point"][0]), round(_tr["global_point"][1])); src = "target_cache:" + _tr["source"]
                             ref = None if _tr else perception.refine_coordinate(model_px, lab, yolo, ocr_el)  # Linux-only fallback (not Mac semantics)
                             if ref: px = (round(ref["center"][0]), round(ref["center"][1])); src = "yolo_ocr:" + ref["rule"]
