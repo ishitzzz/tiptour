@@ -106,6 +106,14 @@ class ClickDetector:
         if cur[1] not in (pn[1], pn[0]): return "focus_other"
         return "ok"
 
+    def app_identity_of_window(self, win_id):
+        """(lowercase WM_CLASS class name, 'instance.class' app id) of a top-level X window, or (None, None). Linux mapping of NSRunningApplication localizedName / bundleIdentifier."""
+        try:
+            d = self._guard_display(); w = d.create_resource_object("window", win_id); c = w.get_wm_class()
+            if not c: return (None, None)
+            return (c[1].lower(), (c[0] + "." + c[1]).lower())
+        except Exception: return (None, None)
+
     def _is_ignored(self, w):
         try:
             cls = w.get_wm_class() or ()

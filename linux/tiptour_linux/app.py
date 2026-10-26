@@ -15,6 +15,7 @@ from .capture import grab, norm_to_px, changed_fraction, target_changed_fraction
 from .overlay import PointerOverlay
 from .detector import IconDetector
 from . import perception, workflow
+from .workflow import PlanTargetMatcher
 from .target_cache import LocalPerceptionTargetCache
 TARGET_CACHE = LocalPerceptionTargetCache()
 
@@ -429,8 +430,8 @@ def main():
                                 _ok = clicks.arm(px if arm_rect is None else (arm_rect[0] + arm_rect[2] / 2, arm_rect[1] + arm_rect[3] / 2), arm_rect, _clicked)
                                 _cd_status = clicks.backend if _ok else "UNAVAILABLE"
                                 if _ok:  # while the target is still pending/paused: hide the pointer when a window covers it or another app takes focus (misleading guidance), show it again when restored
-                                    def _guard(_tok=_tok, _pt=(px if arm_rect is None else (arm_rect[0] + arm_rect[2] / 2, arm_rect[1] + arm_rect[3] / 2)), _pin=clicks._pin, _lab=step.get("label"), _rect=arm_rect, _app=arm_app):
-                                        last = "ok"
+                                    def _guard(_tok=_tok, _pt=(px if arm_rect is None else (arm_rect[0] + arm_rect[2] / 2, arm_rect[1] + arm_rect[3] / 2)), _pin=clicks._pin, _lab=step.get("label"), _rect=arm_rect, _app=arm_app, _plan_app=args.get("app")):
+                                        last = "ok"; _matcher = PlanTargetMatcher(_plan_app, step.get("type"), step.get("label"), (clicks.app_identity_of_window(_pin[0])[1] if _pin else None))
                                         def _live(): return _tok == plan_tok["n"] and not ov['hidden']  # hidden = terminal (dismissed/refused/skipped/paused); covered is separate and reversible
                                         def _show():
                                             with glock:
@@ -443,6 +444,9 @@ def main():
                                             st = clicks.pin_state(_pt, _pin)
                                             if st == "unknown" or st == last: continue
                                             click_events.append({"pointer_guard": st, "was": last}); log("pointer guard: target window state %s (was %s)" % (st, last))
+                                            if st == "focus_other":  # Mac activationMatchesCurrentPlanTarget: switching to the plan's own target app is tolerated; only an UNRELATED app pauses
+                                                _foc = clicks.window_identity_at(_pt)[1]; _fn, _fi = clicks.app_identity_of_window(_foc) if _foc else (None, None)
+                                                if _matcher.matches(_fn, _fi): log("pointer guard: focus moved within the plan's target app (%s); not paused (Mac activationMatchesCurrentPlanTarget)" % _fi); last = st; continue
                                             if st == "focus_other":  # another app took focus: explicit pause; like the Mac, NO auto-resume on focus return (user must @retry or ask again)
                                                 with glock:
                                                     if not _live(): break

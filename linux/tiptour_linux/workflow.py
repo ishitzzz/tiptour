@@ -179,3 +179,18 @@ class ClickValidator:
         """Bounded wait; returns the verdict or 'pending_at_shutdown'."""
         self.done.wait(timeout)
         return self.verdict if self.done.is_set() else "pending_at_shutdown"
+
+
+class PlanTargetMatcher:
+    """Port of WorkflowRunner.activationMatchesCurrentPlanTarget (Swift :1284). An app activation pauses the plan ONLY if the activated app is unrelated to the plan's target.
+    OS mapping (the only differences): Mac bundleIdentifier -> X11 app id = lowercase 'wm_class_instance.wm_class_class'; Mac localizedName -> lowercase WM_CLASS class name.
+    planTargetAppBundleID is cached on the first match, like the Swift. Seed: the app of the window the target was armed on (Linux has no running-app lookup by the plan's app hint)."""
+    def __init__(self, plan_app=None, step_type=None, step_label=None, seed_app_id=None):
+        self.plan_app = plan_app; self.step_type = step_type; self.step_label = step_label; self.target_id = seed_app_id
+    def matches(self, name, app_id):
+        if app_id and self.target_id and app_id == self.target_id: return True
+        names = [t for t in ((self.plan_app or "").strip().lower(), (self.step_label or "").strip().lower() if self.step_type == "openApp" else "") if t]
+        n = (name or "").lower() or None; b = (app_id or "").lower() or None
+        hit = any((n == t) or (n is not None and t in n) or (b is not None and t in b) for t in names)
+        if hit: self.target_id = app_id
+        return hit

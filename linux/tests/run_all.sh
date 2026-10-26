@@ -51,7 +51,7 @@ stage() { # name script [preflight-cmd]
 HTTP_OK='curl -sf -o /dev/null http://127.0.0.1:8765/teach.html && curl -sf -o /dev/null http://127.0.0.1:8765/index.html'
 PULSE_OK='pactl list short sinks | grep -q tt_in && pactl list short sinks | grep -q tt_out'
 if [ -z "${ONLY_STAGES:-}" ]; then
-{ for t in test_ask_core test_voice_adapter test_no_action_gate test_scope_guard test_workflow_validator test_click_stale_token test_prompt_fidelity test_target_cache; do echo "== $t"; python3 tests/$t.py 2>&1 | tail -3; done; } > $P/units.txt 2>&1
+{ for t in test_ask_core test_voice_adapter test_no_action_gate test_scope_guard test_workflow_validator test_click_stale_token test_prompt_fidelity test_target_cache test_plan_target_matcher; do echo "== $t"; python3 tests/$t.py 2>&1 | tail -3; done; } > $P/units.txt 2>&1
 mkdir -p $P/stale; OUT=$P/stale python3 tests/test_interrupt_stale.py > $P/stale/stdout.txt 2>&1; if grep -a -q -E "FAIL|Traceback|pa_context_connect" $P/units.txt; then echo -e "units\tFAILED\t-\tFAIL/Traceback/pa error in units.txt" >> $ST; INCOMPLETE=1; else echo -e "units\tRAN\t0\tno FAIL/Traceback/pa error markers" >> $ST; fi
 fi
 stage insert-neg tests/run_ask_insert_neg.sh
