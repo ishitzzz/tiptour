@@ -20,7 +20,7 @@ def scope_app(targets, point):
 
 
 def items_of(targets, app, cap=400):
-    return sorted((t["role"], t["label"][:80], tuple(round(v / 8) for v in t["rect"])) for t in targets or [] if (t.get("app") or "") == app)[:cap] if app else []
+    return sorted((t["role"], t["label"][:80]) for t in targets or [] if (t.get("app") or "") == app)[:cap] if app else []  # Mac AX fingerprint = role|title|value, GEOMETRY EXCLUDED (WorkflowRunner.swift:1376-1465): a control that merely MOVES must read unchanged. VALUE is not available from the AT-SPI target list yet (known gap)
 
 
 def diff_items(a, b):
@@ -32,7 +32,7 @@ def fingerprint_of(targets, app, cap=400):
     """Hash of the target APP's visible clickable controls only: a change in an unrelated app must not certify the click."""
     if not app:
         return None
-    items = sorted((t["role"], t["label"][:80], tuple(round(v / 8) for v in t["rect"])) for t in targets or [] if (t.get("app") or "") == app)[:cap]
+    items = sorted((t["role"], t["label"][:80]) for t in targets or [] if (t.get("app") or "") == app)[:cap]
     if not items:
         return None
     return hashlib.sha1(repr(items).encode()).hexdigest()
