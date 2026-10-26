@@ -15,6 +15,8 @@ from .capture import grab, norm_to_px, changed_fraction, target_changed_fraction
 from .overlay import PointerOverlay
 from .detector import IconDetector
 from . import perception, workflow
+from .target_cache import LocalPerceptionTargetCache
+TARGET_CACHE = LocalPerceptionTargetCache()
 try:
     from . import atspi_resolver
 except Exception as _e:
@@ -256,6 +258,7 @@ def main():
             ocr_el = perception.ocr(full.resize((full.width*2, full.height*2))) if detector else []
             for e in ocr_el: e['bbox']=[v/2 for v in e['bbox']]; e['center']=[v/2 for v in e['center']]
             log('perception: %d yolo boxes, %d ocr lines' % (len(yolo), len(ocr_el)))
+            TARGET_CACHE.update([{'bbox': [b['bbox'][0], b['bbox'][1], b['bbox'][0] + b['bbox'][2], b['bbox'][1] + b['bbox'][3]], 'label': b.get('label') or '', 'source': 'yolo', 'conf': b.get('conf', 0)} for b in yolo] + [{'bbox': [e['bbox'][0], e['bbox'][1], e['bbox'][0] + e['bbox'][2], e['bbox'][1] + e['bbox'][3]], 'label': e.get('label') or '', 'source': 'ocr', 'conf': e.get('conf', 0)} for e in ocr_el], size, (0, 0, size[0], size[1]))  # Mac: LocalPerceptionTargetCache.update after each perception pass
             await client.send_screenshot(jpeg)
             from PIL import Image as _I; import io as _io; jw,jh=_I.open(_io.BytesIO(jpeg)).size; log("sent JPEG %dx%d (%d bytes) of %dx%d screen" % (jw,jh,len(jpeg), size[0], size[1])); dlog("ask:", repr(text))
             open(os.path.join(a.out,"sent-%d.jpg"%i),"wb").write(jpeg)
@@ -321,6 +324,12 @@ def main():
                                 log("stale-frame check: %.1f%% of frame pixels, %.1f%% around the target changed since the pinned frame (heuristic, not proof of freshness)" % (_fr * 100, _tf * 100))
                                 if _fr > float(os.environ.get("TIPTOUR_STALE_FRAME_MAX", "0.03")) or _tf > float(os.environ.get("TIPTOUR_STALE_TARGET_MAX", "0.06")): refuse = "the screen content changed since the screenshot this answer was based on (frame %.0f%%, around target %.0f%%); ask again" % (_fr * 100, _tf * 100); done = True
                             except Exception as _e: log("stale-frame check unavailable: %s" % type(_e).__name__)
+                        # Mac ElementResolver.exactLocalTargetResolution (:95): an explicit target_id / target_mark in the plan step binds to the cache entry first
+                        _tid = step.get("target_id") or step.get("targetID"); _tmk = step.get("target_mark") if step.get("target_mark") is not None else step.get("targetMark")
+                        if not done and (_tid or _tmk is not None):
+                            _tt = TARGET_CACHE.current_targets(); _m = next((t for t in _tt if (t["id"] == str(_tid).strip() if _tid and str(_tid).strip() else t["mark"] == _tmk)), None)
+                            if _m: px = (round(_m["global_center"][0]), round(_m["global_center"][1])); src = "target_cache:exact(%s)" % _m["source"]; done = True; arm_rect = (_m["global_box"][0], _m["global_box"][1], _m["global_box"][2] - _m["global_box"][0], _m["global_box"][3] - _m["global_box"][1])
+                            else: log("target_id/target_mark not in the fresh target list; falling through to label resolution")
                         # Mac order: AX (here AT-SPI) -> local YOLO+OCR refinement -> raw Gemini coordinate
                         if atspi_resolver and os.environ.get("TIPTOUR_USE_ATSPI", "1") == "1":
                             try:
@@ -352,7 +361,9 @@ def main():
                             except Exception as e: log("cdp resolver error", type(e).__name__)
                         if refuse: done = True
                         if not done and not refuse and detector:
-                            ref = perception.refine_coordinate(model_px, lab, yolo, ocr_el)
+                            _tr = TARGET_CACHE.resolve(lab, prefer_near_global_point=model_px)  # Mac detector tier: LocalPerceptionTargetCache.resolve (label score + source bonus + proximity)
+                            if _tr: px = (round(_tr["global_point"][0]), round(_tr["global_point"][1])); src = "target_cache:" + _tr["source"]
+                            ref = None if _tr else perception.refine_coordinate(model_px, lab, yolo, ocr_el)  # Linux-only fallback (not Mac semantics)
                             if ref: px = (round(ref["center"][0]), round(ref["center"][1])); src = "yolo_ocr:" + ref["rule"]
                         if not refuse and not (0 <= px[0] < size[0] and 0 <= px[1] < size[1]): refuse = "the model's coordinate (%d,%d) is outside the %dx%d screen; not pointing" % (px[0], px[1], size[0], size[1])
                         if not refuse and src == "model_box" and hl.get("last_ctx") and any(w in lab.lower() for w in ("highlight", "this", "area", "region")):
