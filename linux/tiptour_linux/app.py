@@ -480,6 +480,7 @@ def main():
         async def _advance_step(kind, tok0=None):
             """Mac WorkflowRunner advance (skipCurrentStep / a successful click): next step of the SAME plan, fresh capture + perception, previous-step point as the cache anchor. No model round-trip. Past the last step the plan is complete."""
             nonlocal full, jpeg, size, yolo, ocr_el
+            if gate['turn'] or gate['replay']: log("advance (%s): waiting for the live turn/replay to finish (not dropped)" % kind)
             while gate['turn'] or gate['replay']:  # unbounded wait: Skip is never silently dropped; superseded -> explicit refusal below, newer transition -> task cancelled
                 if tok0 is not None and tok0 != plan_tok['n']: break
                 await asyncio.sleep(0.1)
