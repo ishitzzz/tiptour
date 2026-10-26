@@ -19,7 +19,7 @@ chk("unrelated: unchanged_paused and not changed", "AT-SPI state unchanged" in u
 p = log("click_pause")
 chk("pause: retry then skip, second skip refused", "control retry: re-resolved the active step" in p and "control skip: pointer dismissed" in p and "control skip refused: no current target" in p)
 ev = [e.get("pointer_guard") or e.get("control") for e in json.load(open(os.path.join(R, "click_guardlife", "click_events.json")))["events"]]
-chk("guardlife: app-switch pause, retry, skip, repeated skip/retry refused", ev[:2] == ["focus_other", "paused_app_switch"] and "retry" in ev and "skip" in ev and ev[-2:] == ["skip_refused", "retry_refused"])
+chk("guardlife: app-switch pause, retry, skip, repeated skip/retry refused", ev[:2] == ["focus_other", "paused_app_switch"] and "retry" in ev and "skip" in ev and ev[-3:] == ["skip_refused", "retry", "retry_refused"] and "retry_replay" not in ev[ev.index("skip"):])
 # ---- stricter, ordered/exact checks (events come from click_events.json, not unordered stdout)
 def ce(stage): return json.load(open(os.path.join(R, stage, "click_events.json")))
 cv = ce("click_validate")
@@ -30,7 +30,7 @@ chk("validate: ordered verdicts changed -> unchanged_paused (first two)", vv[:2]
 chk("validate: third (moved/stale) point differs from the first two", len({(c[0], c[1]) for c in cur}) == 3)
 cp = ce("click_pause")
 pv = [e.get("control") or e.get("validator") for e in cp["events"]]
-chk("pause: ordered unchanged_paused,retry,unchanged_paused,retry,skip, then the QUEUED retry is refused as superseded (no retry_replay after skip), then skip_refused", pv[:7] == ["unchanged_paused", "retry", "unchanged_paused", "retry", "skip", "retry_refused", "skip_refused"] and "retry_replay" not in pv[4:])
+chk("pause: ordered unchanged_paused,retry,unchanged_paused,retry,skip, then the QUEUED retry is CANCELLED by the skip (explicit inflight_cancelled event, no retry_replay after skip), then skip_refused", pv == ["unchanged_paused", "retry", "retry_replay", "unchanged_paused", "retry", "inflight_cancelled", "skip", "skip_refused"] and "retry_replay" not in pv[4:])
 chk("pause: presses hit,hit,ignored-disarmed (exact)", [x[2] for x in cp["presses"]] == ["hit", "hit", "ignored-disarmed"])
 print("RESULT", "FAILED: %s" % bad if bad else "all semantic assertions hold (this is evidence about THIS sealed run only)")
 sys.exit(1 if bad else 0)

@@ -130,6 +130,10 @@ def main():
         if not ov['hidden'] and not ov.get('covered'): on_gtk(lambda: (overlay.show_all(), overlay.move(overlay.tip[0]-overlay.CX, overlay.tip[1]-overlay.CY)))
         return r
 
+    def _on_loop(fn):
+        lp = hl.get('loop')
+        if lp: lp.call_soon_threadsafe(fn)
+        else: fn()
     def _control_post(cmd, tok=None):
         """All pause controls (FIFO / panel buttons) are applied ON the asyncio loop thread, so they are ordered with resolve/arm/render (which are synchronous after their last await) like the Mac's @MainActor."""
         lp = hl.get("loop")
@@ -152,7 +156,7 @@ def main():
             if not cur.get("label") or not cur.get("armed"):
                 click_events.append({"control": cmd + "_refused", "reason": "no current target"}); log("control %s refused: no current target" % cmd); return
             if cmd == "skip" and hl.get("advance") and (hl.get('last_call') or {}).get("args") and (hl.get('last_call') or {}).get("idx", 0) + 1 < len(hl["last_call"]["args"].get("steps") or []):
-                click_events.append({"control": "skip", "mode": "advance"}); GLib.idle_add(lambda: panel.hide_panel() and False); hl["advance"]("skip", plan_tok["n"]); return
+                click_events.append({"control": "skip", "mode": "advance"}); GLib.idle_add(lambda: panel.hide_panel() and False); plan_tok["n"] += 1; clicks.disarm(); ov['hidden'] = True; ov['covered'] = False; GLib.idle_add(overlay.hide); cur['armed'] = False; cur['paused'] = None; hl["advance"]("skip", plan_tok["n"]); return
             if cmd == "skip":
                 plan_tok["n"] += 1; clicks.disarm(); ov['hidden'] = True; ov['covered'] = False; GLib.idle_add(overlay.hide); cur['armed'] = False; cur['paused'] = None; (hl.get('last_call') or {}).clear(); PREV_STEP_POINT['p'] = None  # plan ended: a queued/late Retry/Resume must not revive it
                 click_events.append({"control": "skip", "label": cur["label"]}); GLib.idle_add(lambda: panel.hide_panel() and False); log("control skip: pointer dismissed, target skipped (%r)" % cur["label"]); return
@@ -237,8 +241,7 @@ def main():
                     gate['turn'] = False  # consumer asked for the next item => the previous turn body has finished
                     t = await serve_q.get()
                     (hl.get('cancel_task') or (lambda: None))()  # a new ask cancels an in-flight replay/advance (Mac: start cancels the in-flight resolution)
-                    for _w in range(100):
-                        if not gate['replay']: break
+                    while gate['replay']:  # unbounded: a fresh ask never proceeds while an old replay may still commit (the cancel above ends it as soon as it unwinds)
                         await asyncio.sleep(0.05)
                     gate['turn'] = True
                     if t == "@quit":
@@ -386,20 +389,27 @@ def main():
                                         _foc = clicks.window_identity_at(_pt)[1]; _fn, _fi = clicks.app_identity_of_window(_foc) if _foc else (None, None)
                                         if _matcher.matches(_fn, _fi): log("pointer guard: focus moved within the plan's target app (%s); not paused (Mac activationMatchesCurrentPlanTarget)" % _fi); last = st; continue
                                     if st == "focus_other":  # another app took focus: explicit pause; like the Mac, NO auto-resume on focus return (user must @retry or ask again)
-                                        with glock:
-                                            if not _live(): break
-                                            ov['hidden'] = True; ov['covered'] = False; GLib.idle_add(overlay.hide); clicks.disarm(); plan_tok["n"] += 1; cur['paused'] = 'app_switch'
-                                            click_events.append({"pointer_guard": "paused_app_switch", "label": _lab}); GLib.idle_add(lambda _t=plan_tok["n"]: (panel.show_at(_pt[0], _pt[1], "Another app took focus.", _t) if _t == plan_tok["n"] else None) and False); log("pointer guard: another app took focus; target paused, pointer hidden, no auto-resume (use retry or ask again)")
+                                        def _pause_app_switch():  # runs ON the asyncio loop: every plan_tok write is loop-owned; re-validate liveness here
+                                            with glock:
+                                                if not _live(): return
+                                                ov['hidden'] = True; ov['covered'] = False; GLib.idle_add(overlay.hide); clicks.disarm(); plan_tok["n"] += 1; cur['paused'] = 'app_switch'
+                                                click_events.append({"pointer_guard": "paused_app_switch", "label": _lab}); GLib.idle_add(lambda _t=plan_tok["n"]: (panel.show_at(_pt[0], _pt[1], "Another app took focus.", _t) if _t == plan_tok["n"] else None) and False); log("pointer guard: another app took focus; target paused, pointer hidden, no auto-resume (use retry or ask again)")
+                                        _on_loop(_pause_app_switch)
                                         break
                                     if st == "ok":
                                         valid = _target_valid(_app, _lab, _rect)  # cover removed is not enough: the same control (label+rect) must still exist in the same app
-                                        with glock:
-                                            if not _live(): break
-                                            if valid: ov['covered'] = False; GLib.idle_add(_show)
-                                            else:
-                                                ov['hidden'] = True; ov['covered'] = False; GLib.idle_add(overlay.hide); clicks.disarm(); plan_tok["n"] += 1
-                                                click_events.append({"pointer_guard": "target_changed_not_resumed", "label": _lab}); log("pointer guard: target no longer verifiable at its place; pointer stays hidden, detector disarmed (ask again)")
-                                                break
+                                        if valid:
+                                            with glock:
+                                                if not _live(): break
+                                                ov['covered'] = False; GLib.idle_add(_show)
+                                        else:
+                                            def _target_changed():  # runs ON the asyncio loop
+                                                with glock:
+                                                    if not _live(): return
+                                                    ov['hidden'] = True; ov['covered'] = False; GLib.idle_add(overlay.hide); clicks.disarm(); plan_tok["n"] += 1
+                                                    click_events.append({"pointer_guard": "target_changed_not_resumed", "label": _lab}); log("pointer guard: target no longer verifiable at its place; pointer stays hidden, detector disarmed (ask again)")
+                                            _on_loop(_target_changed)
+                                            break
                                     else:
                                         with glock:
                                             if _live(): ov['covered'] = True; GLib.idle_add(overlay.hide)
@@ -444,7 +454,7 @@ def main():
         def _cancel_task():
             """Mac cancels the in-flight resolution task BEFORE every transition (skip/advance/start/stop/resume/retry). Loop-thread only."""
             t = hl.get('task')
-            if t is not None and not t.done(): t.cancel(); log("in-flight replay/advance cancelled by a newer transition")
+            if t is not None and not t.done(): t.cancel(); click_events.append({"control": "inflight_cancelled", "reason": "superseded by a newer transition"}); log("in-flight replay/advance cancelled by a newer transition")
             hl['task'] = None
         def _spawn(coro):
             _cancel_task(); hl['task'] = asyncio.ensure_future(coro)
@@ -453,10 +463,9 @@ def main():
             """Mac WorkflowRunner.retryCurrentStep() / resume(): re-capture the screen and rerun the FULL resolver cascade for the active step. No model round-trip, no tool_response."""
             nonlocal full, jpeg, size, yolo, ocr_el
             c = dict(last_call)
-            for _w in range(300):  # a replay never overlaps a live turn's capture/resolve: wait (bounded 30s) for the turn body to finish, never run concurrently
-                if not gate['turn'] and not gate['replay']: break
+            while gate['turn'] or gate['replay']:  # never overlaps a live turn's capture/resolve; waits UNBOUNDED (a transition is never silently dropped): ends by the turn finishing, or by a newer transition cancelling this task
+                if tok0 is not None and tok0 != plan_tok['n']: break
                 await asyncio.sleep(0.1)
-            if gate['turn'] or gate['replay']: click_events.append({"control": kind + "_refused", "reason": "turn or replay still in progress after 30s"}); log("control %s refused: turn or replay still in progress after 30s" % kind); return
             if not c: click_events.append({"control": kind + "_refused", "reason": "no active step"}); log("control %s refused: no active step" % kind); return
             if tok0 is not None and tok0 != plan_tok['n']: click_events.append({"control": kind + "_refused", "reason": "superseded"}); log("control %s refused: superseded by a skip or a newer target while waiting" % kind); return
             gate['replay'] = True
@@ -471,10 +480,9 @@ def main():
         async def _advance_step(kind, tok0=None):
             """Mac WorkflowRunner advance (skipCurrentStep / a successful click): next step of the SAME plan, fresh capture + perception, previous-step point as the cache anchor. No model round-trip. Past the last step the plan is complete."""
             nonlocal full, jpeg, size, yolo, ocr_el
-            for _w in range(300):
-                if not gate['turn'] and not gate['replay']: break
+            while gate['turn'] or gate['replay']:  # unbounded wait: Skip is never silently dropped; superseded -> explicit refusal below, newer transition -> task cancelled
+                if tok0 is not None and tok0 != plan_tok['n']: break
                 await asyncio.sleep(0.1)
-            if gate['turn'] or gate['replay']: log("control %s refused: turn or replay still in progress after 30s" % kind); return
             c = dict(last_call)
             if not c: click_events.append({"control": kind + "_refused", "reason": "no active step"}); return
             if tok0 is not None and tok0 != plan_tok['n']: click_events.append({"advance": kind, "refused": "superseded"}); log("advance (%s) refused: superseded by a skip or a newer target while waiting" % kind); return
