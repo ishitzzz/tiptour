@@ -267,6 +267,66 @@ def _sub(args, timeout):
     finally:
         SUB_STATS.append(rec); del SUB_STATS[:-300]; _SUB_SEM.release()
 
+FP_MAX_NODES = int(os.environ.get("TIPTOUR_FP_NODES", "400")); FP_MAX_DEPTH = int(os.environ.get("TIPTOUR_FP_DEPTH", "40"))  # Mac: 120 / 8. Measured: on Chromium the page controls start at node 136 and deeper than depth 8, so the Mac caps cannot see the page (see workflow.py)
+FP_BUDGET_S = float(os.environ.get("TIPTOUR_FP_BUDGET_S", "0.15"))  # Mac default 0.15s (measured 229-node walk ~0.08s fits); a walk cut by the budget is reported truncated and treated as a FAILED read (never compared)
+
+def _fp_value(ch):
+    """Mac: String values as-is, NSNumber stringValue, else ''; truncated to 120 chars. AT-SPI: Text interface contents, else Value interface number."""
+    try:
+        n = Atspi.Text.get_character_count(ch)
+        if n > 0: return (Atspi.Text.get_text(ch, 0, min(n, 120)) or "")[:120]
+    except Exception: pass
+    try:
+        v = Atspi.Value.get_current_value(ch)
+        if v is not None: return ("%g" % v)[:120]
+    except Exception: pass
+    return ""
+
+def _focused_window(app):
+    """Mac: kAXFocusedWindow of the app. AT-SPI: the app's top-level child with the ACTIVE state (None -> the Mac returns nil -> validator unavailable)."""
+    for j in range(app.get_child_count()):
+        try:
+            w = app.get_child_at_index(j)
+            if w is not None and w.get_state_set().contains(Atspi.StateType.ACTIVE): return w
+        except Exception: continue
+    return None
+
+def _fingerprint(name, budget=None):
+    """Port of captureAccessibilityFingerprint: preorder walk of the FOCUSED WINDOW only, role|title|value triples, <=120 nodes, depth<8, time budget; ORDER and duplicates kept."""
+    budget = FP_BUDGET_S if budget is None else budget
+    desk = Atspi.get_desktop(0); app = None
+    h = (name or "").strip().lower()
+    for i in range(desk.get_child_count()):
+        c = desk.get_child_at_index(i)
+        if c is None or _is_self(c): continue
+        nm = (c.get_name() or "").lower()
+        if nm == h or (h and h in nm): app = c; break
+    if app is None: raise TimeoutError("fingerprint: app not found")
+    root = _focused_window(app)
+    if root is None: raise TimeoutError("fingerprint: no focused (ACTIVE) window")
+    out = []; end = _time.monotonic() + budget; state = {"cut": False}
+    def rec(node, depth):
+        if len(out) >= FP_MAX_NODES or depth >= FP_MAX_DEPTH: return
+        if _time.monotonic() >= end: state["cut"] = True; return
+        try: role = node.get_role_name() or ""
+        except Exception: role = ""
+        try: title = node.get_name() or ""
+        except Exception: title = ""
+        out.append("%s|%s|%s" % (role, title, _fp_value(node)))
+        try: n = node.get_child_count()
+        except Exception: return
+        for k in range(n):
+            if len(out) >= FP_MAX_NODES: return
+            try: ch = node.get_child_at_index(k)
+            except Exception: continue
+            if ch is not None: rec(ch, depth + 1)
+    rec(root, 0)
+    return {"triples": out, "truncated": state["cut"], "window": (root.get_name() or "")[:60]}
+
+def fingerprint(name, timeout=4):
+    if ISOLATED: return _sub(["--fp", name or ""], timeout)
+    return _W.call(_fingerprint, (name,), timeout)
+
 MODAL_ROLES = {"dialog", "alert", "file chooser"}
 
 def _modal_title(hint):
@@ -305,11 +365,12 @@ def targets_isolated(timeout=6):
 
 
 if __name__ == "__main__":
-    if len(sys.argv) > 1 and sys.argv[1] in ("--probe", "--targets", "--ready", "--modal"):
+    if len(sys.argv) > 1 and sys.argv[1] in ("--probe", "--targets", "--ready", "--modal", "--fp"):
         try:
             if sys.argv[1] == "--probe":
                 rect = _json.loads(sys.argv[2]); hp = int(sys.argv[3]) or None; wall = _time.monotonic() + float(sys.argv[4])
                 el, sel = _probe(rect, hp, 4000, wall); print(_json.dumps({"element": el, "selection": sel}))
+            elif sys.argv[1] == "--fp": print(_json.dumps(_fingerprint(sys.argv[2] if len(sys.argv) > 2 else "")))
             elif sys.argv[1] == "--modal": print(_json.dumps({"title": _modal_title(sys.argv[2] if len(sys.argv) > 2 else "")}))
             elif sys.argv[1] == "--ready": print(_json.dumps({"ready": bool(ready(2.5))}))
             elif len(sys.argv) > 3 and sys.argv[2] == "--app": print(_json.dumps({"targets": _app_targets(sys.argv[3])}))  # filter in the child

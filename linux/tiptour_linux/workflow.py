@@ -1,12 +1,22 @@
-"""Teaching-mode post-click validator (analogue of Mac WorkflowRunner.captureAccessibilityFingerprint + post-click validator).
+"""Teaching-mode post-click validator: port of Mac WorkflowRunner.captureAccessibilityFingerprint + shouldBypassPostClickValidator + the post-click compare.
 
-Mac: before arming, hash role/title/value of <=120 AX nodes of the focused window (0.15s budget); after the user's click, poll up to
-5 x 80ms for a different hash; unchanged -> pause(.postClickStateUnchanged).
-Linux deviations (honest): AT-SPI fingerprint covers visible clickable controls (role, name, rounded rect, cap 400) of the APP that owns the
-armed target (not only its focused window: other windows of the same app can still change it); settle window is longer (6 x 250ms) because Chrome's AT-SPI tree updates slowly; 'pause' = keep the pointer
-and record an event (no retry/skip UI). Like the Mac, a harmless click that changes no AX state (e.g. a no-op button) reads as 'unchanged'.
+Mac (6e97782 WorkflowRunner.swift:1376-1465): an ORDERED preorder walk of the target app's FOCUSED WINDOW, role|title|value(<=120 chars) per node, <=120 nodes, depth<8, 0.15s budget,
+hashed (order and duplicate counts matter); a pre-click snapshot is taken at arm time, after the click the state is polled and a different hash = effect confirmed, unchanged = pause.
+Ported here: focused (AT-SPI ACTIVE) window only, ordered role|title|value triples, same walk order, duplicates preserved, value truncation, the Mac bypass (rightClick, or the NEXT step is
+keyboardShortcut/pressKey/type/setValue/scroll), and "favor a false pause over a wrong advance".
+Linux deviations (explicit, measured): (1) node/depth/time caps. Mac 120/8/0.15s. On Chromium via AT-SPI the 120/depth-8 walk stops inside the browser chrome BEFORE the page controls, so it cannot see a page change at all (measured run 1026-1606-fp: the page's first control is node 136 of 229). Default here is 400 nodes / depth 40 / 0.15s (Mac time budget kept: a 229-node walk measures ~0.08s); a read cut by the time budget is treated as a FAILED read (never compared). TIPTOUR_FP_NODES/DEPTH/BUDGET_S restore the Mac constants. (2) VOLATILE nodes: AT-SPI exposes live text that changes without any user action (Chromium's tab name carries "Memory usage - N MB"). While the pointer is armed and idle the validator keeps sampling; any node position whose triple changes between two consecutive idle samples (same node count) is masked to its role in the compare. Generic, no label/pattern list. A volatile node that has not yet ticked during the idle window can still read as a false 'changed' (residual). Real structural changes (node count changes) are never masked. (3) 'pause' = keep the pointer and record an event + on-screen panel.
 """
-import hashlib, threading, time
+import threading, time
+from collections import Counter
+
+MAC_NODES, MAC_DEPTH, MAC_BUDGET_S = 120, 8, 0.15
+BYPASS_NEXT = ("keyboardShortcut", "pressKey", "type", "setValue", "scroll")
+
+
+def bypass_validator(step, next_step):
+    """Mac shouldBypassPostClickValidator: rightClick, or the following step is a key/type/setValue/scroll action (the click may be an AX-level no-op)."""
+    if (step or {}).get("type") == "rightClick": return True
+    return bool(next_step) and (next_step or {}).get("type") in BYPASS_NEXT
 
 
 def scope_app(targets, point):
@@ -19,99 +29,52 @@ def scope_app(targets, point):
     return best[1] or None if best else None
 
 
-def items_of(targets, app, cap=400):
-    return sorted((t["role"], t["label"][:80]) for t in targets or [] if (t.get("app") or "") == app)[:cap] if app else []  # Mac AX fingerprint = role|title|value, GEOMETRY EXCLUDED (WorkflowRunner.swift:1376-1465): a control that merely MOVES must read unchanged. VALUE is not available from the AT-SPI target list yet (known gap)
+def mask_triples(triples, volatile):
+    """Ordered list; a volatile node position keeps only its role (title and value masked)."""
+    return [(t.split("|", 1)[0] if i in volatile else t) for i, t in enumerate(triples)]
 
 
-def diff_items(a, b):
-    sa, sb = set(a), set(b)
-    return sorted(sa - sb)[:6], sorted(sb - sa)[:6]
+def learn_volatile(prev, cur, volatile):
+    """Two consecutive IDLE samples: positions whose triple changed with the same node count are volatile. A different node count is structure, not noise."""
+    if prev is not None and len(prev) == len(cur):
+        volatile.update(i for i in range(len(cur)) if prev[i] != cur[i])
 
 
-def fingerprint_of(targets, app, cap=400):
-    """Hash of the target APP's visible clickable controls only: a change in an unrelated app must not certify the click."""
-    if not app:
-        return None
-    items = sorted((t["role"], t["label"][:80]) for t in targets or [] if (t.get("app") or "") == app)[:cap]
-    if not items:
-        return None
-    return hashlib.sha1(repr(items).encode()).hexdigest()
+def changed(base, post, volatile):
+    """Ordered compare (duplicates and order matter, like the Mac hash of the joined triples) after masking volatile positions."""
+    if len(base) != len(post): return True
+    return mask_triples(base, volatile) != mask_triples(post, volatile)
 
 
-def fingerprint(all_targets, app, timeout=2.0):
-    try:
-        return fingerprint_of(all_targets(timeout=timeout), app)
-    except Exception:
-        return None
-
-
-def validate_changed(pre, fp_fn, attempts=6, sleep_s=0.25, sleep=time.sleep):
-    """True when a post-click fingerprint differs from pre within the settle window. pre None -> (None) not validatable."""
-    if pre is None:
-        return None
-    for _ in range(attempts):
-        post = fp_fn()
-        if post is not None and post != pre:
-            return True
-        sleep(sleep_s)
-    return False
-
-
-def stable_pre(items_a, items_b):
-    """Two pre-click snapshots taken ~0.4s apart. Items present in only one are NOISE (Chrome's AT-SPI tree wobbles: 18 vs 19 targets seen on an idle page)."""
-    a, b = set(items_a), set(items_b)
-    return a & b, a ^ b
-
-
-def changed_vs_pre(stable, noise, post_items):
-    """True when the post-click item set (minus known noise) differs from the stable pre set."""
-    return (set(post_items) - noise) != stable
-
-
-def validate_items(stable, noise, post_fn, attempts=6, sleep_s=0.25, sleep=time.sleep, trigger=None, reads=None, deadline_s=20.0):
-    """Returns (verdict, ok_reads, failed_reads). verdict: True changed / False unchanged (needs >=1 successful read) / None unavailable (no stable baseline or ALL post reads failed)."""
-    if not stable:
-        return None, 0, 0
-    ok = bad = 0
-    last = None
-    _end = time.monotonic() + deadline_s  # wall-time bound: slow walks (0.8s..7s seen) must not stretch the window indefinitely
-    for _ in range(attempts):
-        if time.monotonic() > _end: break
-        post = post_fn()
-        if reads is not None:  # per-read evidence (SENSITIVE: control labels); written only to the run's evidence dir, never to the log
-            pp_ = set(post or [])
-            reads.append({"n": len(pp_), "removed": [list(map(str, x)) for x in sorted(stable) if x not in pp_][:6], "added": [list(map(str, x)) for x in sorted(pp_ - noise) if x not in stable][:6]} if post else {"n": 0, "failed": True})
-        if post:
-            ok += 1
-            if changed_vs_pre(stable, noise, post):
-                # a difference counts only when the SAME difference is seen on two successive reads (a single read can be a partial/wobbling Chrome tree)
-                sig = frozenset(set(post) - noise) ^ frozenset(stable)
-                if last == sig:
-                    if trigger is not None:  # diff of the EXACT confirming read
-                        pp = set(post)
-                        trigger.update(removed=[x for x in sorted(stable) if x not in pp][:4], added=[x for x in sorted(pp - noise) if x not in stable][:4], read_no=ok)
-                    return True, ok, bad
-                last = sig
-            else:
-                last = None
-        else:
-            bad += 1
-        sleep(sleep_s)
-    return (False if ok else None), ok, bad
+def diff_counts(base, post):
+    a, b = Counter(base), Counter(post)
+    return sorted((a - b).elements())[:6], sorted((b - a).elements())[:6]
 
 
 class ClickValidator:
+    """Arm-time baseline thread (never blocks arming): resolves the app, then keeps sampling the focused-window fingerprint while idle until the click. A sample that finishes after the click
+    is discarded. A click before two good samples exist is UNVERIFIED (post-click state is never the baseline). Verdicts: changed | unchanged_paused | unavailable:<reason>.
+    walk_fp(app) -> {"triples": [...], "truncated": bool}."""
     trig = None
-    """Mac WorkflowRunner post-click validator analogue, restructured so arming never waits for the baseline.
-    Baseline (two app-scoped snapshots 0.4s apart) runs in a thread started at arm time. A click that arrives before the baseline is ready is
-    UNVERIFIED (post-click state is never used as the baseline). Verdict values: changed | unchanged_paused | unavailable:<reason>."""
 
-    def __init__(self, walk_all, walk_app, point, app_hint=None, attempts=6, sleep_s=0.25, gap_s=0.4, sleep=time.sleep):
-        self.walk_all, self.walk_app, self.point, self.app_hint = walk_all, walk_app, point, app_hint
-        self.attempts, self.sleep_s, self.gap_s, self.sleep = attempts, sleep_s, gap_s, sleep
-        self.ready = threading.Event(); self.done = threading.Event()
-        self.scope = None; self.stable = set(); self.noise = set(); self.baseline_error = None
+    def __init__(self, walk_all, walk_fp, point, app_hint=None, attempts=6, sleep_s=0.25, gap_s=0.4, sleep=time.sleep, max_idle_samples=200):
+        self.walk_all, self.walk_fp, self.point, self.app_hint = walk_all, walk_fp, point, app_hint
+        self.attempts, self.sleep_s, self.gap_s, self.sleep, self.max_idle = attempts, sleep_s, gap_s, sleep, max_idle_samples
+        self.ready = threading.Event(); self.done = threading.Event(); self.clicked = threading.Event()
+        self.scope = None; self.base = None; self.volatile = set(); self.baseline_error = None; self.idle_samples = 0
         self.verdict = None; self.detail = {}; self._threads = []; self.sample = None; self.trig = {}; self.reads = []
+
+    @property
+    def stable(self): return self.base or []
+    @property
+    def noise(self): return self.volatile
+
+    def _read(self):
+        try:
+            d = self.walk_fp(self.scope)
+            return None if (not d or d.get("truncated") or not d.get("triples")) else d["triples"]
+        except Exception:
+            return None
 
     def start_baseline(self):
         t = threading.Thread(target=self._baseline, daemon=True); self._threads.append(t); t.start()
@@ -119,28 +82,24 @@ class ClickValidator:
     def _baseline(self):
         try:
             self.scope = self.app_hint
-            if self.scope:
-                try: t1 = self.walk_app(self.scope)
-                except Exception: t1 = []
-            else:
-                full = self.walk_all(); self.scope = scope_app(full, self.point); t1 = full  # no AT-SPI control at the point -> scope None -> unavailable
             if not self.scope:
-                self.baseline_error = "no_atspi_control_at_target_point"; return
-            a = items_of(t1, self.scope)
-            tries = 0
-            while not a and tries < 3:  # Chrome builds its AT-SPI tree lazily: an empty first read is a failed read, not a baseline
-                tries += 1; self.sleep(self.gap_s)
-                try: a = items_of(self.walk_app(self.scope), self.scope)
-                except Exception: a = []
-            self.sleep(self.gap_s)
-            b = items_of(self.walk_app(self.scope), self.scope)
-            tries = 0
-            while not b and tries < 3:
-                tries += 1; self.sleep(self.gap_s)
-                try: b = items_of(self.walk_app(self.scope), self.scope)
-                except Exception: b = []
-            self.stable, self.noise = stable_pre(a, b) if (a and b) else (set(), set())
-            if not self.stable: self.baseline_error = "empty_baseline"
+                try: self.scope = scope_app(self.walk_all(), self.point)
+                except Exception: self.scope = None
+            if not self.scope:
+                self.baseline_error = "no_atspi_control_at_target_point"; self.ready.set(); return
+            prev = None; good = 0; tries = 0
+            while not self.clicked.is_set() and self.idle_samples < self.max_idle:
+                cur = self._read()
+                if self.clicked.is_set(): break  # finished after the click: discard
+                self.idle_samples += 1
+                if cur is None:
+                    tries += 1
+                    if good < 2 and tries >= 6: self.baseline_error = "empty_baseline"; break
+                else:
+                    learn_volatile(prev, cur, self.volatile); prev = cur; self.base = cur; good += 1
+                    if good >= 2: self.ready.set()
+                self.sleep(self.gap_s)
+            if good < 2 and not self.baseline_error and not self.clicked.is_set(): self.baseline_error = "empty_baseline"
         except Exception as e:
             self.baseline_error = "baseline_read_failed:" + type(e).__name__
         finally:
@@ -148,14 +107,9 @@ class ClickValidator:
 
     def on_click(self):
         """Call at the hit. Never blocks: spawns the verdict thread."""
-        was_ready = self.ready.is_set()
+        was_ready = self.ready.is_set() and self.base is not None and self.idle_samples >= 2
+        self.clicked.set()
         t = threading.Thread(target=self._verdict, args=(was_ready,), daemon=True); self._threads.append(t); t.start()
-
-    def _post(self):
-        try:
-            return items_of(self.walk_app(self.scope), self.scope)
-        except Exception:
-            return None
 
     def _verdict(self, was_ready):
         try:
@@ -164,12 +118,25 @@ class ClickValidator:
             elif self.baseline_error:
                 self.verdict = "unavailable:" + self.baseline_error
             else:
-                v, ok, bad = validate_items(self.stable, self.noise, self._post, self.attempts, self.sleep_s, self.sleep, trigger=self.trig, reads=self.reads)
-                self.detail = {"ok_reads": ok, "failed_reads": bad, "noise_items": len(self.noise), "stable_items": len(self.stable)}
-                if v:
-                    self.sample = (self.trig.get('removed', []), self.trig.get('added', []))
-                    self.detail['trigger_read'] = self.trig.get('read_no')
-                self.verdict = "changed" if v else ("unchanged_paused" if v is False else "unavailable:all_post_reads_failed")
+                base = list(self.base); ok = bad = 0; last = None; end = time.monotonic() + 20.0; v = None
+                for _ in range(self.attempts):
+                    if time.monotonic() > end: break
+                    post = self._read()
+                    if post is None:
+                        bad += 1; self.reads.append({"n": 0, "failed": True})
+                    else:
+                        ok += 1; rem, add = diff_counts(base, post)
+                        self.reads.append({"n": len(post), "removed": rem, "added": add})
+                        if changed(base, post, self.volatile):
+                            sig = (len(post), tuple(mask_triples(post, self.volatile)))
+                            if last == sig:  # the SAME post state on two successive reads (one read can be a partial tree)
+                                self.trig.update(removed=rem[:4], added=add[:4], read_no=ok); v = True; break
+                            last = sig
+                        else: last = None
+                    self.sleep(self.sleep_s)
+                self.detail = {"ok_reads": ok, "failed_reads": bad, "volatile_nodes": len(self.volatile), "idle_samples": self.idle_samples, "baseline_nodes": len(base)}
+                if v: self.sample = (self.trig.get("removed", []), self.trig.get("added", [])); self.detail["trigger_read"] = self.trig.get("read_no")
+                self.verdict = "changed" if v else ("unchanged_paused" if ok else "unavailable:all_post_reads_failed")
         except Exception as e:
             self.verdict = "unavailable:verdict_error:" + type(e).__name__
         finally:

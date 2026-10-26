@@ -20,6 +20,14 @@ asyncio.run(main())
 PY
   echo "$(date +%T.%N) page control moved" >> $O/script_events.txt; sleep 1.5
   read X Y <<< "$(grep -a "render cursor at" $O/stdout.txt | tail -1 | sed -E "s/.*at \(([0-9]+), ([0-9]+)\).*/\1 \2/")"; xdotool mousemove $X $Y; sleep 0.3; xdotool click 1; echo "$(date +%T.%N) clicked OLD point $X $Y" >> $O/script_events.txt; sleep 8
+  python3 - <<PY > $O/clicked.txt
+import json,urllib.request,asyncio,websockets
+async def main():
+    t=[x for x in json.load(urllib.request.urlopen("http://127.0.0.1:9222/json")) if x["type"]=="page"][0]
+    async with websockets.connect(t["webSocketDebuggerUrl"]) as ws:
+        await ws.send(json.dumps({"id":1,"method":"Runtime.evaluate","params":{"expression":"String(window.__clicked||0)"}})); print(json.loads(await ws.recv())["result"]["result"]["value"])
+asyncio.run(main())
+PY
   echo "@quit" > $O/fifo ) &
 SUB=$!
 python3 -X faulthandler -m tiptour_linux.app --serve $O/fifo --hold 2 --out $O > $O/stdout.txt 2>&1; echo "app exit code $?" > $O/app_exit.txt
@@ -28,4 +36,5 @@ echo "== log"; grep -a -E "render cursor|click|validator|paused" $O/stdout.txt |
 python3 - <<PY
 log=open("$O/stdout.txt",errors="ignore").read()
 print("ASSERT 1 control moved + click at the OLD point -> validator reads UNCHANGED and pauses (not changed):", "post-click validator: AT-SPI state unchanged" in log and "effect confirmed" not in log)
+print("ASSERT 2 old-point click did not hit the moved button (window.__clicked==%s, must be 0):" % open("$O/clicked.txt").read().strip(), open("$O/clicked.txt").read().strip() == "0")
 PY

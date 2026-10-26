@@ -376,8 +376,8 @@ def main():
                     if not refuse and (step.get("type") or "click") != "observe" and os.environ.get("TIPTOUR_CLICK_DETECT", "1") == "1":  # Mac Teaching mode (a .observe step DISARMS the click detector instead: WorkflowRunner.swift:913-914): arm the listen-only click detector BEFORE the cursor lands; a click on the target completes the one-step plan (Mac WorkflowRunner.stop())
                         _tok = plan_tok["n"]
                         _val = None
-                        if os.environ.get("TIPTOUR_CLICK_VALIDATE", "1") == "1" and atspi_resolver and (step.get("type") or "click") != "rightClick":
-                            _val = workflow.ClickValidator(lambda: atspi_resolver.all_targets(timeout=8.0), lambda _n: atspi_resolver.app_targets(_n, timeout=10.0), px if arm_rect is None else (arm_rect[0] + arm_rect[2] / 2, arm_rect[1] + arm_rect[3] / 2), app_hint=arm_app)
+                        if os.environ.get("TIPTOUR_CLICK_VALIDATE", "1") == "1" and atspi_resolver and not workflow.bypass_validator(step, _steps[idx + 1] if idx + 1 < len(_steps) else None):  # Mac shouldBypassPostClickValidator (rightClick, or the next step is keyboardShortcut/pressKey/type/setValue/scroll)
+                            _val = workflow.ClickValidator(lambda: atspi_resolver.all_targets(timeout=8.0), lambda _n: atspi_resolver.fingerprint(_n, timeout=6.0), px if arm_rect is None else (arm_rect[0] + arm_rect[2] / 2, arm_rect[1] + arm_rect[3] / 2), app_hint=arm_app)
                             validators.append(_val); _val.start_baseline(); threading.Thread(target=lambda _v=_val: (_v.ready.wait(60), log("validator baseline ready: scope_set=%s stable=%d noise=%d err=%s" % (bool(_v.scope), len(_v.stable), len(_v.noise), _v.baseline_error))), daemon=True).start()  # baseline runs in the background; arming and drawing never wait for it
                         def _valid(_src=src, _tok=_tok, _val=_val):
                             if _val is None:
