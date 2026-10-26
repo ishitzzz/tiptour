@@ -196,13 +196,26 @@ def main():
         full, jpeg, size = await asyncio.to_thread(lambda: grab())
         # grab on GTK thread-safe? PIL uses its own X connection, fine.
         stream_on = [True]
-        async def stream_frames():  # Mac streams screenshots continuously while a session is live; so do we (~1 fps)
+        stream_state = {"suppressed": False, "hash": None, "sent": 0, "skipped": {"suppressed": 0, "plan_active": 0, "same_scene": 0}}
+        def _dhash(jpg):  # Mac ScreenshotPerceptualHash: 9x8 grayscale, left>right bits, same scene = hamming <= 5 (X11 uses PIL resize; CoreGraphics low-interpolation downscale differs slightly: OS adaptation)
+            from PIL import Image as _I; import io as _io
+            px = list(_I.open(_io.BytesIO(jpg)).convert("L").resize((9, 8), _I.BILINEAR).getdata()); h = 0
+            for r in range(8):
+                for c in range(8):
+                    if px[r * 9 + c] > px[r * 9 + c + 1]: h |= 1 << (r * 8 + c)
+            return h
+        def _plan_active(): return bool(cur.get("armed") or cur.get("paused") or gate["turn"] or gate["replay"])  # Mac: WorkflowRunner.shared.activePlan != nil
+        async def stream_frames():  # Mac GeminiLiveSession.captureAndProcessFrameForGemini: 3.0s timer; skip while suppressed-until-user-speaks or a plan is active; perceptual-hash dedup; else send
             while stream_on[0]:
                 try:
-                    if overlay.mode != 'follow': await asyncio.sleep(1.0); continue  # Mac suppresses screenshots while a plan is active (navigating/pointing); idle = follow mode streams again
-                    _, j, _ = await asyncio.to_thread(lambda: capture_clean(fast=True)); await client.send_screenshot(j)
+                    if stream_state["suppressed"]: stream_state["skipped"]["suppressed"] += 1
+                    elif _plan_active(): stream_state["skipped"]["plan_active"] += 1
+                    else:
+                        _, j, _ = await asyncio.to_thread(lambda: capture_clean(fast=True)); h = _dhash(j); lh = stream_state["hash"]
+                        if lh is not None and bin(lh ^ h).count("1") <= 5: stream_state["skipped"]["same_scene"] += 1
+                        else: stream_state["hash"] = h; stream_state["sent"] += 1; await client.send_screenshot(j); log("stream frame sent (idle context)", stream_state["sent"], "bytes", len(j)); (open(os.path.join(a.out, "stream-%d.jpg" % stream_state["sent"]), "wb").write(j) if getattr(a, "out", None) else None)
                 except Exception as e: log('stream error', type(e).__name__)
-                await asyncio.sleep(1.0)
+                await asyncio.sleep(float(os.environ.get("TIPTOUR_STREAM_INTERVAL", "3.0")))
         stream_task = asyncio.create_task(stream_frames()) if os.environ.get('TIPTOUR_STREAM', '1') == '1' else None
         await asyncio.sleep(2.0 if stream_task else 0)
         serve_q = asyncio.Queue()
@@ -434,7 +447,7 @@ def main():
                         refuse = "superseded by a skip, cancel or newer request while resolving"  # no disarm here: the superseding transition already disarmed, and this must never disarm a NEWER plan's detector
                     ov['hidden'] = bool(refuse); ov['covered'] = False; GLib.idle_add(lambda: panel.hide_panel() and False)
                     if refuse: GLib.idle_add(overlay.retire)  # a refusal must not leave the previous answer's cursor on screen
-                    if not refuse: PREV_STEP_POINT['p'] = (px[0], px[1]); log('render cursor at', px, 'src', src); GLib.idle_add(overlay.point_to, px[0], px[1], ("? " if unconf else "") + step.get("label", ""))
+                    if not refuse: PREV_STEP_POINT['p'] = (px[0], px[1]); stream_state['suppressed'] = True; log('render cursor at', px, 'src', src); GLib.idle_add(overlay.point_to, px[0], px[1], ("? " if unconf else "") + step.get("label", ""))
                     if not refuse and (step.get("type") or "click") == "observe":  # Mac WorkflowRunner.swift:913-921: .observe = ClickDetector.disarm(), point, then after 650ms advance (never waits for a click) if the operation token is unchanged
                         clicks.disarm(); _otok = plan_tok["n"]; _ot = asyncio.ensure_future(_observe_advance(_otok)); hl["obs_task"] = _ot; click_events.append({"observe": "pointed_no_arm", "auto_advance_ms": 650})
                 if ambiguous and src == "model_box": src = "model_box(UNCONFIRMED:%d DOM candidates)" % ambiguous
@@ -525,7 +538,7 @@ def main():
         hl['replay'] = lambda kind, tok0=None: _spawn(_replay_step(kind, tok0))
         i = -1
         async for text in _asks():
-            i += 1; pause_rs['r'] = None; PREV_STEP_POINT['p'] = None
+            i += 1; pause_rs['r'] = None; PREV_STEP_POINT['p'] = None; stream_state['suppressed'] = False  # Mac: user speech / PTT clears the post-tool-call suppression
             voice_turn = text in ("@voice", "@voice-next"); in_tr = []; pending = []
             if voice_turn:
                 if not (mic and mic.active): continue  # toggled off before this turn started
