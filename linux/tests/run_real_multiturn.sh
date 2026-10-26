@@ -12,8 +12,8 @@ EXPECT_IDS=open,noop EXPECT_TITLE="Teach Test" . tests/browser_env.sh http://loc
 nrender() { grep -a -c "render cursor at" $O/stdout.txt; }
 waitr() { n=$1; for i in $(seq 60); do [ $(nrender) -gt $n ] && break; sleep 0.5; done; sleep 2; }
 ( sleep 25
-  n=$(nrender); echo "Point to the Open settings button." > $O/fifo; sleep 25; echo "$(nrender)" > $O/r1.txt
-  echo "Point to the same control you just pointed to, again." > $O/fifo; sleep 25; echo "$(nrender)" > $O/r2.txt
+  n=$(nrender); echo "${TURN1:-Point to the Open settings button.}" > $O/fifo; sleep 25; echo "$(nrender)" > $O/r1.txt
+  echo "${TURN2:-Point to the same control you just pointed to, again.}" > $O/fifo; sleep 25; echo "$(nrender)" > $O/r2.txt
   TIPTOUR_USE_CDP=1 python3 - > $O/oracle_rect.json <<PY
 import json,subprocess
 from tiptour_linux import cdp_resolver
