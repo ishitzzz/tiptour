@@ -516,6 +516,10 @@ def main():
                     log("modal check: %s" % ("dialog present" if _mt is not None else ("none" if _ms == "ok" else "unavailable (not treated as 'no dialog')")))
                     if _ms != "ok": refuse = "modal state unavailable; not pointing or clicking"; done = True; pause_rs['r'] = 'modalStateUnavailable'
                     if _mt is not None: refuse = "dialog appeared" + (": " + _mt if _mt else "") + " (paused; deal with it, then ask again)"; done = True; click_events.append({"pause": "modalDialogPresented", "title": _mt}); pause_rs['r'] = 'modalDialogPresented'
+                if not done and not refuse and atspi_resolver:
+                    _cs,_cm=await asyncio.to_thread(atspi_resolver.coordinate_status,args.get("app") or now_id[1])
+                    dlog("native coordinate mapping",json.dumps({"status":_cs,"mapping":_cm}))
+                    if _cs!="ok":refuse="unsupported or unavailable native/X11 coordinate mapping; no pointer or click";done=True
                 # Mac ElementResolver.exactLocalTargetResolution (:95): an explicit target_id / target_mark in the plan step binds to the cache entry first
                 _tid = step.get("target_id") or step.get("targetID"); _tmk = step.get("target_mark") if step.get("target_mark") is not None else step.get("targetMark")
                 if not done and (_tid or _tmk is not None):
@@ -529,7 +533,7 @@ def main():
                 # Mac order: AX (here AT-SPI) -> local YOLO+OCR refinement -> raw Gemini coordinate
                 if atspi_resolver and os.environ.get("TIPTOUR_USE_ATSPI", "1") == "1":
                     try:
-                        hits = await asyncio.to_thread(atspi_resolver.resolve, lab)  # off the event loop: a hung AT-SPI read (child killed at its own timeout) must not delay Skip/new-ask handling; the plan_tok check after the await discards a stale result
+                        hits = await asyncio.to_thread(atspi_resolver.resolve, lab, args.get("app") or now_id[1])  # off the event loop: a hung AT-SPI read (child killed at its own timeout) must not delay Skip/new-ask handling; the plan_tok check after the await discards a stale result
                         dist = []
                         for t in hits:
                             c = (t["rect"][0] + t["rect"][2] / 2, t["rect"][1] + t["rect"][3] / 2)
@@ -538,6 +542,8 @@ def main():
                             rx, ry, rw, rh = dist[0][1]["rect"]; px = (rx + rw // 2, ry + rh // 2); src = "atspi(1 match)"; done = True; arm_rect = (rx, ry, rw, rh); arm_app = dist[0][1].get("app")
                         elif len(dist) > 1:
                             refuse = "ambiguous: %d distinct AT-SPI controls match the label" % len(dist); done = True
+                    except atspi_resolver.CoordinateError as e:
+                        refuse="native/X11 coordinate mapping changed or unavailable; no fallback pointer";done=True;log("atspi coordinate mapping refused",str(e))
                     except Exception as e: log("atspi resolver error", type(e).__name__)
                 if not done and os.environ.get("TIPTOUR_USE_CDP", "1") == "1":
                     try:
