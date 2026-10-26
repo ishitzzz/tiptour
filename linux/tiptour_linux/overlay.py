@@ -102,7 +102,7 @@ class PointerOverlay(Gtk.Window):
             hb = 28 if side in CORNERS else (18 if side in ("left", "right") else 0); corner_pen = 0 if side in CORNERS else 8
             clear = min(target[0], W - target[0], target[1], H - target[1]) * 0.02
             sc = hb + clear - clamp_pen - travel_pen - corner_pen
-            if best is None or sc > best[0]: best = (sc, side, ctr)   # Swift max{lhs<rhs}: the LAST maximal wins on ties; first-maximal here differs only on exact ties
+            if best is None or sc > best[0]: best = (sc, side, ctr)   # Swift max(by:) keeps the FIRST maximal element on ties; strict > here is the same (comment corrected, behavior unchanged)
         _, side, ctr = best; ang = math.atan2(target[1] - ctr[1], target[0] - ctr[0])
         return ctr, rot_deg(ang), side
     # ---- flights ----
@@ -116,18 +116,18 @@ class PointerOverlay(Gtk.Window):
         self._log("flight_start", dist=round(dist, 1), dur=round(dur, 3), to=(round(dest[0], 1), round(dest[1], 1)), returning=self.returning)
     def point_to(self, x, y, label="", glide_ms=None):
         """startNavigatingToElement: leave follow mode, fly a bezier arc to the landing pose, settle, then hold and point (bubble shown)."""
-        self.label = label[:40]; self.show_label = False; self.target = (float(x), float(y)); self.show_all()
+        self.label = label[:40]; self.show_label = False; self.retired = False; self.target = (float(x), float(y)); self.show_all()
         self.nav_mouse = self._mouse(); self.mode = "nav"; self.returning = False
         pose_c, pose_rot, side = self.landing_pose(self.target); self.land_rot = pose_rot; self.tip = self.target
         self._log("nav_start", target=self.target, pose=(round(pose_c[0], 1), round(pose_c[1], 1)), side=side)
         self._start_flight(pose_c, pose_rot, True, self._arrived)
     def _arrived(self):   # startPointingAtElement
-        if self.mode != "nav" or self.returning: return
+        if self.mode != "nav" or self.returning or getattr(self, "retired", False): self._log("arrival_ignored", retired=getattr(self, "retired", False)); return   # release must win: a late arrival may not revive the label
         self.mode = "point"; self.rot = self.land_rot; self.show_label = True; self._log("pointing", at=(round(self.cur[0], 1), round(self.cur[1], 1)))
     def retire(self):
         """releaseHeldPointerAndFlyBack: the held pointer is released (target clicked / skipped / plan ended); 0.25s later it flies back to the user's cursor."""
         if self.mode not in ("point", "nav") or self.returning: return
-        self.show_label = False; self.queue_draw(); self._log("release")
+        self.retired = True; self.show_label = False; self.queue_draw(); self._log("release", mode=self.mode)
         GLib.timeout_add(int(RELEASE_DELAY_S * 1000), lambda: (self._fly_back(), False)[1])
     def _fly_back(self):   # startFlyingBackToCursor
         if self.mode not in ("point", "nav") or self.returning: return
@@ -137,7 +137,7 @@ class PointerOverlay(Gtk.Window):
             self.flight = dict(kind="dock", t0=time.monotonic(), dur=DOCK_S, start=self.cur, end=dest, rot0=self.rot); self._log("dock", dist=round(dist, 1)); return
         self._start_flight(dest, 0.0, False, self._finish_follow)
     def _finish_follow(self):   # finishNavigationAndResumeFollowing
-        self.flight = None; self.mode = "follow"; self.returning = False; self.rot = 0.0; self.scale = 1.0; self.show_label = False; self.vel = (0.0, 0.0); self._log("follow")
+        self.flight = None; self.mode = "follow"; self.returning = False; self.rot = 0.0; self.scale = 1.0; self.show_label = False; self.retired = False; self.vel = (0.0, 0.0); self.queue_draw(); self._log("follow")
     # ---- frame tick ----
     def _tick(self):
         now = time.monotonic(); m = self._mouse(); dt = TICK_MS / 1000.0

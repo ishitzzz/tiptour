@@ -355,7 +355,7 @@ def main():
                 unconf = (not refuse) and src == "model_box"
                 _cd_status = None
                 def _arm_block(step, px, arm_rect, arm_app, src, refuse=None, _cd_status=None):
-                    if not refuse and os.environ.get("TIPTOUR_CLICK_DETECT", "1") == "1":  # Mac Teaching mode: arm the listen-only click detector BEFORE the cursor lands; a click on the target completes the one-step plan (Mac WorkflowRunner.stop())
+                    if not refuse and (step.get("type") or "click") != "observe" and os.environ.get("TIPTOUR_CLICK_DETECT", "1") == "1":  # Mac Teaching mode (a .observe step DISARMS the click detector instead: WorkflowRunner.swift:913-914): arm the listen-only click detector BEFORE the cursor lands; a click on the target completes the one-step plan (Mac WorkflowRunner.stop())
                         _tok = plan_tok["n"]
                         _val = None
                         if os.environ.get("TIPTOUR_CLICK_VALIDATE", "1") == "1" and atspi_resolver and (step.get("type") or "click") != "rightClick":
@@ -435,6 +435,8 @@ def main():
                     ov['hidden'] = bool(refuse); ov['covered'] = False; GLib.idle_add(lambda: panel.hide_panel() and False)
                     if refuse: GLib.idle_add(overlay.retire)  # a refusal must not leave the previous answer's cursor on screen
                     if not refuse: PREV_STEP_POINT['p'] = (px[0], px[1]); log('render cursor at', px, 'src', src); GLib.idle_add(overlay.point_to, px[0], px[1], ("? " if unconf else "") + step.get("label", ""))
+                    if not refuse and (step.get("type") or "click") == "observe":  # Mac WorkflowRunner.swift:913-921: .observe = ClickDetector.disarm(), point, then after 650ms advance (never waits for a click) if the operation token is unchanged
+                        clicks.disarm(); _otok = plan_tok["n"]; _ot = asyncio.ensure_future(_observe_advance(_otok)); hl["obs_task"] = _ot; click_events.append({"observe": "pointed_no_arm", "auto_advance_ms": 650})
                 if ambiguous and src == "model_box": src = "model_box(UNCONFIRMED:%d DOM candidates)" % ambiguous
                 tool_seen = {"label": step.get("label"), "point_2d": (None if nohint else pt), "no_hint": nohint, "px": px, "model_px": (None if nohint else model_px), "source": src}
                 if _cd_status: tool_seen["click_detector"] = _cd_status
@@ -463,6 +465,9 @@ def main():
         last_call = {}; hl['last_call'] = last_call
         def _cancel_task():
             """Mac cancels the in-flight resolution task BEFORE every transition (skip/advance/start/stop/resume/retry). Loop-thread only."""
+            _ob = hl.get('obs_task')
+            if _ob is not None and not _ob.done(): _ob.cancel(); log("pending observe auto-advance cancelled by a newer transition")
+            hl['obs_task'] = None
             t = hl.get('task')
             if t is not None and not t.done(): t.cancel(); click_events.append({"control": "inflight_cancelled", "reason": "superseded by a newer transition"}); log("in-flight replay/advance cancelled by a newer transition")
             hl['task'] = None
@@ -487,6 +492,11 @@ def main():
                 resp, ts = await _resolve_step(c["v"], c["args"], c["text"], c.get("idx", 0))
             finally: gate['replay'] = False
             click_events.append({"control": kind + "_replay", "status": (resp or {}).get("status"), "source": (ts or {}).get("source"), "refused": (ts or {}).get("refused")}); log("control %s: re-resolved the active step from a fresh capture -> %s" % (kind, (ts or {}).get("source")))
+        async def _observe_advance(tok0):
+            await asyncio.sleep(0.65)
+            if tok0 != plan_tok["n"]: click_events.append({"observe": "advance_refused", "reason": "superseded"}); log("observe auto-advance refused: superseded"); return
+            log("observe step pointed; advancing after 650ms (no click awaited)")
+            await _advance_step("observe", tok0)
         async def _advance_step(kind, tok0=None):
             """Mac WorkflowRunner advance (skipCurrentStep / a successful click): next step of the SAME plan, fresh capture + perception, previous-step point as the cache anchor. No model round-trip. Past the last step the plan is complete."""
             nonlocal full, jpeg, size, yolo, ocr_el
