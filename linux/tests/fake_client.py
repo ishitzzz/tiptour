@@ -8,7 +8,7 @@ class Fake:
     def _args_for(self, t):  # TIPTOUR_FAKE_STEPS='{"save":"Save changes"}': utterance keyword -> label (point_2d is a deliberately rough placeholder; resolvers must bind the real element)
         m = json.loads(os.environ.get("TIPTOUR_FAKE_STEPS", "{}"))
         for k, lab in m.items():
-            if k in t.lower(): return {**({"app": os.environ["TIPTOUR_FAKE_APP"]} if os.environ.get("TIPTOUR_FAKE_APP") else {}), "steps": [{**({} if os.environ.get("TIPTOUR_FAKE_NOPOINT") == "1" else {"point_2d": ([248, 56] if "staleb" in t.lower() else [500, 500])}), "label": _l, "type": "click"} for _l in (lab if isinstance(lab, list) else [lab])]}  # staleb: model point is ON the real target (frame px 107,268)
+            if k in t.lower(): return {**({"app": os.environ["TIPTOUR_FAKE_APP"]} if os.environ.get("TIPTOUR_FAKE_APP") else {}), "steps": [{**({} if os.environ.get("TIPTOUR_FAKE_NOPOINT") == "1" else {"point_2d": ([248, 56] if "staleb" in t.lower() else [500, 500])}), "label": _l, "type": (os.environ.get("TIPTOUR_FAKE_TYPES", "").split(",") + ["click"] * 9)[_i] or "click"} for _i, _l in enumerate(lab if isinstance(lab, list) else [lab])]}  # staleb: model point is ON the real target (frame px 107,268)
         return {"steps": [{"point_2d": [186, 109], "label": "Account preferences (test page)", "type": "click"}]}
     async def send_context(self, t): pass
     async def send_text(self, t):

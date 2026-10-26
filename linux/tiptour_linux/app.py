@@ -57,10 +57,10 @@ def main():
     keys = [k for k in os.environ.get("GEMINI_API_KEYS_FIRST", "").split(",") if k] + keys  # test hook: put (invalid) keys first to exercise real failover
     log_f = open(os.path.join(a.out, "trace.log"), "w")
     def log(*x):
-        s = time.strftime("%H:%M:%S ") + " ".join(map(str, x)); print(s, flush=True); log_f.write(s + "\n"); log_f.flush()
+        s = (time.strftime("%H:%M:%S") + (".%03d" % int((time.time() % 1) * 1000) if _os.environ.get("TIPTOUR_LOG_MS") == "1" else "") + " ") + " ".join(map(str, x)); print(s, flush=True); log_f.write(s + "\n"); log_f.flush()
     def dlog(*x):  # detailed lines (window titles, element labels, utterances, replies): only with TIPTOUR_DEBUG_LOG=1; default logs carry no page/user text
         if os.environ.get("TIPTOUR_DEBUG_LOG") == "1": log(*x)
-    overlay = PointerOverlay(); overlay.show_all(); overlay.move(900-overlay.CX, 500-overlay.CY)
+    overlay = PointerOverlay(); overlay.show_all()
     from .overlay import PausePanel
     panel = PausePanel(lambda: (lambda t: _control_post('retry', t))(panel.tok), lambda: (lambda t: _control_post('skip', t))(panel.tok))
     hl = {"loop": None, "q": None, "mon": None, "trail": None}
@@ -122,12 +122,13 @@ def main():
         return False
     from .clickdetect import ClickDetector, guarded_callback
     clicks = ClickDetector(); plan_tok = {"n": 0}; click_events = []; validators = []
-    def capture_clean(pin=False):
+    def capture_clean(pin=False, fast=False):
         # own overlay must not appear in frames sent to the model
-        on_gtk(overlay.hide); time.sleep(0.25)
+        _was = [False]; on_gtk(lambda: (_was.__setitem__(0, overlay.get_visible()), overlay.hide()))  # remember whether the follower was shown: it comes back after the grab (persistent buddy), instead of depending on ov['hidden']
+        time.sleep(0.05 if fast else 0.25)  # fast = the 1fps context stream: a ~50ms blink instead of the 0.25s per-ask hide (X11 has no ScreenCaptureKit-style window exclusion; the Mac excludes its overlay from capture)
         r = grab()
         if pin: frame_id['v'] = ident(); frame_id['img'] = r[0]  # ask-specific identity: only the per-ask capture pins it; the 1fps stream must not overwrite it
-        if not ov['hidden'] and not ov.get('covered'): on_gtk(lambda: (overlay.show_all(), overlay.move(overlay.tip[0]-overlay.CX, overlay.tip[1]-overlay.CY)))
+        if _was[0] and not ov.get('covered'): on_gtk(lambda: overlay.show_all())
         return r
 
     def _on_loop(fn):
@@ -156,9 +157,9 @@ def main():
             if not cur.get("label") or not cur.get("armed"):
                 click_events.append({"control": cmd + "_refused", "reason": "no current target"}); log("control %s refused: no current target" % cmd); return
             if cmd == "skip" and hl.get("advance") and (hl.get('last_call') or {}).get("args") and (hl.get('last_call') or {}).get("idx", 0) + 1 < len(hl["last_call"]["args"].get("steps") or []):
-                click_events.append({"control": "skip", "mode": "advance"}); GLib.idle_add(lambda: panel.hide_panel() and False); plan_tok["n"] += 1; clicks.disarm(); ov['hidden'] = True; ov['covered'] = False; GLib.idle_add(overlay.hide); cur['armed'] = False; cur['paused'] = None; hl["advance"]("skip", plan_tok["n"]); return
+                click_events.append({"control": "skip", "mode": "advance"}); GLib.idle_add(lambda: panel.hide_panel() and False); plan_tok["n"] += 1; clicks.disarm(); ov['hidden'] = True; ov['covered'] = False; GLib.idle_add(overlay.retire); cur['armed'] = False; cur['paused'] = None; hl["advance"]("skip", plan_tok["n"]); return
             if cmd == "skip":
-                plan_tok["n"] += 1; clicks.disarm(); ov['hidden'] = True; ov['covered'] = False; GLib.idle_add(overlay.hide); cur['armed'] = False; cur['paused'] = None; (hl.get('last_call') or {}).clear(); PREV_STEP_POINT['p'] = None  # plan ended: a queued/late Retry/Resume must not revive it
+                plan_tok["n"] += 1; clicks.disarm(); ov['hidden'] = True; ov['covered'] = False; GLib.idle_add(overlay.retire); cur['armed'] = False; cur['paused'] = None; (hl.get('last_call') or {}).clear(); PREV_STEP_POINT['p'] = None  # plan ended: a queued/late Retry/Resume must not revive it
                 click_events.append({"control": "skip", "label": cur["label"]}); GLib.idle_add(lambda: panel.hide_panel() and False); log("control skip: pointer dismissed, target skipped (%r)" % cur["label"]); return
         v = validators[-1].verdict if validators else None
         if ov['hidden'] and cur.get('paused') != 'app_switch':
@@ -198,8 +199,8 @@ def main():
         async def stream_frames():  # Mac streams screenshots continuously while a session is live; so do we (~1 fps)
             while stream_on[0]:
                 try:
-                    if overlay.get_visible(): await asyncio.sleep(1.0); continue  # never hide the shown cursor just to stream (flicker); per-ask captures still hide it once
-                    _, j, _ = await asyncio.to_thread(capture_clean); await client.send_screenshot(j)
+                    if overlay.mode != 'follow': await asyncio.sleep(1.0); continue  # Mac suppresses screenshots while a plan is active (navigating/pointing); idle = follow mode streams again
+                    _, j, _ = await asyncio.to_thread(lambda: capture_clean(fast=True)); await client.send_screenshot(j)
                 except Exception as e: log('stream error', type(e).__name__)
                 await asyncio.sleep(1.0)
         stream_task = asyncio.create_task(stream_frames()) if os.environ.get('TIPTOUR_STREAM', '1') == '1' else None
@@ -251,7 +252,16 @@ def main():
                     yield t
         async def _resolve_step(v, args, text, idx=0):
             tool_seen = None; resp = None
-            step = (args.get("steps") or [{}])[idx]
+            _steps = args.get("steps") or [{}]
+            while idx < len(_steps) and _steps[idx].get("type") == "waitForState":  # Mac WorkflowRunner.swift:680-681: .waitForState is "not yet implemented, skipping" -> advance, never resolved or pointed
+                log('[Workflow] step "%s" is .waitForState - not yet implemented, skipping' % (_steps[idx].get("label") or _steps[idx].get("hint") or "")); idx += 1
+                if last_call: last_call["idx"] = idx
+            if idx >= len(_steps):  # nothing left after the skipped step(s): the plan is complete, no pointer is placed
+                with glock:
+                    plan_tok["n"] += 1; clicks.disarm(); ov['hidden'] = True; ov['covered'] = False; GLib.idle_add(overlay.retire); cur['armed'] = False; cur['paused'] = None; pause_rs['r'] = None; last_call.clear(); PREV_STEP_POINT['p'] = None
+                click_events.append({"wait_for_state": "skipped", "plan_complete": True})
+                return {"ok": True, "status": "wait_for_state_skipped", "note": "waitForState is not implemented (skipped, as on the Mac); no pointer was placed"}, None
+            step = _steps[idx]
             pt = step.get("point_2d")
             if not pt and step.get("box_2d"):
                 y1, x1, y2, x2 = step["box_2d"]; pt = [(y1 + y2) // 2, (x1 + x2) // 2]
@@ -353,7 +363,7 @@ def main():
                             validators.append(_val); _val.start_baseline(); threading.Thread(target=lambda _v=_val: (_v.ready.wait(60), log("validator baseline ready: scope_set=%s stable=%d noise=%d err=%s" % (bool(_v.scope), len(_v.stable), len(_v.noise), _v.baseline_error))), daemon=True).start()  # baseline runs in the background; arming and drawing never wait for it
                         def _valid(_src=src, _tok=_tok, _val=_val):
                             if _val is None:
-                                log("target click detected; pointer dismissed; validator: not run (right-click or disabled) - effect UNVERIFIED"); click_events.append({"target_clicked": True, "src": _src, "validator": "unavailable:not_run", "effect": "unverified"}); ov['hidden'] = True; ov['covered'] = False; GLib.idle_add(overlay.hide); return
+                                log("target click detected; pointer dismissed; validator: not run (right-click or disabled) - effect UNVERIFIED"); click_events.append({"target_clicked": True, "src": _src, "validator": "unavailable:not_run", "effect": "unverified"}); ov['hidden'] = True; ov['covered'] = False; GLib.idle_add(overlay.retire); return
                             _val.on_click()
                             def _watch():
                                 _val.done.wait(60)
@@ -364,7 +374,7 @@ def main():
                                 if _val.sample: dlog("validator diff removed=%r added=%r" % _val.sample)
                                 if v == "unchanged_paused": GLib.idle_add(lambda: (panel.show_at(px[0], px[1], "No visible change after the click.", _tok) if _tok == plan_tok["n"] else None) and False)
                                 if v == "unchanged_paused": log("post-click validator: AT-SPI state unchanged after the settle window; paused (pointer kept; on-screen Retry/Skip panel shown)"); return
-                                log("target click detected; pointer dismissed; validator: %s" % ("changed (effect confirmed in the target app's AT-SPI state)" if v == "changed" else "%s - the click was on the target but its effect is UNVERIFIED" % v)); ov['hidden'] = True; ov['covered'] = False; GLib.idle_add(overlay.hide)
+                                log("target click detected; pointer dismissed; validator: %s" % ("changed (effect confirmed in the target app's AT-SPI state)" if v == "changed" else "%s - the click was on the target but its effect is UNVERIFIED" % v)); ov['hidden'] = True; ov['covered'] = False; GLib.idle_add(overlay.retire)
                             threading.Thread(target=_watch, daemon=True).start()
                         def _stale(): log("click on stale armed target ignored (token mismatch)"); click_events.append({"stale_ignored": True})
                         _clicked = guarded_callback(plan_tok, _tok, _valid, _stale)
@@ -423,7 +433,7 @@ def main():
                     if not refuse and plan_tok["n"] != _gen0:
                         refuse = "superseded by a skip, cancel or newer request while resolving"  # no disarm here: the superseding transition already disarmed, and this must never disarm a NEWER plan's detector
                     ov['hidden'] = bool(refuse); ov['covered'] = False; GLib.idle_add(lambda: panel.hide_panel() and False)
-                    if refuse: GLib.idle_add(overlay.hide)  # a refusal must not leave the previous answer's cursor on screen
+                    if refuse: GLib.idle_add(overlay.retire)  # a refusal must not leave the previous answer's cursor on screen
                     if not refuse: PREV_STEP_POINT['p'] = (px[0], px[1]); log('render cursor at', px, 'src', src); GLib.idle_add(overlay.point_to, px[0], px[1], ("? " if unconf else "") + step.get("label", ""))
                 if ambiguous and src == "model_box": src = "model_box(UNCONFIRMED:%d DOM candidates)" % ambiguous
                 tool_seen = {"label": step.get("label"), "point_2d": (None if nohint else pt), "no_hint": nohint, "px": px, "model_px": (None if nohint else model_px), "source": src}
@@ -492,7 +502,7 @@ def main():
             try:
                 if c["idx"] + 1 >= n:
                     with glock:
-                        plan_tok["n"] += 1; clicks.disarm(); ov['hidden'] = True; ov['covered'] = False; GLib.idle_add(overlay.hide); cur['armed'] = False; cur['paused'] = None; pause_rs['r'] = None; last_call.clear(); PREV_STEP_POINT['p'] = None
+                        plan_tok["n"] += 1; clicks.disarm(); ov['hidden'] = True; ov['covered'] = False; GLib.idle_add(overlay.retire); cur['armed'] = False; cur['paused'] = None; pause_rs['r'] = None; last_call.clear(); PREV_STEP_POINT['p'] = None
                     click_events.append({"advance": kind, "plan_complete": True}); log("advance (%s): no next step, plan complete" % kind); return
                 last_call["idx"] = c["idx"] + 1; pause_rs['r'] = None
                 full, jpeg, size = await asyncio.to_thread(capture_clean, True)
@@ -591,7 +601,7 @@ def main():
                             log("voice: no transcript of the spoken request; refusing to act or point")
                             await client.tool_response(v["id"], v["name"], {"ok": False, "status": "not_executed", "error": "The spoken request could not be transcribed; ask the user to repeat it. Do not point."}); continue
                     if _hlg.no_action_requested(text):  # USER intent gate: answer-only request -> no cursor, click, right-click or workflow, whatever the model calls
-                        GLib.idle_add(overlay.hide); tool_seen = {"source": "NO_ACTION_REQUESTED", "refused": "user asked for an answer only"}
+                        GLib.idle_add(overlay.retire); tool_seen = {"source": "NO_ACTION_REQUESTED", "refused": "user asked for an answer only"}
                         log("tool call suppressed: the request is answer-only (no pointing or action)")
                         _aw = float(os.environ.get('TIPTOUR_ANSWER_WAIT_S', '20')); answer_wait.update(need=True, got=False, until=time.time() + _aw)
                         _resp = _hlg.suppressed_payload(text, hl.get("last_ctx"))

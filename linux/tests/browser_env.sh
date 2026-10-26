@@ -11,7 +11,7 @@ Xvfb :99 -screen 0 1920x1080x24 >/dev/null 2>&1 9>&- & XP=$!; sleep 1
 sleep 1
 google-chrome --no-sandbox --disable-gpu --user-data-dir=/tmp/chrome-prof --no-first-run --no-default-browser-check \
   --remote-debugging-port=9222 --window-position=${POS:-0,0} --window-size=${WIN:-1600,1000} --force-renderer-accessibility "$URL" >/dev/null 2>&1 9>&- & CP=$!
-ffmpeg -loglevel error -y -f x11grab -framerate 5 -video_size 1920x1080 -i :99 -c:v libx264 -preset ultrafast -pix_fmt yuv420p "$OUTDIR/recording.mp4" 9>&- & FP=$!
+ffmpeg -loglevel error -y -f x11grab -framerate ${REC_FPS:-5} -video_size 1920x1080 -i :99 -c:v libx264 -preset ultrafast -pix_fmt yuv420p "$OUTDIR/recording.mp4" 9>&- & FP=$!
 sleep 8
 [ -n "${PF_OPEN_EXTRA:-}" ] && { curl -s -X PUT "http://127.0.0.1:9222/json/new?$PF_OPEN_EXTRA" >/dev/null; sleep 2; }  # test hook: negative preflight (second/wrong tab)
 # optional: EXPECT_URL / EXPECT_TITLE -> verify the REAL loaded page before any test runs; stop the stage on mismatch (no model_box fallback going green)

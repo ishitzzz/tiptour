@@ -18,7 +18,11 @@ waitr() { n=$1; for i in $(seq 60); do [ $(nrender) -gt $n ] && break; sleep 0.5
 import json,subprocess
 from tiptour_linux import cdp_resolver
 g=subprocess.run(["xdotool","getdisplaygeometry"],capture_output=True,text=True).stdout.split(); size=(int(g[0]),int(g[1]))
-st,h=cdp_resolver.resolve_ex("Open settings", size); print(json.dumps({"status":st,"rect":h[0]["rect"] if h else None}))
+import os
+o={}
+for lab in os.environ.get("ORACLE_LABELS","Open settings").split("|"):
+    st,h=cdp_resolver.resolve_ex(lab, size); o[lab]={"status":st,"rect":h[0]["rect"] if h else None}
+print(json.dumps(o))
 PY
   echo "@quit" > $O/fifo ) &
 SUB=$!
@@ -29,7 +33,7 @@ echo "renders after turn1: $(cat $O/r1.txt) after turn2: $(cat $O/r2.txt)"
 python3 - <<PY
 import json,re
 O="$O"; L=[tuple(map(int,m)) for m in re.findall(r"render cursor at \((\d+), (\d+)\)", open(O+"/stdout.txt",errors="ignore").read())]
-o=json.load(open(O+"/oracle_rect.json")); r=o.get("rect"); print("oracle",o,"renders",L)
-inr=lambda p: bool(r) and r[0]<=p[0]<=r[0]+r[2] and r[1]<=p[1]<=r[1]+r[3]
-print("RESULT per render inside oracle rect:", [inr(p) for p in L])
+o=json.load(open(O+"/oracle_rect.json")); labs=list(o); print("oracle (run-specific, same run)",o,"renders",L)
+inr=lambda p,r: bool(r) and r[0]<=p[0]<=r[0]+r[2] and r[1]<=p[1]<=r[1]+r[3]
+print("RESULT render i inside oracle rect of label i:", [inr(p,o[labs[min(i,len(labs)-1)]]["rect"]) for i,p in enumerate(L)])
 PY
