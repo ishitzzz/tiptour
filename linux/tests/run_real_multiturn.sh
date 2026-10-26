@@ -23,7 +23,7 @@ PY
   echo "@quit" > $O/fifo ) &
 SUB=$!
 python3 -X faulthandler -m tiptour_linux.app --serve $O/fifo --hold 2 --out $O > $O/stdout.txt 2>&1; echo "app exit code $?" > $O/app_exit.txt
-wait $SUB 2>/dev/null; pkill -INT -x ffmpeg; sleep 1; pkill -x ffmpeg; pkill -x chrome; pkill -x xfwm4; kill $XP; true' >/dev/null 2>&1
+wait $SUB 2>/dev/null; pkill -INT -f "x11grab.*$O/recording" ; sleep 1; pkill -f "x11grab.*$O/recording"; kill $CP $XP 2>/dev/null; true' >/dev/null 2>&1
 echo "== log (no keys are logged by the app; scan below)"; grep -a -E "render cursor|refus|session|reconnect|closed|error|Error|turn" $O/stdout.txt | cut -c1-200 | head -40
 echo "renders after turn1: $(cat $O/r1.txt) after turn2: $(cat $O/r2.txt)"
 python3 - <<PY

@@ -19,7 +19,7 @@ waitr() { n=$1; for i in $(seq 80); do [ $(nrender) -gt $n ] && break; sleep 0.5
   echo "@quit" > $O/fifo ) &
 SUB=$!
 python3 -X faulthandler -m tiptour_linux.app --serve $O/fifo --hold 2 --out $O > $O/stdout.txt 2>&1; echo "app exit code $?" > $O/app_exit.txt
-wait $SUB 2>/dev/null; pkill -INT -x ffmpeg; sleep 1; pkill -x ffmpeg; pkill -x chrome; pkill -x xfwm4; kill $XP; true' >/dev/null 2>&1
+wait $SUB 2>/dev/null; pkill -INT -f "x11grab.*$O/recording" ; sleep 1; pkill -f "x11grab.*$O/recording"; kill $CP $XP 2>/dev/null; true' >/dev/null 2>&1
 echo "== log"; grep -a -E "render cursor|control |refus" $O/stdout.txt | cut -c1-200
 R1=$(cat $O/r1.txt); RR=$(cat $O/r_after_resume.txt); RT=$(cat $O/r_after_retry.txt)
 echo "ASSERT 1 pointed: $([ "${R1:-0}" -ge 1 ] && echo True || echo False)"
