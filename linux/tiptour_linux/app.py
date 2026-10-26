@@ -224,6 +224,189 @@ def main():
                         if player: player.close()
                         return
                     yield t
+        async def _resolve_step(v, args, text):
+            tool_seen = None; resp = None
+            step = (args.get("steps") or [{}])[0]
+            pt = step.get("point_2d")
+            if not pt and step.get("box_2d"):
+                y1, x1, y2, x2 = step["box_2d"]; pt = [(y1 + y2) // 2, (x1 + x2) // 2]
+            nohint = False
+            if not pt and (step.get("label") or "").strip(): pt = [500, 500]; nohint = True  # Mac resolves a step WITHOUT a spatial hint label-only (AX -> CDP -> local cache tier 3); the placeholder point is never used: unresolved + nohint = refuse
+            if pt:
+                px = norm_to_px(pt, size); model_px = px; src = "model_box"
+                lab = step.get("label", ""); done = False; ambiguous = 0; refuse = None; bound_rect = None; arm_rect = None; arm_app = None
+                if step.get("targetContext") in ("currentSelection", "focusedElement"): refuse = "targetContext %s is not implemented on Linux yet (native selection / focused-element binding is a known gap vs the Mac); not pointing" % step.get("targetContext")  # explicit, never silently ignored
+                clicks.disarm(); plan_tok["n"] += 1
+                now_id = ident(); dlog('identity pinned=%r now=%r' % (frame_id['v'], now_id))
+                if frame_id["v"] and now_id != frame_id["v"]:
+                    refuse = "focused window, title or geometry changed since the screenshot (%s -> %s); ask again" % (frame_id["v"][2], now_id[2]); done = True
+                if not done and frame_id.get("img") is not None and os.environ.get("TIPTOUR_STALE_FRAME_GUARD", "1") == "1":  # same window can still show different content (voice turns: frame is taken at turn start, speech can come much later)
+                    try:
+                        _now = await asyncio.to_thread(lambda: capture_clean()[0]); _fr = changed_fraction(frame_id["img"], _now); _tf = (0.0 if nohint else target_changed_fraction(frame_id["img"], _now, px))
+                        log("stale-frame check: %.1f%% of frame pixels, %.1f%% around the target changed since the pinned frame (heuristic, not proof of freshness)" % (_fr * 100, _tf * 100))
+                        if _fr > float(os.environ.get("TIPTOUR_STALE_FRAME_MAX", "0.03")) or _tf > float(os.environ.get("TIPTOUR_STALE_TARGET_MAX", "0.06")): refuse = "the screen content changed since the screenshot this answer was based on (frame %.0f%%, around target %.0f%%); ask again" % (_fr * 100, _tf * 100); done = True
+                    except Exception as _e: log("stale-frame check unavailable: %s" % type(_e).__name__)
+                # Mac modal gate (WorkflowRunner :586): if the plan's target app currently shows a blocking dialog, pause instead of resolving (pause reason modalDialogPresented, text "dialog appeared: <title>")
+                if not done and not refuse and args.get("app") and atspi_resolver:
+                    _ms, _mt = await asyncio.to_thread(atspi_resolver.modal_title, args.get("app"))
+                    log("modal check: %s" % ("dialog present" if _mt is not None else ("none" if _ms == "ok" else "unavailable (not treated as 'no dialog')")))
+                    if _mt is not None: refuse = "dialog appeared" + (": " + _mt if _mt else "") + " (paused; deal with it, then ask again)"; done = True; click_events.append({"pause": "modalDialogPresented", "title": _mt})
+                # Mac ElementResolver.exactLocalTargetResolution (:95): an explicit target_id / target_mark in the plan step binds to the cache entry first
+                _tid = step.get("target_id") or step.get("targetID"); _tmk = step.get("target_mark") if step.get("target_mark") is not None else step.get("targetMark")
+                if not done and (_tid or _tmk is not None):
+                    _tt = TARGET_CACHE.current_targets(); _m = next((t for t in _tt if (t["id"] == str(_tid).strip() if _tid and str(_tid).strip() else t["mark"] == _tmk)), None)
+                    if _m: px = (_half_up(_m["global_center"][0]), _half_up(_m["global_center"][1])); src = "target_cache:exact(%s)" % _m["source"]; done = True; arm_rect = (_m["global_box"][0], _m["global_box"][1], _m["global_box"][2] - _m["global_box"][0], _m["global_box"][3] - _m["global_box"][1])
+                    else: log("target_id/target_mark not in the fresh target list; falling through to label resolution")
+                # Mac ElementResolver.resolve:218 preferLocalHintBeforeAccessibility: a step that carries a spatial hint (point_2d/box_2d) tries the LOCAL perception cache (label only, anchor = previous step point or cursor) BEFORE AX/CDP
+                if not done and pt and not nohint and lab:
+                    _lr = _local_resolve(lab)
+                    if _lr: px = (_half_up(_lr["global_point"][0]), _half_up(_lr["global_point"][1])); src = "target_cache(hint-first):" + _lr["source"]; done = True; arm_rect = tuple(_lr["global_rect"])
+                # Mac order: AX (here AT-SPI) -> local YOLO+OCR refinement -> raw Gemini coordinate
+                if atspi_resolver and os.environ.get("TIPTOUR_USE_ATSPI", "1") == "1":
+                    try:
+                        hits = atspi_resolver.resolve(lab)
+                        dist = []
+                        for t in hits:
+                            c = (t["rect"][0] + t["rect"][2] / 2, t["rect"][1] + t["rect"][3] / 2)
+                            if not any(abs(c[0] - d[0]) < 30 and abs(c[1] - d[1]) < 30 for d, _ in dist): dist.append((c, t))
+                        if len(dist) == 1:
+                            rx, ry, rw, rh = dist[0][1]["rect"]; px = (rx + rw // 2, ry + rh // 2); src = "atspi(1 match)"; done = True; arm_rect = (rx, ry, rw, rh); arm_app = dist[0][1].get("app")
+                        elif len(dist) > 1:
+                            refuse = "ambiguous: %d distinct AT-SPI controls match the label" % len(dist); done = True
+                    except Exception as e: log("atspi resolver error", type(e).__name__)
+                if not done and os.environ.get("TIPTOUR_USE_CDP", "1") == "1":
+                    try:
+                        from . import cdp_resolver
+                        st, hits = cdp_resolver.resolve_ex(lab, size)
+                        if st == "ok":
+                            hh = hits[0]; bound_rect = tuple(hh["rect"]); arm_rect = bound_rect; rx, ry, rw, rh = hh["rect"]; px = (round(rx + rw / 2), round(ry + rh / 2)); src = "cdp_dom(1 match,%s)" % hh["role"]; done = True
+                            ok2, why = cdp_resolver.revalidate(lab, hh["rect"], size)  # render-time recheck of focus/window/element
+                            if not ok2: refuse = "browser state changed before pointing (%s)" % why
+                        elif st == "ambiguous": refuse = "ambiguous: %d distinct on-screen DOM matches for the label" % len(hits)
+                        elif st == "offscreen": refuse = "target exists in the page but is scrolled out of view; scroll first"
+                        elif st == "gated":
+                            log("cdp gated (reason in debug log)"); dlog("cdp gated:", cdp_resolver.GATE["reason"])
+                            if any(r[0] <= model_px[0] <= r[0] + r[2] and r[1] <= model_px[1] <= r[1] + r[3] for r in cdp_resolver.GATE["browser_rects"]):
+                                refuse = "the browser is not the foreground app; bring it to the front before pointing into it"
+                        log("cdp stage:", st)
+                    except Exception as e: log("cdp resolver error", type(e).__name__)
+                if refuse: done = True
+                if not done and not refuse and detector:
+                    _tr = _local_resolve(lab)  # Mac tier 3 (after AX and CDP): label-only cache resolve, anchor = previous step point or cursor, NOT the model point
+                    if _tr: px = (_half_up(_tr["global_point"][0]), _half_up(_tr["global_point"][1])); src = "target_cache:" + _tr["source"]; arm_rect = tuple(_tr["global_rect"])
+                    ref = None if (_tr or nohint) else perception.refine_coordinate(model_px, lab, yolo, ocr_el)  # nohint: refine would anchor on the placeholder; Mac: no hint + miss -> unresolved  # Linux-only fallback (not Mac semantics)
+                    if ref: px = (round(ref["center"][0]), round(ref["center"][1])); src = "yolo_ocr:" + ref["rule"]
+                if nohint and not refuse and src == "model_box": refuse = "could not resolve \"%s\": no matching control and no spatial hint (Mac: resolve returns nothing); not pointing" % lab
+                if not refuse and not (0 <= px[0] < size[0] and 0 <= px[1] < size[1]): refuse = "the model's coordinate (%d,%d) is outside the %dx%d screen; not pointing" % (px[0], px[1], size[0], size[1])
+                if not refuse and src == "model_box" and hl.get("last_ctx") and any(w in lab.lower() for w in ("highlight", "this", "area", "region")):
+                    try:
+                        from . import cdp_resolver as _c
+                        rx0, ry0, rw0, rh0 = hl["last_ctx"]["rect"]
+                        inter = [t for t in _c.all_targets() if not t.get("off") and t["rect"][0] < rx0 + rw0 and t["rect"][0] + t["rect"][2] > rx0 and t["rect"][1] < ry0 + rh0 and t["rect"][1] + t["rect"][3] > ry0 and t["role"] in ("a", "button", "input", "select", "textarea", "summary")]
+                        if len(inter) == 1: rr = inter[0]["rect"]; px = (round(rr[0] + rr[2] / 2), round(rr[1] + rr[3] / 2)); src = "highlight_dom(1 control in region)"
+                        elif len(inter) > 1: refuse = "the highlighted region contains %d controls (%s); say which one" % (len(inter), ", ".join(sorted({t["label"][:20] for t in inter})[:5]))
+                    except Exception as e: log("highlight resolve error", type(e).__name__)
+                # Generic scope guard (all sources): if the USER's request refers to the highlight ("highlighted", "this area", "here"...),
+                # the final point must lie inside that region. A specific label does not widen the scope. Unrelated requests are unaffected.
+                from . import highlight as _hlm
+                if not refuse and hl.get("last_ctx") and _hlm.outside_scope(text, hl["last_ctx"]["rect"], px) and src.startswith("cdp_dom(1 match") and bound_rect and _hlm.point_authorized(text):
+                    _ip = _hlm.inside_intersection_point(hl["last_ctx"]["rect"], bound_rect)  # ONE uniquely bound element overlaps the user's region and the user asked to be shown: point INSIDE the overlap, never at an outside centre
+                    if _ip: px = _ip; src += "+inside_highlight_overlap"; log("moved point inside highlight overlap")
+                if not refuse and hl.get("last_ctx") and _hlm.outside_scope(text, hl["last_ctx"]["rect"], px):
+                    refuse = "the request refers to the highlighted region, but the resolved target (%s, via %s) is outside it; not pointing" % (step.get("label", "")[:40], src)
+                if not refuse and hl.get("last_ctx") and _hlm.outside_window(text, hl["last_ctx"], px):
+                    refuse = "the request refers to the highlighted region in window %r, but the resolved target is outside that window; not pointing" % ((hl["last_ctx"].get("window") or {}).get("title", "")[:50],)
+                unconf = (not refuse) and src == "model_box"
+                _cd_status = None
+                def _arm_block(step, px, arm_rect, arm_app, src, refuse=None, _cd_status=None):
+                    if not refuse and os.environ.get("TIPTOUR_CLICK_DETECT", "1") == "1":  # Mac Teaching mode: arm the listen-only click detector BEFORE the cursor lands; a click on the target completes the one-step plan (Mac WorkflowRunner.stop())
+                        _tok = plan_tok["n"]
+                        _val = None
+                        if os.environ.get("TIPTOUR_CLICK_VALIDATE", "1") == "1" and atspi_resolver and (step.get("type") or "click") != "rightClick":
+                            _val = workflow.ClickValidator(lambda: atspi_resolver.all_targets(timeout=8.0), lambda _n: atspi_resolver.app_targets(_n, timeout=10.0), px if arm_rect is None else (arm_rect[0] + arm_rect[2] / 2, arm_rect[1] + arm_rect[3] / 2), app_hint=arm_app)
+                            validators.append(_val); _val.start_baseline(); threading.Thread(target=lambda _v=_val: (_v.ready.wait(60), log("validator baseline ready: scope_set=%s stable=%d noise=%d err=%s" % (bool(_v.scope), len(_v.stable), len(_v.noise), _v.baseline_error))), daemon=True).start()  # baseline runs in the background; arming and drawing never wait for it
+                        def _valid(_src=src, _tok=_tok, _val=_val):
+                            if _val is None:
+                                log("target click detected; pointer dismissed; validator: not run (right-click or disabled) - effect UNVERIFIED"); click_events.append({"target_clicked": True, "src": _src, "validator": "unavailable:not_run", "effect": "unverified"}); ov['hidden'] = True; ov['covered'] = False; GLib.idle_add(overlay.hide); return
+                            _val.on_click()
+                            def _watch():
+                                _val.done.wait(60)
+                                if _tok != plan_tok["n"]: click_events.append({"validator_stale_ignored": True, "verdict": _val.verdict}); return
+                                v = _val.verdict
+                                ev_ = {"target_clicked": True, "src": _src, "validator": v, "effect": "confirmed" if v == "changed" else "unverified", **_val.detail}
+                                click_events.append(ev_)
+                                if _val.sample: dlog("validator diff removed=%r added=%r" % _val.sample)
+                                if v == "unchanged_paused": GLib.idle_add(lambda: (panel.show_at(px[0], px[1], "No visible change after the click.", _tok) if _tok == plan_tok["n"] else None) and False)
+                                if v == "unchanged_paused": log("post-click validator: AT-SPI state unchanged after the settle window; paused (pointer kept; on-screen Retry/Skip panel shown)"); return
+                                log("target click detected; pointer dismissed; validator: %s" % ("changed (effect confirmed in the target app's AT-SPI state)" if v == "changed" else "%s - the click was on the target but its effect is UNVERIFIED" % v)); ov['hidden'] = True; ov['covered'] = False; GLib.idle_add(overlay.hide)
+                            threading.Thread(target=_watch, daemon=True).start()
+                        def _stale(): log("click on stale armed target ignored (token mismatch)"); click_events.append({"stale_ignored": True})
+                        _clicked = guarded_callback(plan_tok, _tok, _valid, _stale)
+                        _ok = clicks.arm(px if arm_rect is None else (arm_rect[0] + arm_rect[2] / 2, arm_rect[1] + arm_rect[3] / 2), arm_rect, _clicked)
+                        _cd_status = clicks.backend if _ok else "UNAVAILABLE"
+                        if _ok:  # while the target is still pending/paused: hide the pointer when a window covers it or another app takes focus (misleading guidance), show it again when restored
+                            def _guard(_tok=_tok, _pt=(px if arm_rect is None else (arm_rect[0] + arm_rect[2] / 2, arm_rect[1] + arm_rect[3] / 2)), _pin=clicks._pin, _lab=step.get("label"), _rect=arm_rect, _app=arm_app, _plan_app=args.get("app")):
+                                last = "ok"; _matcher = PlanTargetMatcher(_plan_app, step.get("type"), step.get("label"), (clicks.app_identity_of_window(_pin[0])[1] if _pin else None))
+                                def _live(): return _tok == plan_tok["n"] and not ov['hidden']  # hidden = terminal (dismissed/refused/skipped/paused); covered is separate and reversible
+                                def _show():
+                                    with glock:
+                                        if _live(): overlay.show_all(); overlay.move(overlay.tip[0]-overlay.CX, overlay.tip[1]-overlay.CY)
+                                    return False
+                                while True:
+                                    time.sleep(0.4)
+                                    with glock:
+                                        if not _live(): break
+                                    st = clicks.pin_state(_pt, _pin)
+                                    if st == "unknown" or st == last: continue
+                                    click_events.append({"pointer_guard": st, "was": last}); log("pointer guard: target window state %s (was %s)" % (st, last))
+                                    if st == "focus_other":  # Mac activationMatchesCurrentPlanTarget: switching to the plan's own target app is tolerated; only an UNRELATED app pauses
+                                        _foc = clicks.window_identity_at(_pt)[1]; _fn, _fi = clicks.app_identity_of_window(_foc) if _foc else (None, None)
+                                        if _matcher.matches(_fn, _fi): log("pointer guard: focus moved within the plan's target app (%s); not paused (Mac activationMatchesCurrentPlanTarget)" % _fi); last = st; continue
+                                    if st == "focus_other":  # another app took focus: explicit pause; like the Mac, NO auto-resume on focus return (user must @retry or ask again)
+                                        with glock:
+                                            if not _live(): break
+                                            ov['hidden'] = True; ov['covered'] = False; GLib.idle_add(overlay.hide); clicks.disarm(); plan_tok["n"] += 1; cur['paused'] = 'app_switch'
+                                            click_events.append({"pointer_guard": "paused_app_switch", "label": _lab}); GLib.idle_add(lambda _t=plan_tok["n"]: (panel.show_at(_pt[0], _pt[1], "Another app took focus.", _t) if _t == plan_tok["n"] else None) and False); log("pointer guard: another app took focus; target paused, pointer hidden, no auto-resume (use retry or ask again)")
+                                        break
+                                    if st == "ok":
+                                        valid = _target_valid(_app, _lab, _rect)  # cover removed is not enough: the same control (label+rect) must still exist in the same app
+                                        with glock:
+                                            if not _live(): break
+                                            if valid: ov['covered'] = False; GLib.idle_add(_show)
+                                            else:
+                                                ov['hidden'] = True; ov['covered'] = False; GLib.idle_add(overlay.hide); clicks.disarm(); plan_tok["n"] += 1
+                                                click_events.append({"pointer_guard": "target_changed_not_resumed", "label": _lab}); log("pointer guard: target no longer verifiable at its place; pointer stays hidden, detector disarmed (ask again)")
+                                                break
+                                    else:
+                                        with glock:
+                                            if _live(): ov['covered'] = True; GLib.idle_add(overlay.hide)
+                                    last = st
+
+                            if clicks._pin is not None: threading.Thread(target=_guard, daemon=True).start()
+                    return _cd_status
+                _cd_status = _arm_block(step, px, arm_rect, arm_app, src, refuse, None)
+                cur.update(label=step.get("label"), step=step, px=px, rect=arm_rect, app=arm_app, src=src, armed=not refuse, pin=clicks._pin, rearm=(lambda s=step, p=px, r=arm_rect, ap=arm_app, sc=src: _arm_block(s, p, r, ap, sc, None, None)))
+                ov['hidden'] = bool(refuse); ov['covered'] = False; GLib.idle_add(lambda: panel.hide_panel() and False)
+                if refuse: GLib.idle_add(overlay.hide)  # a refusal must not leave the previous answer's cursor on screen
+                if not refuse: log('render cursor at', px, 'src', src); GLib.idle_add(overlay.point_to, px[0], px[1], ("? " if unconf else "") + step.get("label", ""))
+                if ambiguous and src == "model_box": src = "model_box(UNCONFIRMED:%d DOM candidates)" % ambiguous
+                tool_seen = {"label": step.get("label"), "point_2d": (None if nohint else pt), "no_hint": nohint, "px": px, "model_px": (None if nohint else model_px), "source": src}
+                if _cd_status: tool_seen["click_detector"] = _cd_status
+                if refuse: tool_seen["source"] = "REFUSED"; tool_seen["refused"] = refuse; log("refused to point (reason in debug log only)"); dlog("refused to point:", refuse)
+                if refuse: resp = {"ok": False, "status": "not_pointed", "error": refuse}
+                elif a.act and (step.get("type") or "click") in ("click", "doubleClick", "rightClick") and not _hlg.action_matches_intent(step.get("type") or "click", text):
+                    log("action NOT executed: the user's words do not ask for a %s" % (step.get("type") or "click"))
+                    resp = {"ok": False, "status": "not_executed", "error": "The user's request does not ask for this action; the cursor was only pointed. Tell the user where it is and let them act."}
+                elif a.act and (step.get("type") or "click") in ("click", "doubleClick", "rightClick"):
+                    from . import actions
+                    time.sleep(1.0)  # let the pointer land first, like Mac (point then act)
+                    resp = actions.execute(step, px); log("action executed, ok=%s" % resp.get("ok")); dlog("action", json.dumps(resp))
+                elif unconf: resp = {"ok": False, "status": "pointed_unconfirmed", "note": "The cursor was placed from the vision estimate only; no UI element or page element confirmed it. Do not claim it is on the target. Tell the user it is a guess and ask them to confirm."}
+                else: resp = {"ok": True, "status": "pointed", "note": "point-only mode; user must click"}
+            else:
+                resp = {"ok": False, "error": "no coordinates"}
+            return resp, tool_seen
+
         i = -1
         async for text in _asks():
             i += 1
@@ -322,185 +505,7 @@ def main():
                         _resp = _hlg.suppressed_payload(text, hl.get("last_ctx"))
                         await client.tool_response(v["id"], v["name"], _resp)
                         continue
-                    step = (args.get("steps") or [{}])[0]
-                    pt = step.get("point_2d")
-                    if not pt and step.get("box_2d"):
-                        y1, x1, y2, x2 = step["box_2d"]; pt = [(y1 + y2) // 2, (x1 + x2) // 2]
-                    nohint = False
-                    if not pt and (step.get("label") or "").strip(): pt = [500, 500]; nohint = True  # Mac resolves a step WITHOUT a spatial hint label-only (AX -> CDP -> local cache tier 3); the placeholder point is never used: unresolved + nohint = refuse
-                    if pt:
-                        px = norm_to_px(pt, size); model_px = px; src = "model_box"
-                        lab = step.get("label", ""); done = False; ambiguous = 0; refuse = None; bound_rect = None; arm_rect = None; arm_app = None
-                        if step.get("targetContext") in ("currentSelection", "focusedElement"): refuse = "targetContext %s is not implemented on Linux yet (native selection / focused-element binding is a known gap vs the Mac); not pointing" % step.get("targetContext")  # explicit, never silently ignored
-                        clicks.disarm(); plan_tok["n"] += 1
-                        now_id = ident(); dlog('identity pinned=%r now=%r' % (frame_id['v'], now_id))
-                        if frame_id["v"] and now_id != frame_id["v"]:
-                            refuse = "focused window, title or geometry changed since the screenshot (%s -> %s); ask again" % (frame_id["v"][2], now_id[2]); done = True
-                        if not done and frame_id.get("img") is not None and os.environ.get("TIPTOUR_STALE_FRAME_GUARD", "1") == "1":  # same window can still show different content (voice turns: frame is taken at turn start, speech can come much later)
-                            try:
-                                _now = await asyncio.to_thread(lambda: capture_clean()[0]); _fr = changed_fraction(frame_id["img"], _now); _tf = (0.0 if nohint else target_changed_fraction(frame_id["img"], _now, px))
-                                log("stale-frame check: %.1f%% of frame pixels, %.1f%% around the target changed since the pinned frame (heuristic, not proof of freshness)" % (_fr * 100, _tf * 100))
-                                if _fr > float(os.environ.get("TIPTOUR_STALE_FRAME_MAX", "0.03")) or _tf > float(os.environ.get("TIPTOUR_STALE_TARGET_MAX", "0.06")): refuse = "the screen content changed since the screenshot this answer was based on (frame %.0f%%, around target %.0f%%); ask again" % (_fr * 100, _tf * 100); done = True
-                            except Exception as _e: log("stale-frame check unavailable: %s" % type(_e).__name__)
-                        # Mac modal gate (WorkflowRunner :586): if the plan's target app currently shows a blocking dialog, pause instead of resolving (pause reason modalDialogPresented, text "dialog appeared: <title>")
-                        if not done and not refuse and args.get("app") and atspi_resolver:
-                            _ms, _mt = await asyncio.to_thread(atspi_resolver.modal_title, args.get("app"))
-                            log("modal check: %s" % ("dialog present" if _mt is not None else ("none" if _ms == "ok" else "unavailable (not treated as 'no dialog')")))
-                            if _mt is not None: refuse = "dialog appeared" + (": " + _mt if _mt else "") + " (paused; deal with it, then ask again)"; done = True; click_events.append({"pause": "modalDialogPresented", "title": _mt})
-                        # Mac ElementResolver.exactLocalTargetResolution (:95): an explicit target_id / target_mark in the plan step binds to the cache entry first
-                        _tid = step.get("target_id") or step.get("targetID"); _tmk = step.get("target_mark") if step.get("target_mark") is not None else step.get("targetMark")
-                        if not done and (_tid or _tmk is not None):
-                            _tt = TARGET_CACHE.current_targets(); _m = next((t for t in _tt if (t["id"] == str(_tid).strip() if _tid and str(_tid).strip() else t["mark"] == _tmk)), None)
-                            if _m: px = (_half_up(_m["global_center"][0]), _half_up(_m["global_center"][1])); src = "target_cache:exact(%s)" % _m["source"]; done = True; arm_rect = (_m["global_box"][0], _m["global_box"][1], _m["global_box"][2] - _m["global_box"][0], _m["global_box"][3] - _m["global_box"][1])
-                            else: log("target_id/target_mark not in the fresh target list; falling through to label resolution")
-                        # Mac ElementResolver.resolve:218 preferLocalHintBeforeAccessibility: a step that carries a spatial hint (point_2d/box_2d) tries the LOCAL perception cache (label only, anchor = previous step point or cursor) BEFORE AX/CDP
-                        if not done and pt and not nohint and lab:
-                            _lr = _local_resolve(lab)
-                            if _lr: px = (_half_up(_lr["global_point"][0]), _half_up(_lr["global_point"][1])); src = "target_cache(hint-first):" + _lr["source"]; done = True; arm_rect = tuple(_lr["global_rect"])
-                        # Mac order: AX (here AT-SPI) -> local YOLO+OCR refinement -> raw Gemini coordinate
-                        if atspi_resolver and os.environ.get("TIPTOUR_USE_ATSPI", "1") == "1":
-                            try:
-                                hits = atspi_resolver.resolve(lab)
-                                dist = []
-                                for t in hits:
-                                    c = (t["rect"][0] + t["rect"][2] / 2, t["rect"][1] + t["rect"][3] / 2)
-                                    if not any(abs(c[0] - d[0]) < 30 and abs(c[1] - d[1]) < 30 for d, _ in dist): dist.append((c, t))
-                                if len(dist) == 1:
-                                    rx, ry, rw, rh = dist[0][1]["rect"]; px = (rx + rw // 2, ry + rh // 2); src = "atspi(1 match)"; done = True; arm_rect = (rx, ry, rw, rh); arm_app = dist[0][1].get("app")
-                                elif len(dist) > 1:
-                                    refuse = "ambiguous: %d distinct AT-SPI controls match the label" % len(dist); done = True
-                            except Exception as e: log("atspi resolver error", type(e).__name__)
-                        if not done and os.environ.get("TIPTOUR_USE_CDP", "1") == "1":
-                            try:
-                                from . import cdp_resolver
-                                st, hits = cdp_resolver.resolve_ex(lab, size)
-                                if st == "ok":
-                                    hh = hits[0]; bound_rect = tuple(hh["rect"]); arm_rect = bound_rect; rx, ry, rw, rh = hh["rect"]; px = (round(rx + rw / 2), round(ry + rh / 2)); src = "cdp_dom(1 match,%s)" % hh["role"]; done = True
-                                    ok2, why = cdp_resolver.revalidate(lab, hh["rect"], size)  # render-time recheck of focus/window/element
-                                    if not ok2: refuse = "browser state changed before pointing (%s)" % why
-                                elif st == "ambiguous": refuse = "ambiguous: %d distinct on-screen DOM matches for the label" % len(hits)
-                                elif st == "offscreen": refuse = "target exists in the page but is scrolled out of view; scroll first"
-                                elif st == "gated":
-                                    log("cdp gated (reason in debug log)"); dlog("cdp gated:", cdp_resolver.GATE["reason"])
-                                    if any(r[0] <= model_px[0] <= r[0] + r[2] and r[1] <= model_px[1] <= r[1] + r[3] for r in cdp_resolver.GATE["browser_rects"]):
-                                        refuse = "the browser is not the foreground app; bring it to the front before pointing into it"
-                                log("cdp stage:", st)
-                            except Exception as e: log("cdp resolver error", type(e).__name__)
-                        if refuse: done = True
-                        if not done and not refuse and detector:
-                            _tr = _local_resolve(lab)  # Mac tier 3 (after AX and CDP): label-only cache resolve, anchor = previous step point or cursor, NOT the model point
-                            if _tr: px = (_half_up(_tr["global_point"][0]), _half_up(_tr["global_point"][1])); src = "target_cache:" + _tr["source"]; arm_rect = tuple(_tr["global_rect"])
-                            ref = None if (_tr or nohint) else perception.refine_coordinate(model_px, lab, yolo, ocr_el)  # nohint: refine would anchor on the placeholder; Mac: no hint + miss -> unresolved  # Linux-only fallback (not Mac semantics)
-                            if ref: px = (round(ref["center"][0]), round(ref["center"][1])); src = "yolo_ocr:" + ref["rule"]
-                        if nohint and not refuse and src == "model_box": refuse = "could not resolve \"%s\": no matching control and no spatial hint (Mac: resolve returns nothing); not pointing" % lab
-                        if not refuse and not (0 <= px[0] < size[0] and 0 <= px[1] < size[1]): refuse = "the model's coordinate (%d,%d) is outside the %dx%d screen; not pointing" % (px[0], px[1], size[0], size[1])
-                        if not refuse and src == "model_box" and hl.get("last_ctx") and any(w in lab.lower() for w in ("highlight", "this", "area", "region")):
-                            try:
-                                from . import cdp_resolver as _c
-                                rx0, ry0, rw0, rh0 = hl["last_ctx"]["rect"]
-                                inter = [t for t in _c.all_targets() if not t.get("off") and t["rect"][0] < rx0 + rw0 and t["rect"][0] + t["rect"][2] > rx0 and t["rect"][1] < ry0 + rh0 and t["rect"][1] + t["rect"][3] > ry0 and t["role"] in ("a", "button", "input", "select", "textarea", "summary")]
-                                if len(inter) == 1: rr = inter[0]["rect"]; px = (round(rr[0] + rr[2] / 2), round(rr[1] + rr[3] / 2)); src = "highlight_dom(1 control in region)"
-                                elif len(inter) > 1: refuse = "the highlighted region contains %d controls (%s); say which one" % (len(inter), ", ".join(sorted({t["label"][:20] for t in inter})[:5]))
-                            except Exception as e: log("highlight resolve error", type(e).__name__)
-                        # Generic scope guard (all sources): if the USER's request refers to the highlight ("highlighted", "this area", "here"...),
-                        # the final point must lie inside that region. A specific label does not widen the scope. Unrelated requests are unaffected.
-                        from . import highlight as _hlm
-                        if not refuse and hl.get("last_ctx") and _hlm.outside_scope(text, hl["last_ctx"]["rect"], px) and src.startswith("cdp_dom(1 match") and bound_rect and _hlm.point_authorized(text):
-                            _ip = _hlm.inside_intersection_point(hl["last_ctx"]["rect"], bound_rect)  # ONE uniquely bound element overlaps the user's region and the user asked to be shown: point INSIDE the overlap, never at an outside centre
-                            if _ip: px = _ip; src += "+inside_highlight_overlap"; log("moved point inside highlight overlap")
-                        if not refuse and hl.get("last_ctx") and _hlm.outside_scope(text, hl["last_ctx"]["rect"], px):
-                            refuse = "the request refers to the highlighted region, but the resolved target (%s, via %s) is outside it; not pointing" % (step.get("label", "")[:40], src)
-                        if not refuse and hl.get("last_ctx") and _hlm.outside_window(text, hl["last_ctx"], px):
-                            refuse = "the request refers to the highlighted region in window %r, but the resolved target is outside that window; not pointing" % ((hl["last_ctx"].get("window") or {}).get("title", "")[:50],)
-                        unconf = (not refuse) and src == "model_box"
-                        _cd_status = None
-                        def _arm_block(step, px, arm_rect, arm_app, src, refuse=None, _cd_status=None):
-                            if not refuse and os.environ.get("TIPTOUR_CLICK_DETECT", "1") == "1":  # Mac Teaching mode: arm the listen-only click detector BEFORE the cursor lands; a click on the target completes the one-step plan (Mac WorkflowRunner.stop())
-                                _tok = plan_tok["n"]
-                                _val = None
-                                if os.environ.get("TIPTOUR_CLICK_VALIDATE", "1") == "1" and atspi_resolver and (step.get("type") or "click") != "rightClick":
-                                    _val = workflow.ClickValidator(lambda: atspi_resolver.all_targets(timeout=8.0), lambda _n: atspi_resolver.app_targets(_n, timeout=10.0), px if arm_rect is None else (arm_rect[0] + arm_rect[2] / 2, arm_rect[1] + arm_rect[3] / 2), app_hint=arm_app)
-                                    validators.append(_val); _val.start_baseline(); threading.Thread(target=lambda _v=_val: (_v.ready.wait(60), log("validator baseline ready: scope_set=%s stable=%d noise=%d err=%s" % (bool(_v.scope), len(_v.stable), len(_v.noise), _v.baseline_error))), daemon=True).start()  # baseline runs in the background; arming and drawing never wait for it
-                                def _valid(_src=src, _tok=_tok, _val=_val):
-                                    if _val is None:
-                                        log("target click detected; pointer dismissed; validator: not run (right-click or disabled) - effect UNVERIFIED"); click_events.append({"target_clicked": True, "src": _src, "validator": "unavailable:not_run", "effect": "unverified"}); ov['hidden'] = True; ov['covered'] = False; GLib.idle_add(overlay.hide); return
-                                    _val.on_click()
-                                    def _watch():
-                                        _val.done.wait(60)
-                                        if _tok != plan_tok["n"]: click_events.append({"validator_stale_ignored": True, "verdict": _val.verdict}); return
-                                        v = _val.verdict
-                                        ev_ = {"target_clicked": True, "src": _src, "validator": v, "effect": "confirmed" if v == "changed" else "unverified", **_val.detail}
-                                        click_events.append(ev_)
-                                        if _val.sample: dlog("validator diff removed=%r added=%r" % _val.sample)
-                                        if v == "unchanged_paused": GLib.idle_add(lambda: (panel.show_at(px[0], px[1], "No visible change after the click.", _tok) if _tok == plan_tok["n"] else None) and False)
-                                        if v == "unchanged_paused": log("post-click validator: AT-SPI state unchanged after the settle window; paused (pointer kept; on-screen Retry/Skip panel shown)"); return
-                                        log("target click detected; pointer dismissed; validator: %s" % ("changed (effect confirmed in the target app's AT-SPI state)" if v == "changed" else "%s - the click was on the target but its effect is UNVERIFIED" % v)); ov['hidden'] = True; ov['covered'] = False; GLib.idle_add(overlay.hide)
-                                    threading.Thread(target=_watch, daemon=True).start()
-                                def _stale(): log("click on stale armed target ignored (token mismatch)"); click_events.append({"stale_ignored": True})
-                                _clicked = guarded_callback(plan_tok, _tok, _valid, _stale)
-                                _ok = clicks.arm(px if arm_rect is None else (arm_rect[0] + arm_rect[2] / 2, arm_rect[1] + arm_rect[3] / 2), arm_rect, _clicked)
-                                _cd_status = clicks.backend if _ok else "UNAVAILABLE"
-                                if _ok:  # while the target is still pending/paused: hide the pointer when a window covers it or another app takes focus (misleading guidance), show it again when restored
-                                    def _guard(_tok=_tok, _pt=(px if arm_rect is None else (arm_rect[0] + arm_rect[2] / 2, arm_rect[1] + arm_rect[3] / 2)), _pin=clicks._pin, _lab=step.get("label"), _rect=arm_rect, _app=arm_app, _plan_app=args.get("app")):
-                                        last = "ok"; _matcher = PlanTargetMatcher(_plan_app, step.get("type"), step.get("label"), (clicks.app_identity_of_window(_pin[0])[1] if _pin else None))
-                                        def _live(): return _tok == plan_tok["n"] and not ov['hidden']  # hidden = terminal (dismissed/refused/skipped/paused); covered is separate and reversible
-                                        def _show():
-                                            with glock:
-                                                if _live(): overlay.show_all(); overlay.move(overlay.tip[0]-overlay.CX, overlay.tip[1]-overlay.CY)
-                                            return False
-                                        while True:
-                                            time.sleep(0.4)
-                                            with glock:
-                                                if not _live(): break
-                                            st = clicks.pin_state(_pt, _pin)
-                                            if st == "unknown" or st == last: continue
-                                            click_events.append({"pointer_guard": st, "was": last}); log("pointer guard: target window state %s (was %s)" % (st, last))
-                                            if st == "focus_other":  # Mac activationMatchesCurrentPlanTarget: switching to the plan's own target app is tolerated; only an UNRELATED app pauses
-                                                _foc = clicks.window_identity_at(_pt)[1]; _fn, _fi = clicks.app_identity_of_window(_foc) if _foc else (None, None)
-                                                if _matcher.matches(_fn, _fi): log("pointer guard: focus moved within the plan's target app (%s); not paused (Mac activationMatchesCurrentPlanTarget)" % _fi); last = st; continue
-                                            if st == "focus_other":  # another app took focus: explicit pause; like the Mac, NO auto-resume on focus return (user must @retry or ask again)
-                                                with glock:
-                                                    if not _live(): break
-                                                    ov['hidden'] = True; ov['covered'] = False; GLib.idle_add(overlay.hide); clicks.disarm(); plan_tok["n"] += 1; cur['paused'] = 'app_switch'
-                                                    click_events.append({"pointer_guard": "paused_app_switch", "label": _lab}); GLib.idle_add(lambda _t=plan_tok["n"]: (panel.show_at(_pt[0], _pt[1], "Another app took focus.", _t) if _t == plan_tok["n"] else None) and False); log("pointer guard: another app took focus; target paused, pointer hidden, no auto-resume (use retry or ask again)")
-                                                break
-                                            if st == "ok":
-                                                valid = _target_valid(_app, _lab, _rect)  # cover removed is not enough: the same control (label+rect) must still exist in the same app
-                                                with glock:
-                                                    if not _live(): break
-                                                    if valid: ov['covered'] = False; GLib.idle_add(_show)
-                                                    else:
-                                                        ov['hidden'] = True; ov['covered'] = False; GLib.idle_add(overlay.hide); clicks.disarm(); plan_tok["n"] += 1
-                                                        click_events.append({"pointer_guard": "target_changed_not_resumed", "label": _lab}); log("pointer guard: target no longer verifiable at its place; pointer stays hidden, detector disarmed (ask again)")
-                                                        break
-                                            else:
-                                                with glock:
-                                                    if _live(): ov['covered'] = True; GLib.idle_add(overlay.hide)
-                                            last = st
-
-                                    if clicks._pin is not None: threading.Thread(target=_guard, daemon=True).start()
-                            return _cd_status
-                        _cd_status = _arm_block(step, px, arm_rect, arm_app, src, refuse, None)
-                        cur.update(label=step.get("label"), step=step, px=px, rect=arm_rect, app=arm_app, src=src, armed=not refuse, pin=clicks._pin, rearm=(lambda s=step, p=px, r=arm_rect, ap=arm_app, sc=src: _arm_block(s, p, r, ap, sc, None, None)))
-                        ov['hidden'] = bool(refuse); ov['covered'] = False; GLib.idle_add(lambda: panel.hide_panel() and False)
-                        if refuse: GLib.idle_add(overlay.hide)  # a refusal must not leave the previous answer's cursor on screen
-                        if not refuse: log('render cursor at', px, 'src', src); GLib.idle_add(overlay.point_to, px[0], px[1], ("? " if unconf else "") + step.get("label", ""))
-                        if ambiguous and src == "model_box": src = "model_box(UNCONFIRMED:%d DOM candidates)" % ambiguous
-                        tool_seen = {"label": step.get("label"), "point_2d": (None if nohint else pt), "no_hint": nohint, "px": px, "model_px": (None if nohint else model_px), "source": src}
-                        if _cd_status: tool_seen["click_detector"] = _cd_status
-                        if refuse: tool_seen["source"] = "REFUSED"; tool_seen["refused"] = refuse; log("refused to point (reason in debug log only)"); dlog("refused to point:", refuse)
-                        if refuse: resp = {"ok": False, "status": "not_pointed", "error": refuse}
-                        elif a.act and (step.get("type") or "click") in ("click", "doubleClick", "rightClick") and not _hlg.action_matches_intent(step.get("type") or "click", text):
-                            log("action NOT executed: the user's words do not ask for a %s" % (step.get("type") or "click"))
-                            resp = {"ok": False, "status": "not_executed", "error": "The user's request does not ask for this action; the cursor was only pointed. Tell the user where it is and let them act."}
-                        elif a.act and (step.get("type") or "click") in ("click", "doubleClick", "rightClick"):
-                            from . import actions
-                            time.sleep(1.0)  # let the pointer land first, like Mac (point then act)
-                            resp = actions.execute(step, px); log("action executed, ok=%s" % resp.get("ok")); dlog("action", json.dumps(resp))
-                        elif unconf: resp = {"ok": False, "status": "pointed_unconfirmed", "note": "The cursor was placed from the vision estimate only; no UI element or page element confirmed it. Do not claim it is on the target. Tell the user it is a guess and ask them to confirm."}
-                        else: resp = {"ok": True, "status": "pointed", "note": "point-only mode; user must click"}
-                    else:
-                        resp = {"ok": False, "error": "no coordinates"}
+                    resp, tool_seen = await _resolve_step(v, args, text)
                     await client.tool_response(v["id"], v["name"], resp)
                 elif k == "turnComplete":
                     if answer_wait["need"] and not answer_wait["got"] and time.time() < answer_wait["until"]:  # answer-only request: a turnComplete seen before any spoken answer is not the answer; keep listening (bounded)
