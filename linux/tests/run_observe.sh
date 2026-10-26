@@ -7,7 +7,7 @@ O=${RUN_DIR:?new unique dir}; [ -e $O ] && { echo exists; exit 2; }; mkdir -p $O
 export TIPTOUR_TEST_MODE=1 TIPTOUR_DEBUG_LOG=1 TIPTOUR_CLIENT_FACTORY=fake_client:make PYTHONPATH=$PWD/tests TIPTOUR_FAKE_TOOLCALL=1
 export TIPTOUR_FAKE_TRIGGER=point TIPTOUR_FAKE_TYPES=observe,observe TIPTOUR_FAKE_STEPS='{"open":["Open settings","No-op action"]}'
 export TIPTOUR_DEBUG_ATSPI=1 ACCESSIBILITY_ENABLED=1 TIPTOUR_GIR_PATH=$HOME/atspi-root/usr/lib/x86_64-linux-gnu/girepository-1.0
-export O
+export O TIPTOUR_LOG_MS=1
 dbus-run-session -- bash -c '
 EXPECT_IDS=open,noop EXPECT_TITLE="Teach Test" . tests/browser_env.sh http://localhost:8765/teach.html $O
 nrender() { grep -a -c "render cursor at" $O/stdout.txt; }
@@ -35,6 +35,12 @@ O="$O"; L=[tuple(map(int,m)) for m in re.findall(r"render cursor at \((\d+), (\d
 inr=lambda p,r: bool(r) and r[0]<=p[0]<=r[0]+r[2] and r[1]<=p[1]<=r[1]+r[3]
 r=[int(open(O+"/r%d.txt"%i).read() or 0) for i in (1,2,3)]
 print("renders",L,"counts",r,"oracle",o)
+import datetime
+ts=[l.split()[0] for l in log.splitlines() if "render cursor at" in l]
+def sec(s): h,m,r=s.split(":"); return int(h)*3600+int(m)*60+float(r)
+gap=sec(ts[1])-sec(ts[0]) if len(ts)>=2 else 99
+print("render gap step1->step2 (s):", round(gap,3))
+print("ASSERT 3 observe auto-advance does not wait for the whole live turn: step 2 renders within 3.5s of step 1 (650ms + fresh capture/perception/resolve), not ~6s:", gap < 3.5)
 ce=open(O+"/click_events.json").read()
 print("ASSERT 1 observe plan [Open settings, No-op action]: step1 rendered in its rect, then WITHOUT any click ~650ms later step 2 rendered in the No-op rect:", len(L)==2 and inr(L[0],o["Open settings"]) and inr(L[1],o["No-op action"]) and "observe step pointed; advancing after 650ms" in log)
 print("ASSERT 2 no click detector armed for observe steps (two observe events, no target_clicked/pointer_guard), and the plan completes after the last step:", ce.count("pointed_no_arm")==2 and "target_clicked" not in ce and "pointer_guard" not in ce and "no next step, plan complete" in log)

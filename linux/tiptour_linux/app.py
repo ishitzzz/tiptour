@@ -263,7 +263,12 @@ def main():
                         if player: player.close()
                         return
                     yield t
-        async def _resolve_step(v, args, text, idx=0):
+        resolving = {"n": 0}
+        async def _resolve_step(v, args, text, idx=0):  # counts in-progress resolves so an observe auto-advance (650ms) never overlaps one, without waiting for the whole live turn (Mac has no such wait: @MainActor + token)
+            resolving["n"] += 1
+            try: return await _resolve_step_inner(v, args, text, idx)
+            finally: resolving["n"] -= 1
+        async def _resolve_step_inner(v, args, text, idx=0):
             tool_seen = None; resp = None
             _steps = args.get("steps") or [{}]
             while idx < len(_steps) and _steps[idx].get("type") == "waitForState":  # Mac WorkflowRunner.swift:680-681: .waitForState is "not yet implemented, skipping" -> advance, never resolved or pointed
@@ -513,8 +518,9 @@ def main():
         async def _advance_step(kind, tok0=None):
             """Mac WorkflowRunner advance (skipCurrentStep / a successful click): next step of the SAME plan, fresh capture + perception, previous-step point as the cache anchor. No model round-trip. Past the last step the plan is complete."""
             nonlocal full, jpeg, size, yolo, ocr_el
-            if gate['turn'] or gate['replay']: log("advance (%s): waiting for the live turn/replay to finish (not dropped)" % kind)
-            while gate['turn'] or gate['replay']:  # unbounded wait: Skip is never silently dropped; superseded -> explicit refusal below, newer transition -> task cancelled
+            _busy = (lambda: gate['replay'] or resolving['n'] > 0) if kind == "observe" else (lambda: gate['turn'] or gate['replay'])  # observe auto-advance: only a resolve/replay in progress blocks it (650ms semantics); skip/click advances keep the turn gate
+            if _busy(): log("advance (%s): waiting for the in-progress resolve/replay/turn to finish (not dropped)" % kind)
+            while _busy():  # unbounded wait: Skip is never silently dropped; superseded -> explicit refusal below, newer transition -> task cancelled
                 if tok0 is not None and tok0 != plan_tok['n']: break
                 await asyncio.sleep(0.1)
             c = dict(last_call)
@@ -652,6 +658,9 @@ def main():
             if voice_turn and mic and mic.active and not voice_stopped: serve_q.put_nowait("@voice-next")  # the live voice session stays open until the next Ctrl+Alt press
             log("result recorded (turn %d, tool source %s)" % (i, ((results[-1].get("tool") or {}).get("source", "-")))); dlog("result", json.dumps(results[-1]))
         stream_on[0] = False
+        if os.environ.get("TIPTOUR_TEST_MODE") == "1":
+            try: open(os.path.join(a.out, "overlay_events.json"), "w").write(json.dumps({"events": list(overlay.events), "final": {"mode": overlay.mode, "show_label": bool(overlay.show_label), "retired": bool(getattr(overlay, "retired", False)), "label": overlay.label}}))
+            except Exception as e: log("overlay events dump failed", type(e).__name__)
         if audio:
             with wave.open(os.path.join(a.out, "reply.wav"), "wb") as w:
                 w.setnchannels(1); w.setsampwidth(2); w.setframerate(24000); w.writeframes(bytes(audio))
