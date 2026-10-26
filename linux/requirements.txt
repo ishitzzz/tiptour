@@ -1,0 +1,10 @@
+# Runtime (pip). Python 3.10 on Ubuntu 22.04 tested.
+websockets==16.1.1
+onnxruntime==1.23.2
+numpy==2.2.6
+Pillow
+python-xlib
+# System packages (apt): python3-gi gir1.2-gtk-3.0 python3-cairo xdotool tesseract-ocr gir1.2-atspi-2.0 at-spi2-core
+#   tests/harnesses additionally: xvfb xfwm4 ffmpeg scrot google-chrome-stable
+# Tools-only (tools/mil_to_onnx.py, model conversion; not needed to run the app):
+#   onnx==1.23.2  coremltools==9.0

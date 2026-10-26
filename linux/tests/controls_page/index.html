@@ -1,0 +1,12 @@
+<!doctype html><html><head><title>Owned Controls Test</title><style>
+body{font:16px sans-serif;margin:40px} .row{margin:26px 0;display:flex;align-items:center;gap:14px}
+.sw{position:relative;width:52px;height:28px;background:#bbb;border-radius:14px;display:inline-block}.sw:after{content:"";position:absolute;top:3px;left:3px;width:22px;height:22px;background:#fff;border-radius:50%}
+.ib{width:44px;height:44px;border:1px solid #888;border-radius:8px;background:#f4f4f4;font-size:22px}
+</style></head><body><h2>Account preferences (test page)</h2>
+<div class="row"><input type="checkbox" id="nl"><label for="nl">Subscribe to newsletter</label></div>
+<div class="row"><span class="sw" role="switch" aria-checked="false" aria-label="Dark mode" tabindex="0" id="dm"></span><span>Dark mode</span></div>
+<div class="row"><label for="co">Country</label><select id="co"><option>India</option><option>Germany</option><option>Brazil</option></select></div>
+<div class="row"><label for="em">Email address</label><input id="em" type="text" placeholder="you@example.com" style="width:260px;height:30px"></div>
+<div class="row"><button class="ib" aria-label="Settings" id="gear">&#9881;</button><button class="ib" id="trash">&#128465;</button><button class="ib" aria-label="Search" id="mag">&#128269;</button></div>
+<div class="row"><button id="save" style="padding:10px 22px">Save changes</button><button id="cancel" style="padding:10px 22px">Cancel</button></div>
+</body></html>

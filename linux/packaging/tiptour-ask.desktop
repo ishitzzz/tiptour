@@ -1,0 +1,6 @@
+[Desktop Entry]
+Type=Application
+Name=TipTour Ask (Linux, experimental)
+Exec=tiptour-linux ask
+Terminal=true
+Categories=Utility;
