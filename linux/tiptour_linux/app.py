@@ -196,6 +196,7 @@ def main():
         full, jpeg, size = await asyncio.to_thread(lambda: grab())
         # grab on GTK thread-safe? PIL uses its own X connection, fine.
         stream_on = [True]
+        resolving = {"n": 0}
         stream_state = {"suppressed": False, "hash": None, "sent": 0, "skipped": {"suppressed": 0, "plan_active": 0, "same_scene": 0}}
         def _dhash(jpg):  # Mac ScreenshotPerceptualHash: 9x8 grayscale, left>right bits, same scene = hamming <= 5 (X11 uses PIL resize; CoreGraphics low-interpolation downscale differs slightly: OS adaptation)
             from PIL import Image as _I; import io as _io
@@ -204,7 +205,7 @@ def main():
                 for c in range(8):
                     if px[r * 9 + c] > px[r * 9 + c + 1]: h |= 1 << (r * 8 + c)
             return h
-        def _plan_active(): return bool(cur.get("armed") or cur.get("paused") or gate["turn"] or gate["replay"])  # Mac: WorkflowRunner.shared.activePlan != nil
+        def _plan_active(): return bool(cur.get("armed") or cur.get("paused") or gate["turn"] or gate["replay"] or resolving["n"] > 0 or (hl.get("obs_task") is not None and not hl["obs_task"].done()))  # Mac: WorkflowRunner.shared.activePlan != nil
         async def stream_frames():  # Mac GeminiLiveSession.captureAndProcessFrameForGemini: 3.0s timer; skip while suppressed-until-user-speaks or a plan is active; perceptual-hash dedup; else send
             while stream_on[0]:
                 try:
@@ -263,7 +264,6 @@ def main():
                         if player: player.close()
                         return
                     yield t
-        resolving = {"n": 0}
         async def _resolve_step(v, args, text, idx=0):  # counts in-progress resolves so an observe auto-advance (650ms) never overlaps one, without waiting for the whole live turn (Mac has no such wait: @MainActor + token)
             resolving["n"] += 1
             try: return await _resolve_step_inner(v, args, text, idx)

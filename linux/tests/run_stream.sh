@@ -1,6 +1,5 @@
 #!/bin/bash
-# Retry / Resume = re-capture + rerun the full resolver cascade for the active step (Mac retryCurrentStep()/resume()). Owned page, real Chrome + AT-SPI + real YOLO/OCR, FAKE model, point-only.
-# 1) "point open" -> pointed. 2) @resume while NOT paused -> refused. 3) @retry -> fresh capture + full cascade -> a SECOND render at the same control; the model got no second tool_response.
+# Idle context stream parity (Mac GeminiLiveSession.captureAndProcessFrameForGemini): 3.0s timer (1s here), perceptual-hash dedup, suppressed after a plan renders until the next ask, skipped while a plan/resolve is active. Owned page, FAKE model. Asserts: >=1 and <=2 idle frames before the first ask, 0 after the first render. Does NOT prove pixel exclusion of the follower.
 cd "${TT_TREE:-/home/sandbox/tiptour/linux}"
 O=${RUN_DIR:?new unique dir}; [ -e $O ] && { echo exists; exit 2; }; mkdir -p $O
 . tests/clean_env.sh; tools/snapshot_tree.sh $O

@@ -1,6 +1,5 @@
 #!/bin/bash
-# Retry / Resume = re-capture + rerun the full resolver cascade for the active step (Mac retryCurrentStep()/resume()). Owned page, real Chrome + AT-SPI + real YOLO/OCR, FAKE model, point-only.
-# 1) "point open" -> pointed. 2) @resume while NOT paused -> refused. 3) @retry -> fresh capture + full cascade -> a SECOND render at the same control; the model got no second tool_response.
+# Mac WorkflowRunner.swift:913-921 observe parity: a labelled .observe step DISARMS the click detector, points, and after 650ms auto-advances (never waits for a click). Owned page, real Chrome + AT-SPI + YOLO/OCR, FAKE model, plan of 2 observe steps. Asserts: both steps render in their own CDP-oracle rects, no click armed, plan completes, step-1 -> step-2 render gap < 3.5s.
 cd "${TT_TREE:-/home/sandbox/tiptour/linux}"
 O=${RUN_DIR:?new unique dir}; [ -e $O ] && { echo exists; exit 2; }; mkdir -p $O
 . tests/clean_env.sh; tools/snapshot_tree.sh $O
