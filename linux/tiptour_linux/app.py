@@ -27,6 +27,9 @@ def _mouse_location():
         d = dict(l.split("=", 1) for l in o.split() if "=" in l); return (float(d["X"]), float(d["Y"]))
     except Exception: return None
 PREV_STEP_POINT = {"p": None}  # Mac previousStepResolvedGlobalScreenPoint (voice flow is one step per turn, so it stays None unless a multi-step runner sets it)
+def _half_up(v):
+    import math
+    return int(math.floor(v + 0.5))  # Swift .rounded() half away from zero (coordinates are >= 0); Python round() is banker's
 def _local_resolve(lab):
     anchor = PREV_STEP_POINT["p"] or _mouse_location()
     return TARGET_CACHE.resolve(lab, prefer_near_global_point=anchor)
@@ -323,6 +326,8 @@ def main():
                     pt = step.get("point_2d")
                     if not pt and step.get("box_2d"):
                         y1, x1, y2, x2 = step["box_2d"]; pt = [(y1 + y2) // 2, (x1 + x2) // 2]
+                    nohint = False
+                    if not pt and (step.get("label") or "").strip(): pt = [500, 500]; nohint = True  # Mac resolves a step WITHOUT a spatial hint label-only (AX -> CDP -> local cache tier 3); the placeholder point is never used: unresolved + nohint = refuse
                     if pt:
                         px = norm_to_px(pt, size); model_px = px; src = "model_box"
                         lab = step.get("label", ""); done = False; ambiguous = 0; refuse = None; bound_rect = None; arm_rect = None; arm_app = None
@@ -333,7 +338,7 @@ def main():
                             refuse = "focused window, title or geometry changed since the screenshot (%s -> %s); ask again" % (frame_id["v"][2], now_id[2]); done = True
                         if not done and frame_id.get("img") is not None and os.environ.get("TIPTOUR_STALE_FRAME_GUARD", "1") == "1":  # same window can still show different content (voice turns: frame is taken at turn start, speech can come much later)
                             try:
-                                _now = await asyncio.to_thread(lambda: capture_clean()[0]); _fr = changed_fraction(frame_id["img"], _now); _tf = target_changed_fraction(frame_id["img"], _now, px)
+                                _now = await asyncio.to_thread(lambda: capture_clean()[0]); _fr = changed_fraction(frame_id["img"], _now); _tf = (0.0 if nohint else target_changed_fraction(frame_id["img"], _now, px))
                                 log("stale-frame check: %.1f%% of frame pixels, %.1f%% around the target changed since the pinned frame (heuristic, not proof of freshness)" % (_fr * 100, _tf * 100))
                                 if _fr > float(os.environ.get("TIPTOUR_STALE_FRAME_MAX", "0.03")) or _tf > float(os.environ.get("TIPTOUR_STALE_TARGET_MAX", "0.06")): refuse = "the screen content changed since the screenshot this answer was based on (frame %.0f%%, around target %.0f%%); ask again" % (_fr * 100, _tf * 100); done = True
                             except Exception as _e: log("stale-frame check unavailable: %s" % type(_e).__name__)
@@ -343,10 +348,15 @@ def main():
                             _tt = TARGET_CACHE.current_targets(); _m = next((t for t in _tt if (t["id"] == str(_tid).strip() if _tid and str(_tid).strip() else t["mark"] == _tmk)), None)
                             if _m: px = (round(_m["global_center"][0]), round(_m["global_center"][1])); src = "target_cache:exact(%s)" % _m["source"]; done = True; arm_rect = (_m["global_box"][0], _m["global_box"][1], _m["global_box"][2] - _m["global_box"][0], _m["global_box"][3] - _m["global_box"][1])
                             else: log("target_id/target_mark not in the fresh target list; falling through to label resolution")
+                        # Mac modal gate (WorkflowRunner :586): if the plan's target app currently shows a blocking dialog, pause instead of resolving (pause reason modalDialogPresented, text "dialog appeared: <title>")
+                        if not done and not refuse and args.get("app") and atspi_resolver:
+                            _ms, _mt = await asyncio.to_thread(atspi_resolver.modal_title, args.get("app"))
+                            log("modal check: %s" % ("dialog present" if _mt is not None else ("none" if _ms == "ok" else "unavailable (not treated as 'no dialog')")))
+                            if _mt is not None: refuse = "dialog appeared" + (": " + _mt if _mt else "") + " (paused; deal with it, then ask again)"; done = True; click_events.append({"pause": "modalDialogPresented", "title": _mt})
                         # Mac ElementResolver.resolve:218 preferLocalHintBeforeAccessibility: a step that carries a spatial hint (point_2d/box_2d) tries the LOCAL perception cache (label only, anchor = previous step point or cursor) BEFORE AX/CDP
-                        if not done and pt and lab:
+                        if not done and pt and not nohint and lab:
                             _lr = _local_resolve(lab)
-                            if _lr: px = (round(_lr["global_point"][0]), round(_lr["global_point"][1])); src = "target_cache(hint-first):" + _lr["source"]; done = True
+                            if _lr: px = (_half_up(_lr["global_point"][0]), _half_up(_lr["global_point"][1])); src = "target_cache(hint-first):" + _lr["source"]; done = True; arm_rect = tuple(_lr["global_rect"])
                         # Mac order: AX (here AT-SPI) -> local YOLO+OCR refinement -> raw Gemini coordinate
                         if atspi_resolver and os.environ.get("TIPTOUR_USE_ATSPI", "1") == "1":
                             try:
@@ -379,9 +389,10 @@ def main():
                         if refuse: done = True
                         if not done and not refuse and detector:
                             _tr = _local_resolve(lab)  # Mac tier 3 (after AX and CDP): label-only cache resolve, anchor = previous step point or cursor, NOT the model point
-                            if _tr: px = (round(_tr["global_point"][0]), round(_tr["global_point"][1])); src = "target_cache:" + _tr["source"]
+                            if _tr: px = (_half_up(_tr["global_point"][0]), _half_up(_tr["global_point"][1])); src = "target_cache:" + _tr["source"]; arm_rect = tuple(_tr["global_rect"])
                             ref = None if _tr else perception.refine_coordinate(model_px, lab, yolo, ocr_el)  # Linux-only fallback (not Mac semantics)
                             if ref: px = (round(ref["center"][0]), round(ref["center"][1])); src = "yolo_ocr:" + ref["rule"]
+                        if nohint and not refuse and src == "model_box": refuse = "could not resolve \"%s\": no matching control and no spatial hint (Mac: resolve returns nothing); not pointing" % lab
                         if not refuse and not (0 <= px[0] < size[0] and 0 <= px[1] < size[1]): refuse = "the model's coordinate (%d,%d) is outside the %dx%d screen; not pointing" % (px[0], px[1], size[0], size[1])
                         if not refuse and src == "model_box" and hl.get("last_ctx") and any(w in lab.lower() for w in ("highlight", "this", "area", "region")):
                             try:

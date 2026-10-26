@@ -267,6 +267,35 @@ def _sub(args, timeout):
     finally:
         SUB_STATS.append(rec); del SUB_STATS[:-300]; _SUB_SEM.release()
 
+MODAL_ROLES = {"dialog", "alert", "file chooser"}
+
+def _modal_title(hint):
+    """Linux counterpart of WorkflowRunner.detectBlockingModalDialogTitle (Swift :1321): a showing top-level window of the plan's app that is a dialog (AT-SPI role dialog/alert/file chooser, the
+    analogue of AXDialog/AXSystemDialog) or has the MODAL state (the analogue of a blocking AXSheet). Returns the title ('' if untitled) or None. The app is found like runningAppMatching(hint):
+    case-insensitive name equality or containment."""
+    h = (hint or "").strip().lower()
+    if not h: return None
+    desk = Atspi.get_desktop(0)
+    for i in range(desk.get_child_count()):
+        app = desk.get_child_at_index(i)
+        if app is None or _is_self(app): continue
+        nm = (app.get_name() or "").lower()
+        if not (nm == h or h in nm): continue
+        for j in range(app.get_child_count()):
+            try:
+                w = app.get_child_at_index(j); st = w.get_state_set()
+                if not (st.contains(Atspi.StateType.SHOWING) or st.contains(Atspi.StateType.VISIBLE)): continue
+                if w.get_role_name() in MODAL_ROLES or st.contains(Atspi.StateType.MODAL): return w.get_name() or ""
+            except Exception: continue
+    return None
+
+def modal_title(hint, timeout=3):
+    """Bounded child read, like every other native AT-SPI read. Returns (status, title): ('ok', title|None) or ('unavailable', None) - unavailable is never reported as 'no modal'."""
+    try:
+        d = _sub(["--modal", hint or ""], timeout) if ISOLATED else {"title": _W.call(_modal_title, (hint,), timeout)}
+        return "ok", d.get("title")
+    except Exception: return "unavailable", None
+
 def probe_isolated(rect, hint_pid=None, timeout=6):
     d = _sub(["--probe", _json.dumps(list(rect)), hint_pid or 0, max(1.0, timeout - 1.5)], timeout)
     return d.get("element"), d.get("selection")
@@ -276,11 +305,12 @@ def targets_isolated(timeout=6):
 
 
 if __name__ == "__main__":
-    if len(sys.argv) > 1 and sys.argv[1] in ("--probe", "--targets", "--ready"):
+    if len(sys.argv) > 1 and sys.argv[1] in ("--probe", "--targets", "--ready", "--modal"):
         try:
             if sys.argv[1] == "--probe":
                 rect = _json.loads(sys.argv[2]); hp = int(sys.argv[3]) or None; wall = _time.monotonic() + float(sys.argv[4])
                 el, sel = _probe(rect, hp, 4000, wall); print(_json.dumps({"element": el, "selection": sel}))
+            elif sys.argv[1] == "--modal": print(_json.dumps({"title": _modal_title(sys.argv[2] if len(sys.argv) > 2 else "")}))
             elif sys.argv[1] == "--ready": print(_json.dumps({"ready": bool(ready(2.5))}))
             elif len(sys.argv) > 3 and sys.argv[2] == "--app": print(_json.dumps({"targets": _app_targets(sys.argv[3])}))  # filter in the child
             else: print(_json.dumps({"targets": _all_targets()}))
