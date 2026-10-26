@@ -514,6 +514,7 @@ def main():
                 if not done and not refuse and args.get("app") and atspi_resolver:
                     _ms, _mt = await asyncio.to_thread(atspi_resolver.modal_title, args.get("app"))
                     log("modal check: %s" % ("dialog present" if _mt is not None else ("none" if _ms == "ok" else "unavailable (not treated as 'no dialog')")))
+                    if _ms != "ok": refuse = "modal state unavailable; not pointing or clicking"; done = True; pause_rs['r'] = 'modalStateUnavailable'
                     if _mt is not None: refuse = "dialog appeared" + (": " + _mt if _mt else "") + " (paused; deal with it, then ask again)"; done = True; click_events.append({"pause": "modalDialogPresented", "title": _mt}); pause_rs['r'] = 'modalDialogPresented'
                 # Mac ElementResolver.exactLocalTargetResolution (:95): an explicit target_id / target_mark in the plan step binds to the cache entry first
                 _tid = step.get("target_id") or step.get("targetID"); _tmk = step.get("target_mark") if step.get("target_mark") is not None else step.get("targetMark")
@@ -676,8 +677,22 @@ def main():
                     resp = {"ok": False, "status": "not_executed", "error": "The user's request does not ask for this action; the cursor was only pointed. Tell the user where it is and let them act."}
                 elif a.act and (step.get("type") or "click") in ("click", "doubleClick", "rightClick"):
                     from . import actions
-                    time.sleep(1.0)  # let the pointer land first, like Mac (point then act)
-                    resp = actions.execute(step, px); log("action executed, ok=%s" % resp.get("ok")); dlog("action", json.dumps(resp))
+                    # Keep the loop responsive while the pointer lands. STOP/supersede must win before dispatch.
+                    _click_cancel = threading.Event()
+                    try:
+                        await asyncio.sleep(1.0)
+                        if plan_tok["n"] != _gen0: return {"ok": False, "status": "not_executed", "error": "click superseded before dispatch"}, tool_seen
+                        _click_ident = ident()
+                        if _click_ident != now_id: return {"ok": False, "status": "not_executed", "error": "focused window changed while pointer landed"}, tool_seen
+                        _click_valid = await asyncio.to_thread(_target_valid, arm_app, step.get("label"), arm_rect)
+                        _click_ms, _click_mt = await asyncio.to_thread(atspi_resolver.modal_title, args.get("app") or arm_app) if atspi_resolver else ("unavailable", None)
+                        if plan_tok["n"] != _gen0 or ident() != _click_ident or not _click_valid or _click_ms != "ok" or _click_mt is not None:
+                            resp = {"ok": False, "status": "not_executed", "error": "click target/window changed or unavailable before dispatch"}
+                        else:
+                            resp = await asyncio.to_thread(actions.execute, step, px, arm_app, None, _click_cancel)
+                    except BaseException:
+                        _click_cancel.set(); log("click cancelled before next OS dispatch (an already dispatched event cannot be undone)"); raise
+                    log("action executed, ok=%s" % resp.get("ok")); dlog("action", json.dumps(resp))
                 elif unconf: resp = {"ok": False, "status": "pointed_unconfirmed", "note": "The cursor was placed from the vision estimate only; no UI element or page element confirmed it. Do not claim it is on the target. Tell the user it is a guess and ask them to confirm."}
                 else: resp = {"ok": True, "status": "pointed", "note": "point-only mode; user must click"}
             else:
