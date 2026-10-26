@@ -102,7 +102,7 @@ def main():
             except Exception: return ""
         w = xo("getwindowfocus")
         return (w, xo("getwindowname", w) if w else "", xo("getwindowgeometry", "--shell", w).replace("\n", " ") if w else "")
-    frame_id = {"v": None}; ov = {"hidden": False}; cur = {}; glock = threading.RLock()
+    frame_id = {"v": None}; ov = {"hidden": False}; cur = {}; glock = threading.RLock(); pause_rs = {'r': None}; gate = {'turn': False, 'replay': False}
     def _target_valid(app, label, rect):
         if not app or not rect or not atspi_resolver: return False  # unverifiable source (CDP/model box): fail closed
         try:
@@ -135,7 +135,7 @@ def main():
         if cmd in ("retry", "resume") and hl.get("replay"):  # Mac retryCurrentStep()/resume(): re-capture + rerun the full cascade for the active step (resume only while paused, like `guard pausedReason != nil`)
             if tok is not None and tok != plan_tok["n"]:
                 click_events.append({"control": cmd + "_refused", "reason": "stale panel"}); log("control %s refused: stale panel" % cmd); return
-            _paused = cur.get("paused") or (bool(validators) and validators[-1].verdict == "unchanged_paused")
+            _paused = cur.get("paused") or pause_rs["r"] or (bool(validators) and validators[-1].verdict == "unchanged_paused")
             if cmd == "resume" and not _paused:
                 click_events.append({"control": "resume_refused", "reason": "not paused"}); log("control resume refused: not paused"); return
             click_events.append({"control": cmd, "mode": "replay_full_cascade", "label": cur.get("label")}); GLib.idle_add(lambda: panel.hide_panel() and False); cur["paused"] = None
@@ -226,7 +226,10 @@ def main():
                 for t in a.ask: yield t
             else:
                 while True:
+                    gate['turn'] = False  # consumer asked for the next item => the previous turn body has finished
                     t = await serve_q.get()
+                    while gate['replay']: await asyncio.sleep(0.05)  # a replay (Retry/Resume) in flight finishes before a new ask captures the screen
+                    gate['turn'] = True
                     if t == "@quit":
                         if mic: mic.stop()
                         if player: player.close()
@@ -258,7 +261,7 @@ def main():
                 if not done and not refuse and args.get("app") and atspi_resolver:
                     _ms, _mt = await asyncio.to_thread(atspi_resolver.modal_title, args.get("app"))
                     log("modal check: %s" % ("dialog present" if _mt is not None else ("none" if _ms == "ok" else "unavailable (not treated as 'no dialog')")))
-                    if _mt is not None: refuse = "dialog appeared" + (": " + _mt if _mt else "") + " (paused; deal with it, then ask again)"; done = True; click_events.append({"pause": "modalDialogPresented", "title": _mt})
+                    if _mt is not None: refuse = "dialog appeared" + (": " + _mt if _mt else "") + " (paused; deal with it, then ask again)"; done = True; click_events.append({"pause": "modalDialogPresented", "title": _mt}); pause_rs['r'] = 'modalDialogPresented'
                 # Mac ElementResolver.exactLocalTargetResolution (:95): an explicit target_id / target_mark in the plan step binds to the cache entry first
                 _tid = step.get("target_id") or step.get("targetID"); _tmk = step.get("target_mark") if step.get("target_mark") is not None else step.get("targetMark")
                 if not done and (_tid or _tmk is not None):
@@ -427,15 +430,23 @@ def main():
             """Mac WorkflowRunner.retryCurrentStep() / resume(): re-capture the screen and rerun the FULL resolver cascade for the active step. No model round-trip, no tool_response."""
             nonlocal full, jpeg, size, yolo, ocr_el
             c = dict(last_call)
+            for _w in range(300):  # a replay never overlaps a live turn's capture/resolve: wait (bounded 30s) for the turn body to finish, never run concurrently
+                if not gate['turn'] and not gate['replay']: break
+                await asyncio.sleep(0.1)
+            if gate['turn'] or gate['replay']: click_events.append({"control": kind + "_refused", "reason": "turn or replay still in progress after 30s"}); log("control %s refused: turn or replay still in progress after 30s" % kind); return
             if not c: click_events.append({"control": kind + "_refused", "reason": "no active step"}); log("control %s refused: no active step" % kind); return
-            full, jpeg, size = await asyncio.to_thread(capture_clean, True)
-            yolo, ocr_el = await asyncio.to_thread(_perceive, full)
-            resp, ts = await _resolve_step(c["v"], c["args"], c["text"])
+            gate['replay'] = True
+            try:
+                pause_rs['r'] = None
+                full, jpeg, size = await asyncio.to_thread(capture_clean, True)
+                yolo, ocr_el = await asyncio.to_thread(_perceive, full)
+                resp, ts = await _resolve_step(c["v"], c["args"], c["text"])
+            finally: gate['replay'] = False
             click_events.append({"control": kind + "_replay", "status": (resp or {}).get("status"), "source": (ts or {}).get("source"), "refused": (ts or {}).get("refused")}); log("control %s: re-resolved the active step from a fresh capture -> %s" % (kind, (ts or {}).get("source")))
         hl['replay'] = lambda kind: asyncio.run_coroutine_threadsafe(_replay_step(kind), loop)
         i = -1
         async for text in _asks():
-            i += 1
+            i += 1; pause_rs['r'] = None
             voice_turn = text in ("@voice", "@voice-next"); in_tr = []; pending = []
             if voice_turn:
                 if not (mic and mic.active): continue  # toggled off before this turn started
