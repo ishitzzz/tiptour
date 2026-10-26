@@ -106,7 +106,7 @@ def main():
         w = xo("getwindowfocus")
         return (w, xo("getwindowname", w) if w else "", xo("getwindowgeometry", "--shell", w).replace("\n", " ") if w else "")
     frame_id = {"v": None}; ov = {"hidden": False}; cur = {}; glock = threading.RLock(); pause_rs = {'r': None}; gate = {'turn': False, 'replay': False}
-    def _target_valid(app, label, rect):
+    def _target_valid(app, label, rect, expected=None):
         if not app or not rect or not atspi_resolver: return False  # unverifiable source (CDP/model box): fail closed
         try:
             ts = []
@@ -119,7 +119,7 @@ def main():
             dlog("target_valid n_targets=%d same_label=%d rect_match=%s tries=%d" % (len(ts), len(_same), any(t.get('rect') and all(abs(t['rect'][k] - rect[k]) <= 8 for k in range(4)) for t in _same), _try + 1))
             for t in ts:
                 r = t.get('rect')
-                if (t.get('label') or '').strip().lower() == (label or '').strip().lower() and r and all(abs(r[i] - rect[i]) <= 8 for i in range(4)): return True
+                if (t.get('label') or '').strip().lower() == (label or '').strip().lower() and r and all(abs(r[i] - rect[i]) <= 8 for i in range(4)) and (expected is None or t.get("native_identity") == expected): return True
         except Exception as e:
             dlog("target_valid error %s" % type(e).__name__); return False
         return False
@@ -593,7 +593,7 @@ def main():
                             validators.append(_val); _val.start_baseline(); threading.Thread(target=lambda _v=_val: (_v.ready.wait(60), log("validator baseline ready: scope_set=%s stable=%d noise=%d err=%s" % (bool(_v.scope), len(_v.stable), len(_v.noise), _v.baseline_error))), daemon=True).start()  # baseline runs in the background; arming and drawing never wait for it
                         def _valid(_src=src, _tok=_tok, _val=_val):
                             if _val is None:
-                                log("target click detected; pointer dismissed; validator: not run (right-click or disabled) - effect UNVERIFIED"); click_events.append({"target_clicked": True, "src": _src, "validator": "unavailable:not_run", "effect": "unverified"}); ov['hidden'] = True; ov['covered'] = False; GLib.idle_add(overlay.retire); return
+                                log("target click detected; pointer dismissed; validator: not run (right-click or disabled) - effect UNVERIFIED"); click_events.append({"target_clicked": True, "src": _src, "validator": "unavailable:not_run", "effect": "unverified"}); ov['hidden'] = True; ov['covered'] = False; GLib.idle_add(overlay.retire); loop.call_soon_threadsafe(lambda: hl.get("advance") and hl["advance"]("click", _tok)); return
                             _val.on_click()
                             def _watch():
                                 _val.done.wait(60)
@@ -605,6 +605,7 @@ def main():
                                 if v == "unchanged_paused": GLib.idle_add(lambda: (panel.show_at(px[0], px[1], "No visible change after the click.", _tok) if _tok == plan_tok["n"] else None) and False)
                                 if v == "unchanged_paused": log("post-click validator: AT-SPI state unchanged after the settle window; paused (pointer kept; on-screen Retry/Skip panel shown)"); return
                                 log("target click detected; pointer dismissed; validator: %s" % ("changed (effect confirmed in the target app's AT-SPI state)" if v == "changed" else "%s - the click was on the target but its effect is UNVERIFIED" % v)); ov['hidden'] = True; ov['covered'] = False; GLib.idle_add(overlay.retire)
+                                if v == "changed": loop.call_soon_threadsafe(lambda: hl.get("advance") and hl["advance"]("click", _tok))
                             threading.Thread(target=_watch, daemon=True).start()
                         def _stale(): log("click on stale armed target ignored (token mismatch)"); click_events.append({"stale_ignored": True})
                         _clicked = guarded_callback(plan_tok, _tok, _valid, _stale)
@@ -677,6 +678,15 @@ def main():
                     resp = {"ok": False, "status": "not_executed", "error": "The user's request does not ask for this action; the cursor was only pointed. Tell the user where it is and let them act."}
                 elif a.act and (step.get("type") or "click") in ("click", "doubleClick", "rightClick"):
                     from . import actions
+                    # Bind the actual native object before the landing delay, never label+rect alone.
+                    _click_pin = clicks._pin
+                    _click_native = None
+                    if atspi_resolver and arm_app and arm_rect:
+                        _native_targets = await asyncio.to_thread(atspi_resolver.app_targets, arm_app)
+                        _native_matches = [nt for nt in _native_targets if (nt.get("label") or "").strip().lower() == (step.get("label") or "").strip().lower() and nt.get("rect") and all(abs(nt["rect"][j]-arm_rect[j]) <= 8 for j in range(4))]
+                        if len(_native_matches) == 1: _click_native = _native_matches[0].get("native_identity")
+                    if not _click_native: return {"ok": False, "status": "not_executed", "error": "stable native click object unavailable"}, tool_seen
+                    dlog("stable native click bound", json.dumps(_click_native, sort_keys=True))
                     # Keep the loop responsive while the pointer lands. STOP/supersede must win before dispatch.
                     _click_cancel = threading.Event()
                     try:
@@ -684,15 +694,19 @@ def main():
                         if plan_tok["n"] != _gen0: return {"ok": False, "status": "not_executed", "error": "click superseded before dispatch"}, tool_seen
                         _click_ident = ident()
                         if _click_ident != now_id: return {"ok": False, "status": "not_executed", "error": "focused window changed while pointer landed"}, tool_seen
-                        _click_valid = await asyncio.to_thread(_target_valid, arm_app, step.get("label"), arm_rect)
+                        _click_valid = await asyncio.to_thread(_target_valid, arm_app, step.get("label"), arm_rect, _click_native)
                         _click_ms, _click_mt = await asyncio.to_thread(atspi_resolver.modal_title, args.get("app") or arm_app) if atspi_resolver else ("unavailable", None)
                         if plan_tok["n"] != _gen0 or ident() != _click_ident or not _click_valid or _click_ms != "ok" or _click_mt is not None:
                             resp = {"ok": False, "status": "not_executed", "error": "click target/window changed or unavailable before dispatch"}
                         else:
-                            resp = await asyncio.to_thread(actions.execute, step, px, arm_app, None, _click_cancel)
+                            resp = await asyncio.to_thread(actions.execute, step, px, arm_app, None, _click_cancel, lambda: plan_tok["n"] == _gen0 and _click_pin is not None and clicks.pin_state(px, _click_pin) == "ok")
                     except BaseException:
                         _click_cancel.set(); log("click cancelled before next OS dispatch (an already dispatched event cannot be undone)"); raise
                     log("action executed, ok=%s" % resp.get("ok")); dlog("action", json.dumps(resp))
+                    if resp.get("ok") and step.get("type") == "rightClick":
+                        # Listener currently handles left presses only. Successful owned right-button dispatch follows Mac's explicit validator bypass.
+                        clicks.disarm(); ov['hidden'] = True; ov['covered'] = False; GLib.idle_add(overlay.retire)
+                        loop.call_soon(lambda: hl.get("advance") and hl["advance"]("click", _gen0))
                 elif unconf: resp = {"ok": False, "status": "pointed_unconfirmed", "note": "The cursor was placed from the vision estimate only; no UI element or page element confirmed it. Do not claim it is on the target. Tell the user it is a guess and ask them to confirm."}
                 else: resp = {"ok": True, "status": "pointed", "note": "point-only mode; user must click"}
             else:
@@ -777,6 +791,15 @@ def main():
                 click_events.append({"advance": kind, "to_step": c["idx"] + 1, "of": n, "source": (ts or {}).get("source"), "refused": (ts or {}).get("refused")}); log("advance (%s): step %d of %d resolved -> %s" % (kind, c["idx"] + 2, n, (ts or {}).get("source")))
             finally: gate['replay'] = False
         def _advance_spawn(kind, tok0=None):
+            if kind == "click" and (gate['turn'] or gate['replay']):
+                # A listen-only button event can arrive while our own click OS call is still returning.
+                # Do not cancel that executor just to advance its successful click.
+                async def _after_dispatch():
+                    while gate['turn'] or gate['replay']:
+                        if tok0 != plan_tok['n']: return
+                        await asyncio.sleep(0.03)
+                    if tok0 == plan_tok['n']: _spawn(_advance_step(kind, tok0))
+                asyncio.create_task(_after_dispatch()); return
             _spawn(_advance_step(kind, tok0))
             if kind == "skip": hl['skip_adv'] = (hl['task'], tok0)
         hl['advance'] = _advance_spawn

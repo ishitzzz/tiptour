@@ -72,7 +72,7 @@ def walk(node, depth=0, out=None):
                 role = ch.get_role_name()
                 if role in CLICKABLE and ext.width > 0 and ext.height > 0:
                     out.append({"label": ch.get_name() or "", "role": role, "rect": [ext.x, ext.y, ext.width, ext.height],
-                                "app": node.get_application().get_name() if depth == 0 else None})
+                                "app": node.get_application().get_name() if depth == 0 else None, "native_identity": {"pid": ch.get_process_id(), "path": ch.path}})
         except Exception: pass
         walk(ch, depth + 1, out)
     return out
@@ -379,8 +379,14 @@ def _focused_record(hint):
                      "window_name": w.get_name() or "", "window_rect": [ext.x, ext.y, ext.width, ext.height]}
             # A native object path binds the actual field, rather than a repeated name/role.
             if not ident["pid"] or not ident["window_path"] or not ident["element_path"]: return None, None
-            return node, {"identity": ident, "role": rn, "name": node.get_name() or "", "editable": bool(st.contains(Atspi.StateType.EDITABLE) and node.get_editable_text_iface() is not None),
-                          "password": rn == "password text", "text": txt, "selection": selection, "caret": caret}
+            document_rect = None; parent = node
+            for _ in range(60):
+                if parent is None: break
+                if parent.get_role_name() in ("document web", "document frame"):
+                    er = parent.get_extents(Atspi.CoordType.SCREEN); document_rect = [er.x,er.y,er.width,er.height]; break
+                parent = parent.get_parent()
+            return node, {"document_rect": document_rect, "identity": ident, "role": rn, "name": node.get_name() or "", "editable": bool(st.contains(Atspi.StateType.EDITABLE) and node.get_editable_text_iface() is not None),
+                          "editable_state": bool(st.contains(Atspi.StateType.EDITABLE)), "native_editable_iface": node.get_editable_text_iface() is not None, "element_rect": (lambda e: [e.x,e.y,e.width,e.height])(node.get_extents(Atspi.CoordType.SCREEN)), "password": rn == "password text", "text": txt, "selection": selection, "caret": caret}
         if dep < 60:
             for j in range(node.get_child_count()):
                 c = node.get_child_at_index(j)

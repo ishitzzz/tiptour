@@ -146,12 +146,12 @@ def open_url(raw, preferred_app=None):
     if url.lower().startswith(("http://", "https://")): _sleep(2.0)  # Mac: wait 2 s after an http(s) open
     return "opened %s" % url
 ACTION_TYPES = ("openApp", "openURL", "keyboardShortcut", "pressKey", "type", "setValue", "scroll")
-def execute(step, px, app_hint=None, plan_app=None, cancel=None):
+def execute(step, px, app_hint=None, plan_app=None, cancel=None, click_guard=None):
     """One step. Click types need px (pointer position from the resolver); the other types need no pointer. Returns the tool-response dict; ok True only when every OS call succeeded."""
-    _TL.ev = cancel; _TL.bound = None
+    _TL.ev = cancel; _TL.bound = None; _TL.click_guard = click_guard
     try: return _execute(step, px, app_hint if app_hint is not None else plan_app)
     except _XFail as e: return {"ok": False, "error": str(e)}
-    finally: _TL.ev = None; _TL.bound = None
+    finally: _TL.ev = None; _TL.bound = None; _TL.click_guard = None
 def focus_info(app_hint, editable=True):
     try:
         from . import atspi_resolver as ar
@@ -197,7 +197,15 @@ def _focus(app_hint):
 
 def _native_text(step, app_hint):
     import json, sys
-    d = _focus(app_hint); f = _check_bound(app_hint, True)
+    d = _focus(app_hint); f = _check_bound(app_hint, False)
+    if not f.get("editable"):
+        if f.get("editable_state") and not f.get("native_editable_iface"):
+            from . import browser_text
+            # Worker-local cancellation state must be checked on this thread, not inside a new asyncio worker.
+            def recheck(): return _check_bound(app_hint, False)
+            result = browser_text.write(step, app_hint, f, recheck, _chk); result["detail"] = d; return result
+        raise _XFail("focused field not native EDITABLE; nothing written")
+    f = _check_bound(app_hint, True)
     req = {"operation": step["type"], "text": step.get("value") if step.get("value") is not None else step.get("label", ""),
            "app": app_hint, "identity": f["identity"], "xwindow": _TL.bound[0][0], "saved_range": step.get("_native_range")}
     raw = _run([sys.executable, "-m", "tiptour_linux.atspi_resolver", "--focused-write"], 7, "identity-bound native write", json.dumps(req))
@@ -211,7 +219,11 @@ def _execute(step, px, app_hint):
     if SECRET.search(label) and t in ("type", "setValue"): return {"ok": False, "error": "refused: secret field"}
     if t in ("click", "doubleClick", "rightClick"):
         if px is None: return {"ok": False, "error": "no coordinates"}
+        guard = getattr(_TL, "click_guard", None)
+        if guard is None or not guard(): raise _XFail("click recipient not verified before pointer move")
         _x("mousemove", px[0], px[1])
+        _chk("click hit test")
+        if not guard(): raise _XFail("click recipient covered, moved or unavailable before button dispatch")
         if t == "doubleClick": _x("click", "--repeat", "2", "1")
         else: _x("click", "3" if t == "rightClick" else "1")
         return {"ok": True, "status": "performed " + t, "at": list(px)}

@@ -5,6 +5,10 @@ sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
 from tiptour_linux import actions as a
 d=Path(tempfile.mkdtemp());p=d/'xdotool'
 def shim(body):p.write_text('#!/bin/sh\n'+body);p.chmod(0o755);os.environ['PATH']=str(d)+':/usr/bin:/bin'
+assert not a.execute({'type':'click'},(1,2))['ok']  # no recipient guard fails closed even when OS shim succeeds
+oldexecute=a.execute
+def guarded(step,px): return oldexecute(step,px,click_guard=lambda:True)
+a.execute=guarded
 shim('exit 0\n');assert a.execute({'type':'click'},(1,2))['ok'];assert a.execute({'type':'doubleClick'},(1,2))['ok']
 shim('echo boom >&2;exit 1\n');r=a.execute({'type':'click'},(1,2));assert not r['ok'] and 'rc=1' in r['error']
 shim('if [ "$1" = click ]; then echo boom >&2;exit 1;fi\nexit 0\n');r=a.execute({'type':'click'},(1,2));assert not r['ok'] and 'click' in r['error']
