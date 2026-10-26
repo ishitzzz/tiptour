@@ -209,3 +209,48 @@ class PausePanel(Gtk.Window):
             open(os.environ["TIPTOUR_PANEL_COORDS"], "w").write("\n".join(out) + "\n")
         except Exception as e: open(os.environ["TIPTOUR_PANEL_COORDS"], "w").write("err %s\n" % type(e).__name__)
         return False
+
+
+class ProposalPanel(Gtk.Window):
+    """On-screen plan proposal: the COMPLETE ordered plan text (goal, app, every step with its action values) plus revision-bound Confirm / Cancel buttons.
+    Own WM_CLASS (ignored by the click detector), never takes keyboard focus. Buttons call on_answer(kind, rev) on the GTK thread: hand work off to another thread."""
+    def __init__(self, on_answer):
+        super().__init__(type=Gtk.WindowType.POPUP)
+        self.set_wmclass('tiptour-overlay', 'TipTourOverlay'); self.set_keep_above(True); self.set_accept_focus(False)
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8); box.set_border_width(12)
+        self.head = Gtk.Label(label=""); self.head.set_xalign(0); self.body = Gtk.Label(label=""); self.body.set_xalign(0); self.body.set_line_wrap(True); self.body.set_max_width_chars(80)
+        self.row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8); self._on_answer = on_answer; self.ok = self.no = None
+        row = self.row
+        import gi; from gi.repository import Pango
+        self.body.set_line_wrap_mode(Pango.WrapMode.WORD_CHAR); self.body.set_selectable(False)
+        sw = Gtk.ScrolledWindow(); sw.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC); sw.set_min_content_width(560); sw.set_max_content_height(420); sw.set_propagate_natural_height(True); inner = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6); self.detail = Gtk.Label(label=""); self.detail.set_xalign(0); self.detail.set_line_wrap(True); self.detail.set_line_wrap_mode(Pango.WrapMode.WORD_CHAR); self.detail.set_max_width_chars(80); self.detail.set_selectable(False)
+        exp = Gtk.Expander(label="Details (every field the plan carries)"); exp.add(self.detail); inner.pack_start(self.body, False, False, 0); inner.pack_start(exp, False, False, 0); sw.add(inner); self.sw = sw  # a long plan scrolls instead of being cut off
+        box.pack_start(self.head, False, False, 0); box.pack_start(sw, True, True, 0); box.pack_start(row, False, False, 0)
+        frame = Gtk.Frame(); frame.add(box); self.add(frame)
+    rev = -1  # -1 = hidden: a click can never match a live proposal
+    def show_plan(self, rev, text, details="", on_shown=None):
+        self.rev = -1; self._pending_rev = rev; self._on_shown = on_shown
+        for _c in list(self.row.get_children()): self.row.remove(_c); _c.destroy()  # NEW button instances per episode, each bound to ITS revision at creation (closure), dead until this episode is drawn: an old button/queued click cannot exist for a newer revision
+        self.ok = Gtk.Button(label="Confirm"); self.no = Gtk.Button(label="Cancel")
+        self.ok.connect("clicked", lambda *_, r=rev: self._on_answer("confirm", r)); self.no.connect("clicked", lambda *_, r=rev: self._on_answer("cancel", r))
+        self.ok.set_sensitive(False); self.no.set_sensitive(False); self.row.pack_start(self.ok, False, False, 0); self.row.pack_start(self.no, False, False, 0); self.row.show_all()
+        if not getattr(self, "_draw_hooked", False): self._draw_hooked = True; self.connect("draw", self._drawn)
+        self.head.set_markup("<b>Proposed plan, revision %d. Nothing runs until you confirm.</b>" % rev); self.body.set_text(text); self.detail.set_text(details); self.show_all(); GLib.idle_add(lambda: (self.sw.get_vadjustment().set_value(0), False)[1])  # always start at the TOP of the plan
+        self.move(40, 40)
+        import os
+        if os.environ.get("TIPTOUR_PANEL_COORDS"): GLib.timeout_add(600, self._dump)
+    def _drawn(self, *_):
+        cb = getattr(self, "_on_shown", None)
+        if cb and getattr(self, "_pending_rev", -1) >= 0:
+            rv = self._pending_rev; self._pending_rev = -1; self._on_shown = None; self.rev = rv; self.ok.set_sensitive(True); self.no.set_sensitive(True); cb(rv)
+        return False
+    def hide_panel(self): self.rev = -1; self._pending_rev = -1; self._on_shown = None; self.ok and self.ok.set_sensitive(False); self.no and self.no.set_sensitive(False); self.hide()
+    def _dump(self):  # test aid only (env-gated)
+        import os
+        try:
+            ox, oy = self.get_window().get_origin()[1:]; out = []
+            for n, b in (("confirm", self.ok), ("cancel", self.no)):
+                a = b.get_allocation(); out.append("%s %d %d" % (n, ox + a.x + a.width // 2, oy + a.y + a.height // 2))
+            open(os.environ["TIPTOUR_PANEL_COORDS"], "w").write("\n".join(out) + "\n")
+        except Exception as e: open(os.environ["TIPTOUR_PANEL_COORDS"], "w").write("err %s\n" % type(e).__name__)
+        return False

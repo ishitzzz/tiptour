@@ -66,6 +66,16 @@ def build_context(points, window_probe=None, element_probe=None, probe_timeout=6
             if sel: ctx["text_selection"] = sel
         except Exception as e:
             ctx["dom_selection_status"] = "unavailable: %s" % type(e).__name__
+    # Capture native selected-range identity only for the actual focused field in the painted window.
+    if ctx.get("text_selection") and ctx.get("window"):
+        try:
+            from . import atspi_resolver as ar
+            wd = ctx["window"]; f = ar._sub(["--focus", wd.get("title") or ""], probe_timeout).get("focus")
+            if f and f.get("editable") and not f.get("password") and f.get("selection") and f["identity"]["pid"] == int(wd["pid"]):
+                r0, r1 = f["selection"]
+                if f.get("text") is not None and f["text"][r0:r1] == ctx["text_selection"].get("text"):
+                    ctx["native_range"] = {"identity": f["identity"], "text": f["text"], "selection": f["selection"], "xwindow": wd["id"]}
+        except Exception: pass  # unavailable remains explicit; execution refuses a missing native range
     return ctx
 
 def xdotool_window_at(points):
@@ -82,6 +92,10 @@ def xdotool_window_at(points):
     for w in reversed(ids):
         g = dict(l.split("=") for l in xo("getwindowgeometry", "--shell", str(w)).splitlines() if "=" in l)
         x, y, ww, hh = (int(g.get(k, 0)) for k in ("X", "Y", "WIDTH", "HEIGHT"))
+        try:
+            client = d.create_resource_object('window', int(w)); geom = client.get_geometry(); absolute = root.translate_coords(client, 0, 0)
+            x, y, ww, hh = absolute.x, absolute.y, geom.width, geom.height
+        except Exception: continue  # no trustworthy screen coordinates means no window binding
         if x <= px <= x + ww and y <= py <= y + hh and ww > 0:
             return {"id": str(w), "title": xo("getwindowname", str(w)), "pid": xo("getwindowpid", str(w)), "rect": (x, y, ww, hh)}
     return None
@@ -170,6 +184,16 @@ def action_matches_intent(step_type, utterance):
     if step_type == "rightClick": return bool(_re.search(r"right[- ]?click|context menu", t))
     if step_type == "doubleClick": return bool(_re.search(r"double[- ]?click", t))
     return bool(_re.search(r"\b(click|press|tap|select|choose|check|uncheck|toggle|open|submit|hit|push|activate)\b", t))
+
+
+def action_type_matches_intent(step_type, utterance):
+    """--act only, for the non-click action step types: the user's own words must ask for THAT kind of action. Bounded regex guard, not semantic trust."""
+    t = (utterance or "").lower()
+    if step_type in ("click", "doubleClick", "rightClick"): return action_matches_intent(step_type, utterance)
+    if no_action_requested(t): return False
+    pats = {"openApp": r"\b(open|launch|start|run|switch to)\b", "openURL": r"\b(open|go to|visit|navigate|browse|load|show me)\b|https?://|www\.", "keyboardShortcut": r"\b(press|hit|use|shortcut|hotkey|key|keys|ctrl|control|cmd|command|alt|shift|save|copy|paste|undo|redo|select all|new|close)\b",
+            "setValue": r"\b(set (?:the )?value|replace (?:the )?(?:whole |entire )?(?:field|value)|fill)\b", "pressKey": r"\b(press|hit|key|enter|return|escape|esc|tab|backspace|delete|space|page ?up|page ?down|arrow)\b", "type": r"\b(type|write|enter|input|fill|put|insert|dictate)\b", "scroll": r"\b(scroll|page down|page up|move down|move up|go down|go up|down|up)\b"}
+    return bool(step_type in pats and _re.search(pats[step_type], t))
 
 
 def point_authorized(utterance):

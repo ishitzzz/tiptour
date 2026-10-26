@@ -330,24 +330,110 @@ def fingerprint(name, timeout=4):
 MODAL_ROLES = {"dialog", "alert", "file chooser"}
 
 def _modal_title(hint):
-    """Linux counterpart of WorkflowRunner.detectBlockingModalDialogTitle (Swift :1321): a showing top-level window of the plan's app that is a dialog (AT-SPI role dialog/alert/file chooser, the
-    analogue of AXDialog/AXSystemDialog) or has the MODAL state (the analogue of a blocking AXSheet). Returns the title ('' if untitled) or None. The app is found like runningAppMatching(hint):
-    case-insensitive name equality or containment."""
+    """Inspect ALL top-level windows of the identity-matched application. Missing app is unavailable."""
     h = (hint or "").strip().lower()
-    if not h: return None
-    desk = Atspi.get_desktop(0)
+    if not h: raise TimeoutError("modal check requires app identity")
+    desk = Atspi.get_desktop(0); matches = []
     for i in range(desk.get_child_count()):
         app = desk.get_child_at_index(i)
         if app is None or _is_self(app): continue
         nm = (app.get_name() or "").lower()
-        if not (nm == h or h in nm): continue
-        for j in range(app.get_child_count()):
-            try:
-                w = app.get_child_at_index(j); st = w.get_state_set()
-                if not (st.contains(Atspi.StateType.SHOWING) or st.contains(Atspi.StateType.VISIBLE)): continue
-                if w.get_role_name() in MODAL_ROLES or st.contains(Atspi.StateType.MODAL): return w.get_name() or ""
-            except Exception: continue
+        windows = [app.get_child_at_index(j) for j in range(app.get_child_count())]
+        if nm == h or h in nm or any(w is not None and h in (w.get_name() or "").lower() for w in windows): matches.append(windows)
+    if len(matches) != 1: raise TimeoutError("modal app unavailable or ambiguous")
+    for w in matches[0]:
+        if w is None: continue
+        st = w.get_state_set()
+        if not (st.contains(Atspi.StateType.SHOWING) and st.contains(Atspi.StateType.VISIBLE)): continue
+        if w.get_role_name() in MODAL_ROLES or st.contains(Atspi.StateType.MODAL): return w.get_name() or ""
     return None
+
+def _focused_record(hint):
+    """Return the focused native object and stable per-session identity. No role-based editable inference."""
+    h = (hint or "").strip().lower()
+    if not h: return None, None
+    desk = Atspi.get_desktop(0)
+    matches = []
+    for i in range(desk.get_child_count()):
+        app = desk.get_child_at_index(i)
+        if app is None or _is_self(app): continue
+        nm = (app.get_name() or "").lower()
+        for j in range(app.get_child_count()):
+            w = app.get_child_at_index(j)
+            if w is not None and w.get_state_set().contains(Atspi.StateType.ACTIVE) and (h == nm or h in nm or h in (w.get_name() or "").lower()):
+                matches.append((app, w))
+    if len(matches) != 1: return None, None
+    app, w = matches[0]; stack = [(w, 0)]; n = 0
+    while stack and n < 20000:
+        node, dep = stack.pop(); n += 1
+        st = node.get_state_set(); rn = node.get_role_name()
+        if st.contains(Atspi.StateType.FOCUSED) and rn not in ("frame", "window", "application", "document web", "document frame"):
+            txt = None; selection = None; caret = None
+            ti = node.get_text_iface()
+            if ti is not None:
+                txt = ti.get_text(0, min(ti.get_character_count(), 20000)); caret = ti.get_caret_offset()
+                if ti.get_n_selections():
+                    r = ti.get_selection(0); selection = [r.start_offset, r.end_offset]
+            ext = w.get_extents(Atspi.CoordType.SCREEN)
+            ident = {"pid": app.get_process_id(), "window_path": w.path, "element_path": node.path,
+                     "window_name": w.get_name() or "", "window_rect": [ext.x, ext.y, ext.width, ext.height]}
+            # A native object path binds the actual field, rather than a repeated name/role.
+            if not ident["pid"] or not ident["window_path"] or not ident["element_path"]: return None, None
+            return node, {"identity": ident, "role": rn, "name": node.get_name() or "", "editable": bool(st.contains(Atspi.StateType.EDITABLE) and node.get_editable_text_iface() is not None),
+                          "password": rn == "password text", "text": txt, "selection": selection, "caret": caret}
+        if dep < 60:
+            for j in range(node.get_child_count()):
+                c = node.get_child_at_index(j)
+                if c is not None: stack.append((c, dep + 1))
+    return None, None
+
+def _focus_info(hint):
+    return _focused_record(hint)[1]
+
+def _focused_write(req):
+    # Identity-bound native write: a later focus change cannot redirect the write to another object.
+    import subprocess, re
+    node, f = _focused_record(req.get("app"))
+    if not f or f.get("identity") != req.get("identity"): return {"ok": False, "error": "focused native field identity changed; nothing written"}
+    if not f["editable"] or f["password"] or re.search(r"password|passcode|\bpin\b|cvv|cvc|one[- ]time|verification code", f["name"], re.I):
+        return {"ok": False, "error": "focused field is not a verified non-secret editable field; nothing written"}
+    if f["text"] is None or len(f["text"]) >= 20000: return {"ok": False, "error": "complete text unavailable; nothing written"}
+    w = subprocess.run(["xdotool", "getactivewindow"], capture_output=True, text=True, timeout=2)
+    if w.returncode or w.stdout.strip() != req.get("xwindow"): return {"ok": False, "error": "active X11 window changed; nothing written"}
+    if _modal_title(req.get("app")) is not None: return {"ok": False, "error": "blocking modal present; nothing written"}
+    node2, f2 = _focused_record(req.get("app"))
+    if not f2 or f2["identity"] != f["identity"] or any(f2[k] != f[k] for k in ("text", "selection", "caret")):
+        return {"ok": False, "error": "focused field/text/selection changed during check; nothing written"}
+    w = subprocess.run(["xdotool", "getactivewindow"], capture_output=True, text=True, timeout=2)
+    if w.returncode or w.stdout.strip() != req.get("xwindow"): return {"ok": False, "error": "X11 focus changed during native checks; nothing written"}
+    # Check editable/secret states again immediately before dispatch to this SAME object.
+    st = node.get_state_set()
+    if not st.contains(Atspi.StateType.FOCUSED) or not st.contains(Atspi.StateType.EDITABLE) or node.get_role_name() == "password text":
+        return {"ok": False, "error": "field state changed; nothing written"}
+    et = node.get_editable_text_iface(); ti = node.get_text_iface(); text = req["text"]
+    saved = req.get("saved_range")
+    if saved:
+        if saved.get("identity") != f["identity"] or saved.get("xwindow") != req.get("xwindow") or saved.get("text") != f["text"]:
+            return {"ok": False, "error": "saved highlighted field/window/text changed; nothing written"}
+        if not saved.get("selection") or len(saved["selection"]) != 2: return {"ok": False, "error": "saved range unavailable; nothing written"}
+        f["selection"] = saved["selection"]
+    if req["operation"] == "setValue" and not saved:
+        expected = text; ok = et.set_text_contents(text)
+    else:
+        sel = f["selection"]; start, end = sel if sel else (f["caret"], f["caret"])
+        if start is None or not (0 <= start <= end <= len(f["text"])): return {"ok": False, "error": "selected range unavailable; nothing written"}
+        expected = f["text"][:start] + text + f["text"][end:]
+        # One native replacement call avoids a half-completed delete/insert sequence.
+        ok = et.set_text_contents(expected)
+        if ok:
+            caret_ok = ti.set_caret_offset(start + len(text))
+            if not caret_ok or ti.get_caret_offset() != start + len(text) or ti.get_n_selections() != 0:
+                return {"ok": False, "error": "text was written but caret/selection readback did not match; do not continue", "text_verified": True, "caret_verified": False}
+    actual = ti.get_text(0, ti.get_character_count())
+    if not ok or actual != expected: return {"ok": False, "error": "native write failed or readback did not match", "text_verified": False}
+    return {"ok": True, "status": "performed " + req["operation"], "chars": len(text), "text_verified": True,
+            "caret_verified": (req["operation"] == "setValue" and not saved) or ti.get_caret_offset() == start + len(text),
+            "delivery": "AT-SPI EditableText on identity-bound object", "field_identity": f["identity"]}
 
 def modal_title(hint, timeout=3):
     """Bounded child read, like every other native AT-SPI read. Returns (status, title): ('ok', title|None) or ('unavailable', None) - unavailable is never reported as 'no modal'."""
@@ -365,12 +451,14 @@ def targets_isolated(timeout=6):
 
 
 if __name__ == "__main__":
-    if len(sys.argv) > 1 and sys.argv[1] in ("--probe", "--targets", "--ready", "--modal", "--fp"):
+    if len(sys.argv) > 1 and sys.argv[1] in ("--probe", "--targets", "--ready", "--modal", "--fp", "--focus", "--focused-write"):
         try:
             if sys.argv[1] == "--probe":
                 rect = _json.loads(sys.argv[2]); hp = int(sys.argv[3]) or None; wall = _time.monotonic() + float(sys.argv[4])
                 el, sel = _probe(rect, hp, 4000, wall); print(_json.dumps({"element": el, "selection": sel}))
             elif sys.argv[1] == "--fp": print(_json.dumps(_fingerprint(sys.argv[2] if len(sys.argv) > 2 else "")))
+            elif sys.argv[1] == "--focused-write": print(_json.dumps(_focused_write(_json.load(sys.stdin))))
+            elif sys.argv[1] == "--focus": print(_json.dumps({"focus": _focus_info(sys.argv[2] if len(sys.argv) > 2 else "")}))
             elif sys.argv[1] == "--modal": print(_json.dumps({"title": _modal_title(sys.argv[2] if len(sys.argv) > 2 else "")}))
             elif sys.argv[1] == "--ready": print(_json.dumps({"ready": bool(ready(2.5))}))
             elif len(sys.argv) > 3 and sys.argv[2] == "--app": print(_json.dumps({"targets": _app_targets(sys.argv[3])}))  # filter in the child

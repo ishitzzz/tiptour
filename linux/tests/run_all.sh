@@ -4,7 +4,7 @@
 # PINNED TREE + RESUME. Fresh run: copy the current tree to $P/pin/linux and run every stage from that copy (later edits to the working tree cannot change a run).
 # Resume: RESUME=<existing run dir> reuses ITS pinned tree and STAGES.tsv; stages already RAN rc=0 (or ASSERTED) are not repeated; a RUNNING marker with a dead runner is recorded as ORPHANED and that stage dir is moved aside (kept) before rerun.
 # Stages that may call a model (everything except the click stages) are NEVER rerun on resume unless ALLOW_MODEL_RERUN=1 (they are logged SKIPPED, INCOMPLETE).
-SRC=/home/sandbox/tiptour/linux
+SRC=${CHAIN_SRC:-/home/sandbox/tiptour/linux}
 exec 9>/tmp/tt-x99.lock; flock -n 9 || { echo "display lock /tmp/tt-x99.lock is held by another run; refusing before any mutation" >&2; exit 3; }
 export TT_X99_OWNED=1
 if [ -n "${RESUME:-}" ]; then P=$RESUME; [ -d $P/pin/linux ] || { echo "no pinned tree in $P" >&2; exit 2; }; RESUMING=1

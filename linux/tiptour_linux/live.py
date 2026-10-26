@@ -12,9 +12,15 @@ PROMPT_OS_DELTAS = [
     # create_note drives Apple Notes: macOS-only, no Linux equivalent is built; the tool is not declared on Linux, so its instructions are removed too.
     ("For creating an Apple Notes note with supplied content, use create_note(title, body). It is the only supported multi-action convenience tool.\n", ""),
 ]
+# USER-AUTHORIZED DELTAS (not OS deltas; Ishit, voice notes 19:30 and 19:31 IST 26 Oct, relayed by main): the Mac prompt/schema allow exactly ONE step per submit_workflow_plan. The user chose that one spoken request may carry a multi-step task (no one-step clamp, no invented step cap) and that the assistant first classifies one-step vs several, proposes the plan (what, in what order), and executes ANY plan (one step or several) only after the user's explicit yes. The app, not this prompt, enforces that (tt14 gate, not yet implemented in this tree).
+USER_PROMPT_DELTAS = [
+    ("with exactly ONE step, then wait for the next user utterance.",
+     "as follows. First decide whether the request needs one step or several. NEVER act right away: first tell the user the plan in plain words (what you will do and in what order) and ask them to confirm. The app shows the proposal and holds every action until the user says yes to that exact plan. Submit the plan (one step, or all the agreed steps in order) only when the app or the user has asked you to. If the user changes the plan, propose the revised plan and wait for a new yes. After submitting, wait for the next user utterance."),
+]
+USER_SCHEMA_DELTA_NOTE = "steps: maxItems 1 removed; tool and steps descriptions say a confirmed multi-step plan may carry several steps"
 def build_system_prompt():
     text = open(_os.path.join(_os.path.dirname(__file__), "prompts", "mac_system_prompt.verbatim.txt"), encoding="utf-8").read()
-    for old, new in PROMPT_OS_DELTAS:
+    for old, new in PROMPT_OS_DELTAS + USER_PROMPT_DELTAS:
         assert old in text, "OS delta no longer matches the Mac prompt: %r" % old[:40]
         text = text.replace(old, new, 1)
     return text
@@ -24,6 +30,15 @@ SYSTEM_PROMPT = build_system_prompt()
 # OS delta: the Mac also declares create_note (Apple Notes, macOS-only); it is NOT declared on Linux and its prompt paragraph is removed (PROMPT_OS_DELTAS).
 import json as _json
 TOOL = _json.load(open(_os.path.join(_os.path.dirname(__file__), "prompts", "mac_tool_schema.verbatim.json"), encoding="utf-8"))["submitWorkflowPlanTool"]
+def _apply_user_schema_delta(tool):
+    t = _json.loads(_json.dumps(tool)); st = t["parameters"]["properties"]["steps"]
+    assert st.get("maxItems") == 1, "schema delta no longer matches"
+    del st["maxItems"]
+    assert "Submit exactly one CUA action step" in t["description"] and st["description"].startswith("Exactly one step.")
+    t["description"] = t["description"].replace("Submit exactly one CUA action step", "Submit a CUA action plan (one step, or several steps, run only after the user confirmed the plan)", 1).replace("Never submit a chained sequence; wait for the next screen/user turn before the next action.", "The app holds the plan until the user confirms it.", 1)
+    st["description"] = st["description"].replace("Exactly one step.", "One step, or several in order if the user confirmed a multi-step plan.", 1)
+    return t
+TOOL = _apply_user_schema_delta(TOOL)
 
 class ConnectError(Exception):
     def __init__(self, kind, msg, retry_after=None):
@@ -77,6 +92,9 @@ class LiveClient:
     async def send_context(self, t):
         """Seed context WITHOUT starting a model turn (clientContent, turnComplete=false; the Mac keepalive uses the same shape). realtimeInput text is treated as a user turn and makes the model answer."""
         await self._send({"clientContent": {"turns": [{"role": "user", "parts": [{"text": t}]}], "turnComplete": False}})
+    async def send_history(self, turns):
+        """Rehydrate a FRESH connection with the prior conversation text (clientContent, turnComplete=false, the same provider shape send_context already uses). turns = [(role, text)] with role user|model."""
+        await self._send({"clientContent": {"turns": [{"role": r, "parts": [{"text": t}]} for r, t in turns], "turnComplete": False}})
     async def send_screenshot(self, jpeg): await self._send({"realtimeInput": {"video": {"data": base64.b64encode(jpeg).decode(), "mimeType": "image/jpeg"}}})
     async def send_audio(self, pcm16): await self._send({"realtimeInput": {"audio": {"data": base64.b64encode(pcm16).decode(), "mimeType": "audio/pcm;rate=16000"}}})
     async def tool_response(self, id, name, response): await self._send({"toolResponse": {"functionResponses": [{"id": id, "name": name, "response": response}]}})

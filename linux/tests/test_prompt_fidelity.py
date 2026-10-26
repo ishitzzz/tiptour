@@ -9,8 +9,8 @@ def check(n, c):
 here = os.path.join(os.path.dirname(__file__), "..")
 vf = open(os.path.join(here, "tiptour_linux/prompts/mac_system_prompt.verbatim.txt")).read()
 exp = vf
-for o, n in live.PROMPT_OS_DELTAS: exp = exp.replace(o, n, 1)
-check("Linux SYSTEM_PROMPT == verbatim Mac prompt + explicit OS deltas only", live.SYSTEM_PROMPT == exp)
+for o, n in live.PROMPT_OS_DELTAS + live.USER_PROMPT_DELTAS: exp = exp.replace(o, n, 1)
+check("Linux SYSTEM_PROMPT == verbatim Mac prompt + explicit OS deltas + the ONE user-authorized multi-step delta only", live.SYSTEM_PROMPT == exp)
 check("exactly 2 documented OS deltas", len(live.PROMPT_OS_DELTAS) == 2)
 sw = os.path.join(here, "../TipTour/App/CompanionManager.swift")
 if os.path.exists(sw):
@@ -19,7 +19,10 @@ if os.path.exists(sw):
 else: print("INFO Swift source not present: source re-extraction not checked")
 import json, subprocess, tempfile
 vj = json.load(open(os.path.join(here, "tiptour_linux/prompts/mac_tool_schema.verbatim.json")))
-check("Linux TOOL == Mac submitWorkflowPlanTool verbatim", live.TOOL == vj["submitWorkflowPlanTool"])
+_m = vj["submitWorkflowPlanTool"]; _t = live.TOOL
+def _strip(t):
+    import copy; t = copy.deepcopy(t); t["description"] = ""; st = t["parameters"]["properties"]["steps"]; st["description"] = ""; st.pop("maxItems", None); return t
+check("Linux TOOL == Mac submitWorkflowPlanTool except the user-authorized deltas (tool+steps description, steps.maxItems removed)", _strip(_t) == _strip(_m) and "maxItems" not in _t["parameters"]["properties"]["steps"] and _m["parameters"]["properties"]["steps"]["maxItems"] == 1 and _t["description"] != _m["description"])
 check("Linux step fields == Mac step fields (10)", list(live.TOOL["parameters"]["properties"]["steps"]["items"]["properties"]) == ["label","type","hint","value","direction","amount","by","targetContext","point_2d","box_2d"])
 sf = os.path.join(here, "../TipTour/Voice/GeminiLiveClient.swift")
 if os.path.exists(sf):
