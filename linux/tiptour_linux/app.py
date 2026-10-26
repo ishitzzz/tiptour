@@ -132,6 +132,14 @@ def main():
 
     def _control(cmd, tok=None):
         """Pause controls for a target whose click was seen but whose effect is unverified/unchanged. Not routed through the model."""
+        if cmd in ("retry", "resume") and hl.get("replay"):  # Mac retryCurrentStep()/resume(): re-capture + rerun the full cascade for the active step (resume only while paused, like `guard pausedReason != nil`)
+            if tok is not None and tok != plan_tok["n"]:
+                click_events.append({"control": cmd + "_refused", "reason": "stale panel"}); log("control %s refused: stale panel" % cmd); return
+            _paused = cur.get("paused") or (bool(validators) and validators[-1].verdict == "unchanged_paused")
+            if cmd == "resume" and not _paused:
+                click_events.append({"control": "resume_refused", "reason": "not paused"}); log("control resume refused: not paused"); return
+            click_events.append({"control": cmd, "mode": "replay_full_cascade", "label": cur.get("label")}); GLib.idle_add(lambda: panel.hide_panel() and False); cur["paused"] = None
+            hl["replay"](cmd); return
         with glock:
             if tok is not None and tok != plan_tok["n"]:  # a panel button queued/clicked for an earlier target or pause episode must never act on a newer one
                 click_events.append({"control": cmd + "_refused", "reason": "stale panel"}); log("control %s refused: stale panel (belongs to an earlier target/pause)" % cmd); return
@@ -193,7 +201,7 @@ def main():
                     with open(a.serve) as f:
                         for line in f:
                             line = line.strip()
-                            if line in ('@skip', '@retry'): _control(line[1:]); continue
+                            if line in ('@skip', '@retry', '@resume'): _control(line[1:]); continue
                             if line == '@quit': loop.call_soon_threadsafe(q.put_nowait, ('voice_stop', None))  # a live voice turn must not block shutdown
                             if line: loop.call_soon_threadsafe(serve_q.put_nowait, line)
             threading.Thread(target=_reader, daemon=True).start()
@@ -407,6 +415,24 @@ def main():
                 resp = {"ok": False, "error": "no coordinates"}
             return resp, tool_seen
 
+        def _perceive(full):
+            yolo = detector.detect(full) if detector else []
+            ocr_el = perception.ocr(full.resize((full.width*2, full.height*2))) if detector else []
+            for e in ocr_el: e['bbox']=[v/2 for v in e['bbox']]; e['center']=[v/2 for v in e['center']]
+            log('perception: %d yolo boxes, %d ocr lines' % (len(yolo), len(ocr_el)))
+            TARGET_CACHE.update([{'bbox': [b['bbox'][0], b['bbox'][1], b['bbox'][0] + b['bbox'][2], b['bbox'][1] + b['bbox'][3]], 'label': b.get('label') or '', 'source': 'yolo', 'conf': b.get('conf', 0)} for b in yolo] + [{'bbox': [e['bbox'][0], e['bbox'][1], e['bbox'][0] + e['bbox'][2], e['bbox'][1] + e['bbox'][3]], 'label': e.get('label') or '', 'source': 'ocr', 'conf': e.get('conf', 0)} for e in ocr_el], size, (0, 0, size[0], size[1]))  # Mac: LocalPerceptionTargetCache.update after each perception pass
+            return yolo, ocr_el
+        last_call = {}
+        async def _replay_step(kind):
+            """Mac WorkflowRunner.retryCurrentStep() / resume(): re-capture the screen and rerun the FULL resolver cascade for the active step. No model round-trip, no tool_response."""
+            nonlocal full, jpeg, size, yolo, ocr_el
+            c = dict(last_call)
+            if not c: click_events.append({"control": kind + "_refused", "reason": "no active step"}); log("control %s refused: no active step" % kind); return
+            full, jpeg, size = await asyncio.to_thread(capture_clean, True)
+            yolo, ocr_el = await asyncio.to_thread(_perceive, full)
+            resp, ts = await _resolve_step(c["v"], c["args"], c["text"])
+            click_events.append({"control": kind + "_replay", "status": (resp or {}).get("status"), "source": (ts or {}).get("source"), "refused": (ts or {}).get("refused")}); log("control %s: re-resolved the active step from a fresh capture -> %s" % (kind, (ts or {}).get("source")))
+        hl['replay'] = lambda kind: asyncio.run_coroutine_threadsafe(_replay_step(kind), loop)
         i = -1
         async for text in _asks():
             i += 1
@@ -453,11 +479,7 @@ def main():
                 continue
             full, jpeg, size = capture_clean(pin=True)
             full.save(os.path.join(a.out, "screen-%d.png" % i))
-            yolo = detector.detect(full) if detector else []
-            ocr_el = perception.ocr(full.resize((full.width*2, full.height*2))) if detector else []
-            for e in ocr_el: e['bbox']=[v/2 for v in e['bbox']]; e['center']=[v/2 for v in e['center']]
-            log('perception: %d yolo boxes, %d ocr lines' % (len(yolo), len(ocr_el)))
-            TARGET_CACHE.update([{'bbox': [b['bbox'][0], b['bbox'][1], b['bbox'][0] + b['bbox'][2], b['bbox'][1] + b['bbox'][3]], 'label': b.get('label') or '', 'source': 'yolo', 'conf': b.get('conf', 0)} for b in yolo] + [{'bbox': [e['bbox'][0], e['bbox'][1], e['bbox'][0] + e['bbox'][2], e['bbox'][1] + e['bbox'][3]], 'label': e.get('label') or '', 'source': 'ocr', 'conf': e.get('conf', 0)} for e in ocr_el], size, (0, 0, size[0], size[1]))  # Mac: LocalPerceptionTargetCache.update after each perception pass
+            yolo, ocr_el = _perceive(full)
             await client.send_screenshot(jpeg)
             from PIL import Image as _I; import io as _io; jw,jh=_I.open(_io.BytesIO(jpeg)).size; log("sent JPEG %dx%d (%d bytes) of %dx%d screen" % (jw,jh,len(jpeg), size[0], size[1])); dlog("ask:", repr(text))
             open(os.path.join(a.out,"sent-%d.jpg"%i),"wb").write(jpeg)
@@ -505,6 +527,7 @@ def main():
                         _resp = _hlg.suppressed_payload(text, hl.get("last_ctx"))
                         await client.tool_response(v["id"], v["name"], _resp)
                         continue
+                    last_call.update(v=v, args=args, text=text)
                     resp, tool_seen = await _resolve_step(v, args, text)
                     await client.tool_response(v["id"], v["name"], resp)
                 elif k == "turnComplete":
