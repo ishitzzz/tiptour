@@ -166,17 +166,27 @@ def main():
             click_events.append({"control": "retry_refused", "reason": "target already dismissed"}); log("control retry refused: target already dismissed"); return
         if v != "unchanged_paused" and cur.get("paused") != "app_switch":
             click_events.append({"control": "retry_refused", "reason": "not paused (verdict %s)" % v}); log("control retry refused: not paused (verdict %s)" % v); return
+        def _retry_tail(_app=cur.get("app"), _lab=cur["label"]):
+            _c = cur.get("rect"); _pt = (_c[0] + _c[2] / 2, _c[1] + _c[3] / 2) if _c else cur.get("px")
+            if cur.get("pin") is None or clicks.pin_state(_pt, cur["pin"]) != "ok":
+                click_events.append({"control": "retry_refused", "reason": "target window not in front / focused"}); log("control retry refused: target window not in front / focused"); return
+            with glock:
+                plan_tok["n"] += 1; cur['paused'] = None
+                st = cur["rearm"]()
+                if st == "UNAVAILABLE": click_events.append({"control": "retry_refused", "reason": "detector could not arm"}); log("control retry refused: detector could not arm"); return
+                ov['hidden'] = False; ov['covered'] = False; GLib.idle_add(lambda: (overlay.show_all(), overlay.move(overlay.tip[0]-overlay.CX, overlay.tip[1]-overlay.CY)) and False)
+                click_events.append({"control": "retry", "label": cur["label"]}); GLib.idle_add(lambda: panel.hide_panel() and False); log("control retry: re-armed the same target %r with a fresh baseline" % cur["label"])
+        async def _retry_checked(_tok0):  # the AT-SPI validity read (up to 3 x 5s) runs OFF the loop so Skip/new asks are applied meanwhile; a result for a superseded plan is discarded
+            _ok = await asyncio.to_thread(_target_valid, cur.get("app"), cur["label"], cur.get("rect"))
+            if plan_tok["n"] != _tok0:
+                click_events.append({"control": "retry_refused", "reason": "superseded while verifying the target"}); log("control retry refused: superseded while verifying the target"); return
+            if not _ok:
+                click_events.append({"control": "retry_refused", "reason": "target not verifiable at its place"}); log("control retry refused: target not verifiable at its place"); return
+            _retry_tail()
+        if hl.get("loop") is not None: asyncio.ensure_future(_retry_checked(plan_tok["n"])); return
         if not _target_valid(cur.get("app"), cur["label"], cur.get("rect")):
             click_events.append({"control": "retry_refused", "reason": "target not verifiable at its place"}); log("control retry refused: target not verifiable at its place"); return
-        _c = cur.get("rect"); _pt = (_c[0] + _c[2] / 2, _c[1] + _c[3] / 2) if _c else cur.get("px")
-        if cur.get("pin") is None or clicks.pin_state(_pt, cur["pin"]) != "ok":
-            click_events.append({"control": "retry_refused", "reason": "target window not in front / focused"}); log("control retry refused: target window not in front / focused"); return
-        with glock:
-            plan_tok["n"] += 1; cur['paused'] = None
-            st = cur["rearm"]()
-            if st == "UNAVAILABLE": click_events.append({"control": "retry_refused", "reason": "detector could not arm"}); log("control retry refused: detector could not arm"); return
-            ov['hidden'] = False; ov['covered'] = False; GLib.idle_add(lambda: (overlay.show_all(), overlay.move(overlay.tip[0]-overlay.CX, overlay.tip[1]-overlay.CY)) and False)
-            click_events.append({"control": "retry", "label": cur["label"]}); GLib.idle_add(lambda: panel.hide_panel() and False); log("control retry: re-armed the same target %r with a fresh baseline" % cur["label"])
+        _retry_tail()
     async def run():
         loop = asyncio.get_running_loop(); q = asyncio.Queue(); hl['loop'] = loop; hl['q'] = asyncio.Queue()
         audio = bytearray(); out_tr = []
@@ -317,7 +327,7 @@ def main():
                 # Mac order: AX (here AT-SPI) -> local YOLO+OCR refinement -> raw Gemini coordinate
                 if atspi_resolver and os.environ.get("TIPTOUR_USE_ATSPI", "1") == "1":
                     try:
-                        hits = atspi_resolver.resolve(lab)
+                        hits = await asyncio.to_thread(atspi_resolver.resolve, lab)  # off the event loop: a hung AT-SPI read (child killed at its own timeout) must not delay Skip/new-ask handling; the plan_tok check after the await discards a stale result
                         dist = []
                         for t in hits:
                             c = (t["rect"][0] + t["rect"][2] / 2, t["rect"][1] + t["rect"][3] / 2)
@@ -330,10 +340,10 @@ def main():
                 if not done and os.environ.get("TIPTOUR_USE_CDP", "1") == "1":
                     try:
                         from . import cdp_resolver
-                        st, hits = cdp_resolver.resolve_ex(lab, size)
+                        st, hits = await asyncio.to_thread(cdp_resolver.resolve_ex, lab, size)  # off the loop (blocking CDP I/O); token checked after the await
                         if st == "ok":
                             hh = hits[0]; bound_rect = tuple(hh["rect"]); arm_rect = bound_rect; rx, ry, rw, rh = hh["rect"]; px = (round(rx + rw / 2), round(ry + rh / 2)); src = "cdp_dom(1 match,%s)" % hh["role"]; done = True
-                            ok2, why = cdp_resolver.revalidate(lab, hh["rect"], size)  # render-time recheck of focus/window/element
+                            ok2, why = await asyncio.to_thread(cdp_resolver.revalidate, lab, hh["rect"], size)  # render-time recheck of focus/window/element
                             if not ok2: refuse = "browser state changed before pointing (%s)" % why
                         elif st == "ambiguous": refuse = "ambiguous: %d distinct on-screen DOM matches for the label" % len(hits)
                         elif st == "offscreen": refuse = "target exists in the page but is scrolled out of view; scroll first"
