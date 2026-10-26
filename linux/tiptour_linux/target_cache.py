@@ -126,7 +126,7 @@ class LocalPerceptionTargetCache:
         return ((gx - df[0]) * (image_size[0] / max(df[2], 1)), (gy - df[1]) * (image_size[1] / max(df[3], 1)))
     @staticmethod
     def box2d(r, image_size):
-        c = lambda v: max(0, min(1000, int(round(v))))  # Swift .rounded() is half away from zero; values here are >= 0
+        c = lambda v: max(0, min(1000, int(math.floor(v + 0.5) if v >= 0 else -math.floor(-v + 0.5))))  # Swift .rounded() = half AWAY from zero (Python round() is banker's)
         return [c(r[1] * 1000 / max(image_size[1], 1)), c(r[0] * 1000 / max(image_size[0], 1)),
                 c((r[1] + r[3]) * 1000 / max(image_size[1], 1)), c((r[0] + r[2]) * 1000 / max(image_size[0], 1))]
     @staticmethod
