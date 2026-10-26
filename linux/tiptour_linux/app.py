@@ -136,6 +136,7 @@ def main():
         if lp: lp.call_soon_threadsafe(_control, cmd, tok)
         else: _control(cmd, tok)
     def _control(cmd, tok=None):
+        if cmd == 'skip' and hl.get('cancel_task'): hl['cancel_task']()  # cancel queued/in-flight Retry/Resume/advance before the Skip takes effect
         """Pause controls for a target whose click was seen but whose effect is unverified/unchanged. Not routed through the model."""
         if cmd in ("retry", "resume") and hl.get("replay"):  # Mac retryCurrentStep()/resume(): re-capture + rerun the full cascade for the active step (resume only while paused, like `guard pausedReason != nil`)
             if tok is not None and tok != plan_tok["n"]:
@@ -235,7 +236,10 @@ def main():
                 while True:
                     gate['turn'] = False  # consumer asked for the next item => the previous turn body has finished
                     t = await serve_q.get()
-                    while gate['replay']: await asyncio.sleep(0.05)  # a replay (Retry/Resume) in flight finishes before a new ask captures the screen
+                    (hl.get('cancel_task') or (lambda: None))()  # a new ask cancels an in-flight replay/advance (Mac: start cancels the in-flight resolution)
+                    for _w in range(100):
+                        if not gate['replay']: break
+                        await asyncio.sleep(0.05)
                     gate['turn'] = True
                     if t == "@quit":
                         if mic: mic.stop()
@@ -407,7 +411,7 @@ def main():
                 cur.update(label=step.get("label"), step=step, px=px, rect=arm_rect, app=arm_app, src=src, armed=not refuse, pin=clicks._pin, rearm=(lambda s=step, p=px, r=arm_rect, ap=arm_app, sc=src: _arm_block(s, p, r, ap, sc, None, None)))
                 with glock:  # atomic with the control thread/guard threads: final generation check + commit of hidden state + render post
                     if not refuse and plan_tok["n"] != _gen0:
-                        refuse = "superseded by a skip, cancel or newer request while resolving"; clicks.disarm()
+                        refuse = "superseded by a skip, cancel or newer request while resolving"  # no disarm here: the superseding transition already disarmed, and this must never disarm a NEWER plan's detector
                     ov['hidden'] = bool(refuse); ov['covered'] = False; GLib.idle_add(lambda: panel.hide_panel() and False)
                     if refuse: GLib.idle_add(overlay.hide)  # a refusal must not leave the previous answer's cursor on screen
                     if not refuse: PREV_STEP_POINT['p'] = (px[0], px[1]); log('render cursor at', px, 'src', src); GLib.idle_add(overlay.point_to, px[0], px[1], ("? " if unconf else "") + step.get("label", ""))
@@ -437,6 +441,14 @@ def main():
             TARGET_CACHE.update([{'bbox': [b['bbox'][0], b['bbox'][1], b['bbox'][0] + b['bbox'][2], b['bbox'][1] + b['bbox'][3]], 'label': b.get('label') or '', 'source': 'yolo', 'conf': b.get('conf', 0)} for b in yolo] + [{'bbox': [e['bbox'][0], e['bbox'][1], e['bbox'][0] + e['bbox'][2], e['bbox'][1] + e['bbox'][3]], 'label': e.get('label') or '', 'source': 'ocr', 'conf': e.get('conf', 0)} for e in ocr_el], size, (0, 0, size[0], size[1]))  # Mac: LocalPerceptionTargetCache.update after each perception pass
             return yolo, ocr_el
         last_call = {}; hl['last_call'] = last_call
+        def _cancel_task():
+            """Mac cancels the in-flight resolution task BEFORE every transition (skip/advance/start/stop/resume/retry). Loop-thread only."""
+            t = hl.get('task')
+            if t is not None and not t.done(): t.cancel(); log("in-flight replay/advance cancelled by a newer transition")
+            hl['task'] = None
+        def _spawn(coro):
+            _cancel_task(); hl['task'] = asyncio.ensure_future(coro)
+        hl['cancel_task'] = _cancel_task
         async def _replay_step(kind, tok0=None):
             """Mac WorkflowRunner.retryCurrentStep() / resume(): re-capture the screen and rerun the FULL resolver cascade for the active step. No model round-trip, no tool_response."""
             nonlocal full, jpeg, size, yolo, ocr_el
@@ -480,8 +492,8 @@ def main():
                 resp, ts = await _resolve_step(c["v"], c["args"], c["text"], c["idx"] + 1)
                 click_events.append({"advance": kind, "to_step": c["idx"] + 1, "of": n, "source": (ts or {}).get("source"), "refused": (ts or {}).get("refused")}); log("advance (%s): step %d of %d resolved -> %s" % (kind, c["idx"] + 2, n, (ts or {}).get("source")))
             finally: gate['replay'] = False
-        hl['advance'] = lambda kind, tok0=None: asyncio.run_coroutine_threadsafe(_advance_step(kind, tok0), loop)
-        hl['replay'] = lambda kind, tok0=None: asyncio.run_coroutine_threadsafe(_replay_step(kind, tok0), loop)
+        hl['advance'] = lambda kind, tok0=None: _spawn(_advance_step(kind, tok0))
+        hl['replay'] = lambda kind, tok0=None: _spawn(_replay_step(kind, tok0))
         i = -1
         async for text in _asks():
             i += 1; pause_rs['r'] = None; PREV_STEP_POINT['p'] = None
