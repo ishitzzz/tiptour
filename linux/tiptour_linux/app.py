@@ -310,6 +310,7 @@ def main():
                     if pt:
                         px = norm_to_px(pt, size); model_px = px; src = "model_box"
                         lab = step.get("label", ""); done = False; ambiguous = 0; refuse = None; bound_rect = None; arm_rect = None; arm_app = None
+                        if step.get("targetContext") in ("currentSelection", "focusedElement"): refuse = "targetContext %s is not implemented on Linux yet (native selection / focused-element binding is a known gap vs the Mac); not pointing" % step.get("targetContext")  # explicit, never silently ignored
                         clicks.disarm(); plan_tok["n"] += 1
                         now_id = ident(); dlog('identity pinned=%r now=%r' % (frame_id['v'], now_id))
                         if frame_id["v"] and now_id != frame_id["v"]:

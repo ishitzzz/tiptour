@@ -1,0 +1,18 @@
+# Fidelity correction: Linux must be the SAME engine as the Mac, with OS adapters only
+
+Source of truth: the Mac sources at base 6e97782. Rule: copy the original text/logic where portable; change only the OS connection; every unavoidable difference is listed here.
+
+## Done (this commit, offline-tested only; NO model run on it yet)
+- System prompt = Mac `companionVoiceResponseSystemPrompt` verbatim (prompts/mac_system_prompt.verbatim.txt, extracted from Swift). Explicit OS deltas only: (1) "macOS menu bar" -> "Linux desktop"; (2) create_note paragraph removed because Apple Notes is macOS-only. tests/test_prompt_fidelity.py enforces this and re-extracts from the Swift source.
+- Tool declaration = Mac `submitWorkflowPlanTool` verbatim (10 step fields incl. direction/amount/by/targetContext, long descriptions) via tools/extract_mac_tool_schema.py. OS delta: create_note is not declared.
+- Linux handler refuses targetContext currentSelection/focusedElement explicitly (not implemented) instead of silently ignoring it.
+- Needs a real-model retest before anyone calls the prompt/schema change working (the model now sees fields and rules the Linux handlers only partly implement).
+
+## Known gaps vs the Mac (to be closed, in this order; none is claimed done)
+1. LocalPerceptionTargetCache + target_id/target_mark (WorkflowPlan.swift:286-288, 315-316): numbered snapshot (up to 160 YOLO+OCR+AX targets) fed to the model; Linux has none.
+2. Pause/resume/retry/skip semantics (WorkflowRunner.swift:341, :379): Mac skipCurrentStep advances to the next step, resume re-resolves after pause, retry re-resolves from scratch; Linux retry only re-arms and skip only hides. The Retry/Skip/Resume panel is original Mac UI: Linux should use the Mac's, not a Linux-original look.
+3. Four Mac pause reasons (WorkflowRunner.swift:66-90): unrelated app (bundle id), modalDialogPresented (title), postClickStateUnchanged (label), actionRequiresAutopilot (label). Linux has app-switch and unchanged only. Mac unrelated-app uses activationMatchesCurrentPlanTarget (:1284), not any focus change; modal detector at :1321.
+4. Cursor flight ~500 ms with arm-before-flight (armCursorAndClickDetector :891; Linux arms before render: faithful), display-containing-point capture / multi-monitor, previousStepResolvedGlobalScreenPoint proximity tiebreak for the NEXT step (nested menus). Linux is single-step.
+5. Validator bypass for keyboardShortcut/pressKey/type/setValue/scroll (:477).
+6. Missing features: create_note (Apple Notes: OS boundary), targetContext text binding (currentSelection/focusedElement), product multi-step runner, action executor (--act untested), privacy-mode texts/path, UI panels/radial input/Neko/multi-display, JEV, Tutorials, Skills. Scribble/annotations stay excluded; Windows not started.
+Linux safety additions that are NOT Mac semantics (pointer guard, AT-SPI validator timing, isolated native reads, stale-panel token) stay labelled as Linux additions.

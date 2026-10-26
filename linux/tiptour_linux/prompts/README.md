@@ -1,0 +1,2 @@
+mac_system_prompt.verbatim.txt = the macOS companionVoiceResponseSystemPrompt extracted byte-for-byte (leading indentation of the Swift multiline literal removed) from TipTour/App/CompanionManager.swift at base 6e97782. Do not edit by hand.
+live.py builds the Linux prompt from it by applying ONLY the explicit OS deltas in PROMPT_OS_DELTAS (tiptour_linux/live.py). tests/test_prompt_fidelity.py fails if anything else differs, and (when the Swift source is present) re-extracts and compares.

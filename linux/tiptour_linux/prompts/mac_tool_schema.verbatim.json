@@ -1,0 +1,140 @@
+{
+ "submitWorkflowPlanTool": {
+  "name": "submit_workflow_plan",
+  "description": "Submit exactly one CUA action step for anything the user wants done on the computer: open an app, open a URL, click UI, press a shortcut, type text, edit highlighted/selected text, or scroll. Never submit a chained sequence; wait for the next screen/user turn before the next action.",
+  "parameters": {
+   "type": "object",
+   "properties": {
+    "goal": {
+     "type": "string",
+     "description": "Short natural-language summary of what the user wants to accomplish."
+    },
+    "app": {
+     "type": "string",
+     "description": "EXACT name of the foreground application visible in the screenshot — e.g. 'Blender', 'Xcode', 'GarageBand'. Used to target the right accessibility tree. Do NOT guess 'macOS' or 'unknown'."
+    },
+    "steps": {
+     "type": "array",
+     "description": "Exactly one step. The step MUST be visible on the current screen unless it uses currentHighlight/currentSelection/focusedElement context.",
+     "minItems": 1,
+     "maxItems": 1,
+     "items": {
+      "type": "object",
+      "properties": {
+       "label": {
+        "type": "string",
+        "description": "For click: literal visible text of the element, or nearest label for an icon. For openApp: app name, e.g. 'Safari'. For openURL: URL/path, e.g. 'https://apple.com' or '/Users/me/Desktop'. For keyboardShortcut: combo. For type: target field label, e.g. 'Note body'."
+       },
+       "type": {
+        "type": "string",
+        "description": "Action type. Omit for normal visible UI clicks.",
+        "enum": [
+         "click",
+         "rightClick",
+         "doubleClick",
+         "openApp",
+         "openURL",
+         "keyboardShortcut",
+         "pressKey",
+         "type",
+         "setValue",
+         "scroll",
+         "waitForState",
+         "observe"
+        ]
+       },
+       "hint": {
+        "type": "string",
+        "description": "Short sentence describing this step — e.g. 'Open the File menu'."
+       },
+       "value": {
+        "type": "string",
+        "description": "Value for setValue steps. For type steps, put the literal text to type here; use label only for the target field name."
+       },
+       "direction": {
+        "type": "string",
+        "description": "Direction for scroll steps.",
+        "enum": [
+         "up",
+         "down",
+         "left",
+         "right"
+        ]
+       },
+       "amount": {
+        "type": "integer",
+        "description": "Repeat count for scroll steps. Keep small, usually 3-8.",
+        "minimum": 1,
+        "maximum": 50
+       },
+       "by": {
+        "type": "string",
+        "description": "Scroll granularity.",
+        "enum": [
+         "line",
+         "page"
+        ]
+       },
+       "targetContext": {
+        "type": "string",
+        "description": "Optional grounding target for generic action steps. Use 'currentHighlight' when the user referred to the painted highlight/current highlighted area; use 'currentSelection' for a native selected text range; use 'focusedElement' for the active focused field; use 'visibleElement' for ordinary visible UI targets. This lets TipTour bind type/delete/setValue/click actions to the right app/window/element/range without relying on labels alone.",
+        "enum": [
+         "visibleElement",
+         "currentHighlight",
+         "currentSelection",
+         "focusedElement"
+        ]
+       },
+       "point_2d": {
+        "type": "array",
+        "description": "Optional exact click/target point in normalized [y, x] form, each value in [0, 1000] relative to the current screenshot. Origin is top-left, y comes first. Prefer this for dense UI, tiny controls, Blender, games, canvas tools, and toolbar/menu targets.",
+        "items": {
+         "type": "integer"
+        },
+        "minItems": 2,
+        "maxItems": 2
+       },
+       "box_2d": {
+        "type": "array",
+        "description": "Optional bounding box for the element in normalized [y1, x1, y2, x2] form, each value in [0, 1000] relative to the current screenshot. Origin is top-left, y comes first. Useful as supporting context when labels are ambiguous; point_2d is preferred for the actual click target.",
+        "items": {
+         "type": "integer"
+        },
+        "minItems": 4,
+        "maxItems": 4
+       }
+      },
+      "required": [
+       "label"
+      ]
+     }
+    }
+   },
+   "required": [
+    "goal",
+    "app",
+    "steps"
+   ]
+  }
+ },
+ "createNoteTool": {
+  "name": "create_note",
+  "description": "Create and fill a new Apple Notes note from one spoken request. Use this when the user asks to make, create, write, or take a note in Notes and provides the note text. Do not split this into open Notes, Cmd+N, and type actions.",
+  "parameters": {
+   "type": "object",
+   "properties": {
+    "title": {
+     "type": "string",
+     "description": "Optional short title for the note. If omitted, TipTour will use the first line of the body."
+    },
+    "body": {
+     "type": "string",
+     "description": "The full note content to type into Apple Notes."
+    }
+   },
+   "required": [
+    "body"
+   ]
+  }
+ }
+}
