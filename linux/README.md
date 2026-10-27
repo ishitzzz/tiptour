@@ -1,5 +1,11 @@
 # TipTour Linux port (experimental, X11 only, NOT a full port)
-Branch feature/linux-port, base upstream 6e97782. Python/GTK3. See PARITY.md for exactly what is verified and what is not. The R78 checkpoint adds bounded app-skill numeric character dispatch tested with an owned GTK fixture, not real Blender. A fresh four-step real-Gemini browser workflow also passes; this is not full-port acceptance. Pointing aims at the native field/widget, not necessarily its insertion caret. Selected UI tests still have two retained prior fixture failures.
+Branch feature/linux-port, base upstream 6e97782. Python/GTK3. See PARITY.md for exact evidence. R89 is a narrow pointer/input-shape checkpoint, not integrated Linux acceptance: controlled compositor-on/off motion, exclusion and click-through pass, but no final-source actual-model integration run passes. Earlier actual-model results belong to their recorded source bytes. Selected tests are not the whole suite.
+
+## R89 pointer rendering and click-through
+
+Without a compositor, the pointer bounding shape is now updated before GTK paint invalidation, and arrow edges use binary rasterization to avoid black blending against transparent backing. These edges are harder than the composited glow. GTK now stores the empty input region on the widget so first mapping cannot reset it and steal clicks. Controlled X11 checks cover both compositor modes, drawn arrival, clicks to an underlying button, capture exclusion and return/follow. This does not prove physical Linux, Wayland, all-frame polish or original rendering parity.
+
+Final-source actual Gemini runs remain nonpasses: two four-step plans are refused by destination ownership after openApp, a File-menu target resolves over View without executing, and an Edit-menu teaching plan is rejected by the no-edit limit guard before proposal display. Their causes are not established as inherited. Screenshot exclusion on the actual composited desktop falls back to hiding on unsupported translucent backing. See the R89 ledger. No engine/perception/approval guard was changed by this pointer repair.
 
 ## Accurate Grounding
 
