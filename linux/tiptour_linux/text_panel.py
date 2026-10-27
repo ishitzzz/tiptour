@@ -39,9 +39,13 @@ class TextPanel(Gtk.Window):
     def __init__(self, post):
         super().__init__(title='TipTour text command')
         self.set_wmclass('tiptour-text', 'TipTourText')
+        self.set_name('tiptour-text')
+        from pathlib import Path
+        css = Gtk.CssProvider(); css.load_from_path(str(Path(__file__).with_name('text_panel.css')))
+        Gtk.StyleContext.add_provider_for_screen(self.get_screen(), css, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
         self.set_default_size(420, 110); self.set_keep_above(True)
         self.post = post; self.target = None
-        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8, margin=12)
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8, margin=10)
         self.add(box)
         self.entry = Gtk.Entry(); self.entry.set_placeholder_text('Ask TipTour to point or propose a plan')
         self.entry.connect('activate', self.submit); box.pack_start(self.entry, False, False, 0)

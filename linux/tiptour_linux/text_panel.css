@@ -1,0 +1,29 @@
+/* Pinned TextCommandPanelView + DS.Colors, Linux GTK controls retained. */
+#tiptour-text {
+  background-color: #101211;
+  color: #eceeed;
+  border: 1px solid #373b39;
+  border-radius: 10px;
+}
+#tiptour-text entry {
+  background: #202221;
+  color: #eceeed;
+  border: 1px solid #373b39;
+  border-radius: 6px;
+  font-size: 13px;
+  padding: 6px 8px;
+  box-shadow: none;
+}
+#tiptour-text entry:focus { border-color: #60a5fa; }
+#tiptour-text button {
+  background: #171918;
+  color: #adb5b2;
+  border: 1px solid #373b39;
+  border-radius: 6px;
+  font-size: 11px;
+  padding: 5px 12px;
+  box-shadow: none;
+}
+#tiptour-text button:hover { background: #272a29; color: #eceeed; }
+#tiptour-text button:focus { border-color: #60a5fa; }
+#tiptour-text label { color: #adb5b2; font-size: 11px; }

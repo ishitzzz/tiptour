@@ -1,3 +1,11 @@
+# R51 bounded text-surface style
+
+The optional text window now ships a scoped GTK CSS asset using pinned Mac DesignSystem colors: background #101211, primary #ECEEED, secondary #ADB5B2, subtle border #373B39 and input #202221. Entry text is 13px and activity 11px. Native window-manager decorations, 420px width and Linux Submit/Stop/Hide controls remain. This is not exact Mac borderless 340x64/shadow/fade/results-layout parity. No other app theme or provider/mode behavior changes.
+
+Exact `3c3df213` source has 19 scripts numeric zero, including a fresh GTK constructor loading the CSS and cancellation/backpressure/target identity/follow-timer/monitor cleanup tests. Actual scripted-provider motion shows follow, proposal freeze, UI Yes/native selection 0..14 and completion resume; the styled GTK Stop during a five-second approved binding stall leaves zero old effects after six seconds, app/driver zero. Dark panel and actual provider-bound clean JPEG pixels were inspected. First Stop automation used the old coordinate, missed the newly sized button and timed out; it is retained as failure. The unit wrapper detached-child warning remains separate from numeric script success. No new real-provider, audio, physical input or full-UI validation.
+
+## Prior bounded checkpoints
+
 # R50 bounded visible follow and capture correction
 
 The optional text entry now follows the mouse on a 16ms GTK timer, using actual outer frame extents and monitor workarea in GDK coordinates. Mac constants and candidate order are preserved with explicit bottom-left to top-left Y conversion. A too-small workarea refuses movement. The actual loop-owned pending proposal, active goal, turn, replay and resolving state continuously reconciles tracking freeze; an owned focus worker independently blocks motion. Tracking resumes at idle and the timer is removed on close. Status text remains partial; this is not full Mac fade/style/results resizing or radial dispatch.
