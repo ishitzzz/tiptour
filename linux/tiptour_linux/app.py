@@ -58,8 +58,8 @@ def main():
     a = ap.parse_args()
     if a.radial_preview and (a.voice or a.highlight):
         ap.error('--radial-preview cannot run with --voice or --highlight: partial modifier chords can activate those monitors')
-    if a.radial_input and (not a.voice or a.highlight or a.radial_preview):
-        ap.error('--radial-input requires --voice, cannot combine with --highlight or --radial-preview; its monitor replaces Ctrl+Alt hotkey')
+    if a.radial_input and (not a.voice or a.radial_preview):
+        ap.error('--radial-input requires --voice, cannot combine with --radial-preview; its monitor replaces Ctrl+Alt hotkey')
     os.makedirs(a.out, exist_ok=True)
     if a.text_ui and not a.serve: a.serve = os.path.join(a.out, "control.fifo")
     from .keypool import configured_keys
@@ -87,7 +87,7 @@ def main():
     from .overlay import ProposalPanel
     hl_post = {"fn": None}
     pprop = ProposalPanel(lambda k, rev: hl_post["fn"] and hl_post["fn"]("@%s %d" % (k, rev)))
-    text_ui = None; status_item = None; radial_preview = None; radial_post = {"fn": None, "invalidate": None}; shell_windows = {"settings": None, "closed": False, "busy": threading.Event()}
+    text_ui = None; status_item = None; radial_preview = None; shared_gestures = None; radial_gesture = {"key": None, "highlight": None, "retired": False}; radial_post = {"fn": None, "invalidate": None}; shell_windows = {"settings": None, "closed": False, "busy": threading.Event()}
     if a.text_ui:
         from .text_panel import TextPanel
         text_ui = TextPanel(lambda t: hl_post["fn"] and hl_post["fn"](t))
@@ -109,9 +109,9 @@ def main():
             log(message)
             if text_ui: text_ui.activity.set_text(message)
         def radial_select(option, point):
-            if radial_post['fn']: radial_post['fn'](option, point)
+            if radial_post['fn']: radial_post['fn'](option, point, radial_gesture['key'])
             else: radial_status('Radial input unavailable: runtime is not ready.')
-        radial_preview = RadialPreview(radial_status, radial_select if a.radial_input else None)
+        radial_preview = RadialPreview(radial_status, radial_select if a.radial_input else None, external_monitor=a.radial_input and a.highlight)
     def shell_busy():
         return shell_windows["busy"].is_set() or bool(status_item and status_item.capture_busy.is_set())
     def own_windows():
@@ -192,7 +192,49 @@ def main():
                     if text_ui: text_ui.activity.set_text(message)
                 return False
             GLib.idle_add(report)
-        hl["mon"] = _hl.HighlightMonitor(on_begin=begin_trail, on_move=lambda p: paint_trail(hl["mon"].points, gesture['token']), on_commit=_commit, on_release=highlight_owner.released, on_error=monitor_failed); hl["mon"].start()
+        if a.radial_input:
+            from .gesture_adapter import Adapter
+            def shared_radial(kind, point, key):
+                radial_gesture['key'] = key
+                radial_preview.transition(kind, point)
+                if kind == 'cancel' and radial_post['invalidate']:
+                    radial_post['invalidate']()
+            def shared_begin(point, key):
+                # Shared sampler alone owns the Stop/full-release barrier. A
+                # genuine new chord may begin without a neutral gap, as on Mac.
+                def admit():
+                    if not shared_gestures.monitor.valid(key[0]): return
+                    radial_gesture['highlight'] = key
+                    highlight_owner.released(); begin_trail(point)
+                if hl.get('loop'): hl['loop'].call_soon_threadsafe(admit)
+            def shared_move(points, key):
+                def apply():
+                    if shared_gestures.monitor.valid(key[0]) and radial_gesture['highlight'] == key:
+                        paint_trail(points, gesture['token'])
+                if hl.get('loop'): hl['loop'].call_soon_threadsafe(apply)
+            def shared_commit(points, ask, key):
+                def apply():
+                    if shared_gestures.monitor.valid(key[0]) and radial_gesture['highlight'] == key:
+                        _commit(points, ask)
+                if hl.get('loop'): hl['loop'].call_soon_threadsafe(apply)
+            def shared_cancel(key):
+                highlight_owner.invalidate()
+                hl['trail'].clear()
+            def schedule_transition(fn):
+                GLib.idle_add(lambda: (fn(), False)[1])
+            def shared_retired(generation):
+                # Logical cancellation is immediate on the sampler, not delayed
+                # behind GTK. Only the paint/status cleanup waits for GTK.
+                radial_gesture['retired'] = True
+                highlight_owner.invalidate()
+                if radial_post['invalidate']: radial_post['invalidate'](generation)
+            shared_gestures = Adapter(schedule_transition, shared_radial,
+                shared_begin, shared_move, shared_commit, shared_cancel,
+                lambda: monitor_failed('shared sampler'), retire=shared_retired)
+            radial_preview.monitor = shared_gestures.monitor
+            shared_gestures.start()
+        else:
+            hl["mon"] = _hl.HighlightMonitor(on_begin=begin_trail, on_move=lambda p: paint_trail(hl["mon"].points, gesture['token']), on_commit=_commit, on_release=highlight_owner.released, on_error=monitor_failed); hl["mon"].start()
     results = []
     onnx_path = os.environ.get('TIPTOUR_DETECTOR_ONNX', '/tmp/uielement.onnx')
     detector = IconDetector(onnx_path) if os.path.exists(onnx_path) else None
@@ -228,18 +270,18 @@ def main():
     from .clickdetect import ClickDetector, guarded_callback
     clicks = ClickDetector(); plan_tok = {"n": 0}; click_events = []; validators = []
     _cap_lk = threading.RLock(); _own_cap = {}; _pin_lk = threading.Lock(); _pin_seq = {"started": 0, "applied": 0}
-    def capture_clean(pin=False, fast=False):
-        with _cap_lk: return _capture_clean_locked(pin, fast)  # serialized: concurrent worker-thread captures must not interleave overlay hide/grab/show
-    def _capture_clean_locked(pin, fast):
+    def capture_clean(pin=False, fast=False, eligible=None):
+        with _cap_lk: return _capture_clean_locked(pin, fast, eligible)  # serialized: concurrent worker-thread captures must not interleave overlay hide/grab/show
+    def _capture_clean_locked(pin, fast, eligible=None):
         # own overlay must not appear in frames sent to the model
         _capture_token = plan_tok["n"]
         def _eligible():
-            if _capture_token != plan_tok["n"]:raise RuntimeError("stale capture discarded")
+            if not (eligible() if eligible else _capture_token == plan_tok["n"]):raise RuntimeError("stale capture discarded")
         _eligible()
         _clean = overlay.clean_capture_ready
         _was = [];_hidden_ack=[False]; _trail_token = highlight_owner.epoch
         def _hide_own():
-            if _capture_token != plan_tok["n"]:return
+            if not (eligible() if eligible else _capture_token == plan_tok["n"]):return
             if fast and shell_busy():return  # never dismiss a shell menu/settings for an idle frame
             for w in own_windows():
                 if w.get_visible():
@@ -275,7 +317,7 @@ def main():
             with highlight_owner.lock: highlight_owner.suppressed -= 1
             if _was:
                 def _restore_own():
-                    if _capture_token != plan_tok["n"]: return
+                    if not (eligible() if eligible else _capture_token == plan_tok["n"]): return
                     for w in _was:
                         if getattr(w, "_tiptour_destroyed", False): continue
                         if w is hl.get("trail") and (not highlight_owner.valid(_trail_token) or not highlight_owner.visible or w.closed): continue
@@ -363,6 +405,10 @@ def main():
         class _SV(str): arr = 0; sess = 0
         class _TCv(dict): sess = 0
         pipe = {"tok": 0, "task": None}
+        voice_cancel = {'future': None}
+        def retire_voice_context_writers():
+            future = voice_cancel['future']
+            if future and not future.done(): future.set_result(None)
         own = [0]  # VOICE OWNERSHIP counter: bumped by every PTT-on edge, OFF edge, abort and replacement start; an attempt may touch the mic/gate/buffer only while its captured value is current
         vg = {"ready": True, "buf": [], "pq": None, "lock": threading.Lock()}  # mic audio gate: while a fresh provider connection for a new PTT session is being made, audio is BUFFERED (in order), then flushed to the NEW client once it is ready
         vs = {"n": 0}  # VOICE SESSION EPOCH: bumped at every PTT on/off edge. Every transcript chunk / turnComplete is stamped with the epoch it arrived in at the single ingress; a voice turn only consumes events of ITS epoch (an old session's prefix/suffix can never join or finish a new utterance)
@@ -420,7 +466,12 @@ def main():
         def _abort_voice(why, ow=None):  # ONE owner of voice-session failure; ONLY the current owner may abort: an older failed/superseded attempt must not stop a newer mic/buffer
             if ow is not None and own[0] != ow:
                 click_events.append({"gate": "abort_skipped_not_owner", "why": why}); log("voice: %s, but a newer edge owns the voice session; nothing of the newer session was touched" % why); return False
-            hover.update(context=None, owner=None, defer_mic=False)
+            retire_voice_context_writers()
+            pending_ready = hover.get('ready')
+            if pending_ready and not pending_ready.done(): pending_ready.set_result(False)
+            pending_context = hover.get('future')
+            if pending_context and not pending_context.done(): pending_context.set_result(None)
+            hover.update(context=None, owner=None, defer_mic=False, future=None)
             own[0] += 1; pipe["tok"] += 1; gen[0] += 1; vs["n"] += 1; ing["parts"] = []
             with vg["lock"]:
                 vg["ready"] = False; vg["buf"] = []
@@ -430,7 +481,12 @@ def main():
             except Exception: pass
             tainted[0] = True; q.put_nowait(("voice_stop", None)); click_events.append({"gate": "voice_aborted", "why": why}); _ret = True; log("voice: ABORTED (%s); mic stopped, queue discarded by an explicit abort, session will be replaced on the next turn" % why); return True
         def _off_edge():  # PTT-OFF edge (loop thread): invalidates the generation, the epoch AND the command edge, ends the audio gate (queued audio is flushed to the closing session, then the sentinel), so late old-provider callbacks and a delayed connect cannot publish after OFF
-            hover.update(context=None, owner=None, defer_mic=False)
+            retire_voice_context_writers()
+            pending_ready = hover.get('ready')
+            if pending_ready and not pending_ready.done(): pending_ready.set_result(False)
+            pending_context = hover.get('future')
+            if pending_context and not pending_context.done(): pending_context.set_result(None)
+            hover.update(context=None, owner=None, defer_mic=False, future=None)
             tainted[0] = True  # callbacks on this connection now fail its generation gate; later typed/highlight needs a fresh one
             gen[0] += 1; vs["n"] += 1; edge["n"] += 1; own[0] += 1; ing["parts"] = []
             with vg["lock"]:
@@ -453,20 +509,27 @@ def main():
             try:
                 if hist and hasattr(cl, "send_history"):
                     await cl.send_history(list(hist)); click_events.append({"gate": "voice_history_rehydrated", "turns": len(hist), "chars": sum(len(_t2) for _r2, _t2 in hist)}); log("voice: rehydrated the fresh connection with %d prior turns (text only: no audio, screenshots, or model audio without transcript)" % len(hist))
+                if seed and hover['defer_mic']:
+                    native_future = hover.get('future'); native_owner = hover['owner']
+                    if native_future is None: raise RuntimeError('missing native context reservation')
+                    native_context = await asyncio.wait_for(asyncio.shield(native_future), 3)
+                    if not native_context or native_owner != own[0] or hover.get('future') is not native_future:
+                        raise RuntimeError('native context reservation retired')
+                    hover['context'] = native_context
                 with highlight_owner.lock:
                     committed, context_epoch = highlight_owner.context, highlight_owner.epoch
-                if seed and committed and os.environ.get("TIPTOUR_VOICE_CTX", "seed") == "seed":
+                if seed and committed and not (shared_gestures and pending_shared_context['token'] == context_epoch and pending_shared_context['owner'] == own[0]) and os.environ.get("TIPTOUR_VOICE_CTX", "seed") == "seed":
                     await cl.send_context(_hl.prompt(committed, ack=False))
                     with highlight_owner.lock:
                         if highlight_owner.epoch != context_epoch or highlight_owner.context is not committed:
                             raise RuntimeError('highlight context retired during seed')
                     log("voice: seeded latest highlight context silently (no turn)")
                 hc = hover['context']
-                if hover['defer_mic'] and hover.get('epoch') != radial_binding['epoch']: raise RuntimeError('radial intent replaced')
+                if hover['defer_mic'] and (hover.get('epoch') != radial_binding['epoch'] or shared_gestures and radial_gesture['retired']): raise RuntimeError('radial intent replaced')
                 if seed and hc:
                     if not hover_context.alive(hc, hover['owner']) or hover['owner'] != own[0]: raise RuntimeError('hover context expired or replaced')
                     await cl.send_context(hover_context.prompt(hc))
-                    if hover['context'] is not hc or hover['owner'] != own[0] or (hover['defer_mic'] and hover.get('epoch') != radial_binding['epoch']): raise RuntimeError('hover context superseded during seed')
+                    if hover['context'] is not hc or hover['owner'] != own[0] or shared_gestures and radial_gesture['retired'] or (hover['defer_mic'] and hover.get('epoch') != radial_binding['epoch']): raise RuntimeError('hover context superseded during seed')
                     click_events.append({'gate': 'hover_context_seeded'})
                 return True
             except Exception as _hx:
@@ -519,14 +582,79 @@ def main():
         serve_q = asyncio.Queue()
         cmd_ep = {}; cmd_gen = {}; edge = {"n": 0}; shutdown = {"requested": False}
         radial_binding = {"epoch": 0, "worker": None, "context_worker": None, "pending": False}
-        hover = {"context": None, "owner": None, "defer_mic": False, "epoch": None}
+        hover = {"context": None, "owner": None, "defer_mic": False, "epoch": None, "future": None}
+        pending_shared_context = {'token': None, 'owner': None}
         from . import hover_context
-        def _enq(t):
+        highlight_phase = {'token': None}
+        shared_context_tasks = set()
+        async def send_shared_highlight(token, session_owner, ready, retired):
+            # This is a context writer only. The voice body remains the only
+            # provider-event consumer; an unrelated turnComplete is never an ack.
+            future = highlight_owner.take(token)
+            if not future or not highlight_owner.valid(token): return
+            try:
+                ctx, ask_chord = await asyncio.wait_for(asyncio.wrap_future(future), 40)
+                if not highlight_owner.valid(token) or ctx is None: return
+                if ask_chord:
+                    log('highlight: ask chord, local only'); return
+                if not highlight_owner.commit(token, ctx): return
+                log('shared highlight context stored locally; delivery pending')
+                if ready is not None and not await asyncio.wait_for(asyncio.shield(ready), 8): return
+                if own[0] != session_owner: return
+                generation = gen[0]; session_client = client
+                accepted_bytes = False
+                def owns_session():
+                    return own[0] == session_owner and gen[0] == generation and client is session_client
+                def live():
+                    return highlight_owner.valid(token) and owns_session() and not ing.get('shutdown')
+                if not live() or tainted[0]: return
+                def hide_current():
+                    if highlight_owner.valid(token):
+                        highlight_owner.visible = False; hl['trail'].hide()
+                on_gtk(hide_current)
+                full, jpeg, size = await asyncio.to_thread(capture_clean, True, False, live)
+                if not live(): return
+                async def send(awaitable):
+                    task = asyncio.ensure_future(awaitable)
+                    def consume_finished(done):
+                        if not done.cancelled(): done.exception()
+                    task.add_done_callback(consume_finished)
+                    cancelled = asyncio.shield(asyncio.wrap_future(highlight_owner.cancellation(token)))
+                    try:
+                        session_cancelled = asyncio.shield(retired)
+                        done, _ = await asyncio.wait((task, cancelled, session_cancelled), return_when=asyncio.FIRST_COMPLETED)
+                        if cancelled in done or session_cancelled in done or not live():
+                            task.cancel(); await asyncio.wait((task,), timeout=.2)
+                            if owns_session(): tainted[0] = True
+                            return False
+                        try: task.result()
+                        except Exception:
+                            if owns_session(): tainted[0] = True
+                            raise
+                        return True
+                    finally:
+                        cancelled.cancel()
+                        if 'session_cancelled' in locals(): session_cancelled.cancel()
+                        if not task.done(): task.cancel()
+                if not await send(session_client.send_screenshot(jpeg)): return
+                accepted_bytes = True
+                if not await send(session_client.send_text(_hl.prompt(ctx, ack=True))): return
+                if not live(): return
+                results.append({'ask': '@highlight %d' % token, 'highlight': 'sent alongside voice (fresh screenshot + context prompt); acknowledgement requested, not independently correlated', 'rect': ctx['rect'], 'window': ctx.get('window')})
+                log('highlight context sent alongside voice; acknowledgement stays on voice event stream')
+            except Exception as exc:
+                if 'accepted_bytes' in locals() and accepted_bytes and owns_session(): tainted[0] = True
+                log('shared highlight context not delivered (%s)' % type(exc).__name__)
+                click_events.append({'gate': 'shared_highlight_not_delivered', 'err': type(exc).__name__})
+        def _enq(t, preserve_highlight=False):
             if shutdown['requested']: return
-            if not t.startswith('@') or t == '@voice':
+            if t == '@voice' and highlight_phase['token'] is not None and highlight_owner.valid(highlight_phase['token']):
                 highlight_owner.invalidate(retire_context=False)
                 clear_trail_owned()
-            if t != '@voice':
+            if not t.startswith('@') or t == '@voice' and not preserve_highlight:
+                highlight_owner.invalidate(retire_context=False)
+                clear_trail_owned()
+            if t not in ('@voice', '@voice-next') and not t.startswith('@highlight '):
                 radial_binding['epoch'] += 1; radial_binding['pending'] = False
                 if t != '@voice-next':
                     if hover['defer_mic']: _abort_voice('pending hover request replaced')
@@ -541,7 +669,12 @@ def main():
                     except queue.Full: pass
                 if hl['trail']: GLib.idle_add(hl['trail'].close)
                 if ptt_monitor: ptt_monitor.stop()
-                if radial_preview: radial_preview.monitor.closed.set(); GLib.idle_add(radial_preview.hide)
+                if shared_gestures:
+                    shared_gestures.monitor.closed.set()
+                    GLib.idle_add(shared_gestures.retire_all)
+                if radial_preview:
+                    if radial_preview.monitor: radial_preview.monitor.closed.set()
+                    GLib.idle_add(radial_preview.hide)
                 if ing.get('ready'): _stop_work('shutdown-ingress')
                 if hl.get('readonly_worker'): hl['readonly_worker'].cancel_current()
                 _off_edge()
@@ -553,6 +686,7 @@ def main():
                 arr['n'] += 1; serve_q.put_nowait((arr['n'], '@quit'))
                 click_events.append({'gate': 'shutdown_at_ingress'})
                 if stream_task: stream_task.cancel()
+                for task in tuple(shared_context_tasks): task.cancel()
                 run_task.cancel()  # owned active body: capture/connect/highlight/send waits unwind
                 return
             if hl.get("readonly_worker"): hl["readonly_worker"].cancel_current()
@@ -561,6 +695,9 @@ def main():
             if ing.get("ready") and not t.startswith("@") and prop["state"] == "approved" and bool(_norm_resp(t)) and _norm_resp(t) not in (_YES | _NO | _STOP):
                 _revoke_approved("new typed request at ingress")
             if t == "@voice":
+                pending_shared_context.update(token=None, owner=None)
+                retire_voice_context_writers()
+                voice_cancel['future'] = loop.create_future()
                 own[0] += 1
                 with vg["lock"]:
                     vg["ready"] = False  # the old session's gate closes AT THE EDGE; the old queue gets its sentinel (it FLUSHES to the closing session first), new chunks buffer (in order) for the new session
@@ -568,6 +705,18 @@ def main():
                     vg["pq"] = None
                 gen[0] += 1; vs["n"] += 1;  # the old generation is invalidated AT THE EDGE (before any close/await): its queued or late callbacks fail g==gen
             if t == "@voice":  ing["parts"] = []; cmd_ep[arr["n"] + 1] = vs["n"]; edge["n"] += 1; cmd_gen[arr["n"] + 1] = edge["n"]  # PTT-on edge: a NEW voice session epoch, bound to THIS command (its arrival number), not to whatever is newest at dequeue
+            if t.startswith("@highlight ") and shared_gestures and mic and (mic.active or hover["defer_mic"]):
+                try: token = int(t.split()[1])
+                except (ValueError, IndexError): return
+                context_owner = own[0]
+                task = asyncio.create_task(send_shared_highlight(token, context_owner, hover.get('ready'), voice_cancel['future']))
+                pending_shared_context.update(token=token, owner=context_owner)
+                shared_context_tasks.add(task)
+                def completed(finished):
+                    shared_context_tasks.discard(finished)
+                    if pending_shared_context['token'] == token and pending_shared_context['owner'] == context_owner: pending_shared_context.update(token=None, owner=None)
+                task.add_done_callback(completed)
+                return
             arr["n"] += 1; serve_q.put_nowait((arr["n"], t))  # every serve input gets an ARRIVAL number when it enters the queue (on the loop): approval binds to arrival AFTER the proposal display, never to dequeue order
         hl_post["fn"] = lambda t: loop.call_soon_threadsafe(_enq, t)  # the Confirm/Cancel buttons enter as @confirm/@cancel <rev>: the SAME revision-bound path as the serve control
         if a.serve:
@@ -615,12 +764,12 @@ def main():
                 # A failure of this native capture still aborts its current session.
                 _abort_voice(why)
             mic = _v.Mic(_chunk, on_error=lambda why, generation: loop.call_soon_threadsafe(_mic_error, why, generation))
-            def _ptt():  # Runs on the owned loop, atomically with shutdown ingress.
+            def _ptt(preserve_highlight=False):  # Runs on the owned loop, atomically with shutdown ingress.
                 if ing.get("shutdown"): return
                 if mic.active: mic.stop(); loop.call_soon_threadsafe(_off_edge); log("voice: off")
                 else:
                     with vg["lock"]: vg["ready"] = False; vg["buf"] = []
-                    _enq("@voice")  # establish owner before starting the native capture
+                    _enq("@voice", preserve_highlight=preserve_highlight)  # establish owner before starting the native capture
                     if hover["defer_mic"]:
                         hover["owner"] = own[0]; return
                     try: mic.start()
@@ -633,26 +782,34 @@ def main():
                     radial_binding['epoch'] += 1; radial_binding['pending'] = False
                     if hover['defer_mic']: _abort_voice('pending hover control')
                     hover.update(context=None, owner=None, defer_mic=False)
-                radial_post['invalidate'] = invalidate_hover
-                def _radial_select(option, point):
+                def invalidate_shared(generation=None):
+                    def apply():
+                        if not ing.get('shutdown') and (generation is None or shared_gestures and generation == shared_gestures.monitor.generation):
+                            invalidate_hover()
+                    loop.call_soon_threadsafe(apply)
+                radial_post['invalidate'] = invalidate_shared if shared_gestures else lambda generation=None: invalidate_hover()
+                def _radial_select(option, point, gesture_key=None):
+                    if shared_gestures and (not gesture_key or not shared_gestures.monitor.valid(gesture_key[0])): return
                     if ing.get('shutdown'): return
+                    def newer_highlight():
+                        return bool(shared_gestures and gesture_key and radial_gesture['highlight'] and radial_gesture['highlight'][0] == gesture_key[0] and radial_gesture['highlight'][1] > gesture_key[1])
                     was_pending = radial_binding['pending']
                     radial_binding['epoch'] += 1; epoch = radial_binding['epoch']; radial_binding['pending'] = False
                     def guarded_status(message):
-                        GLib.idle_add(lambda: (radial_status(message), False)[1] if not ing.get('shutdown') and radial_binding['epoch'] == epoch else False)
+                        GLib.idle_add(lambda: (radial_status(message), False)[1] if not ing.get('shutdown') and radial_binding['epoch'] == epoch and (not shared_gestures or gesture_key and shared_gestures.monitor.valid(gesture_key[0])) else False)
                     if option != 'speak' and (was_pending or hover['defer_mic']):
                         _abort_voice('pending Speak replaced by radial mode')
                     if option == 'speak':
                         # OFF never needs a target probe. ON refuses a different
                         # hovered/focused app rather than silently changing target.
                         if mic.active:
-                            if ing.get('ready'): _stop_work('radial-speak')
+                            if ing.get('ready'): _stop_work('radial-speak', preserve_highlight=newer_highlight())
                             hover.update(context=None, owner=None, defer_mic=False)
                             _ptt(); guarded_status('Gemini voice stopped. Ctrl+Alt hotkey disabled in radial-input mode.'); return
                         if was_pending or hover['defer_mic']:
-                            if ing.get('ready'): _stop_work('radial-speak')
+                            if ing.get('ready'): _stop_work('radial-speak', preserve_highlight=newer_highlight())
                             _abort_voice('pending radial Speak cancelled'); guarded_status('Pending Speak cancelled. No voice started.'); return
-                        if ing.get('ready'): _stop_work('radial-speak')
+                        if ing.get('ready'): _stop_work('radial-speak', preserve_highlight=newer_highlight())
                         if os.environ.get('TIPTOUR_USE_ATSPI', '1') != '1':
                             hover.update(context=None, owner=None, defer_mic=False)
                             guarded_status('Speak context unavailable: AT-SPI lookup is disabled. No voice started.'); return
@@ -662,22 +819,28 @@ def main():
                         if radial_binding['worker'] and radial_binding['worker'].is_alive():
                             guarded_status('Speak unavailable: target check still running.'); return
                         from . import radial_target
-                        def current(): return not ing.get('shutdown') and radial_binding['epoch'] == epoch
+                        native_future = loop.create_future()
+                        hover.update(context=None, owner=None, defer_mic=True, epoch=epoch, future=native_future, ready=loop.create_future())
+                        radial_binding['pending'] = True
+                        _ptt(preserve_highlight=newer_highlight())
+                        reserved_owner = hover['owner']
+                        def current(): return not ing.get('shutdown') and hover['owner'] == reserved_owner and own[0] == reserved_owner and radial_binding['epoch'] == epoch and (not shared_gestures or gesture_key and shared_gestures.monitor.valid(gesture_key[0]))
                         def status(message):
-                            GLib.idle_add(lambda: (radial_status(message), False)[1] if current() else False)
+                            guarded_status(message)
                         def accept(target, deadline):
                             if not current(): return
                             if not target or time.monotonic() >= deadline:
                                 radial_binding['pending'] = False
+                                _abort_voice('radial target unavailable', reserved_owner)
                                 status('Speak refused: target unavailable or check expired. Focus the app under the cursor and try again. No voice started.'); return
                             def context_accept(ctx, expires):
                                 if not current(): return
                                 radial_binding['pending'] = False
                                 if not ctx or time.monotonic() >= expires:
-                                    hover.update(context=None, owner=None, defer_mic=False)
+                                    _abort_voice('radial context unavailable', reserved_owner)
                                     status('Speak refused: native context unavailable or expired. No voice started.'); return
-                                hover.update(context=ctx, owner=None, defer_mic=True, epoch=epoch)
-                                _ptt(); ctx['owner'] = hover['owner']
+                                ctx['owner'] = reserved_owner
+                                if not native_future.done(): native_future.set_result(ctx)
                                 status('Gemini context captured. Connecting before microphone starts. Radial Speak cancels pending start.')
                             radial_binding['pending'] = True
                             radial_binding['context_worker'] = hover_context.request(point, target, epoch, current,
@@ -687,10 +850,10 @@ def main():
                     elif option == 'type':
                         guarded_status('Type unavailable: pinned Mac text mode requires JEV. No provider was changed.')
                     elif option == 'highlight':
-                        guarded_status('Highlight unavailable in this configuration: its monitor is disabled. Restart without radial input and enable --highlight to use it.')
+                        guarded_status('Radial Highlight target capture is not connected. Ctrl+Shift painting is enabled in this combined mode.' if shared_gestures else 'Highlight unavailable in this configuration: its monitor is disabled. Restart without radial input and enable --highlight to use it.')
                     click_events.append({'gate': 'radial_dispatch', 'option': option})
-                radial_post['fn'] = lambda option, point: loop.call_soon_threadsafe(_radial_select, option, point)
-                log('radial input: Ctrl+Alt voice hotkey disabled; Speak toggles existing Gemini voice; Type unsupported without JEV; highlight monitor disabled')
+                radial_post['fn'] = lambda option, point, key=None: loop.call_soon_threadsafe(_radial_select, option, point, key)
+                log('radial input: Ctrl+Alt voice hotkey disabled; Speak toggles existing Gemini voice; Type unsupported without JEV; ' + ('shared Ctrl+Shift highlight enabled; radial Highlight target capture not connected' if shared_gestures else 'highlight monitor disabled'))
         async def _asks():
             if not a.serve:
                 for t in a.ask: yield t
@@ -1286,9 +1449,12 @@ def main():
             plan_tok["n"] += 1; hl["replay"]("approved_plan", plan_tok["n"]); return True  # token-bound: a cancel/stop/new plan before the replay actually starts revokes it
         def _shown(rv):  # runs on the loop when the panel has ACTUALLY been drawn: only input arriving after this point can answer the proposal
             if prop["rev"] == rv and prop["state"] == "pending": prop["shown"] = arr["n"]; prop["displayed"] = True; click_events.append({"gate": "proposal_displayed", "rev": rv, "arrival_epoch": arr["n"]}); log("confirmation: proposal rev %d displayed (arrival epoch %d)" % (rv, arr["n"]))
-        def _stop_work(src):
-            highlight_owner.invalidate()
-            clear_trail_owned()
+        def _stop_work(src, preserve_highlight=False):
+            if shared_gestures and src not in ('radial-speak', 'shutdown-ingress'):
+                shared_gestures.stop()
+            if not preserve_highlight:
+                highlight_owner.invalidate(retire_context=src != 'radial-speak')
+                clear_trail_owned()
             if src != 'radial-speak':
                 radial_binding['epoch'] += 1; radial_binding['pending'] = False
                 if hover['defer_mic']: _abort_voice('pending hover stopped')
@@ -1316,6 +1482,7 @@ def main():
           # prior conversation text (role, text), rehydrated into a fresh per-PTT provider connection so model context is not lost  # events a voice turn dequeued but did not consume (e.g. transcript chunks after the turnComplete that ended it) belong to the NEXT utterance of the same voice session: kept here so they are never discarded between turns
         try:
             async for text in _asks():
+                highlight_phase['token'] = None
                 i += 1; pause_rs['r'] = None; PREV_STEP_POINT['p'] = None; stream_state['suppressed'] = False  # Mac: user speech / PTT clears the post-tool-call suppression
                 _arrv0 = gate.get("arrival", 0); voice_turn = text in ("@voice", "@voice-next"); in_tr = []; seg_pos = [None]; _h0 = len(hist)
                 if text == "@voice": pend_store.clear(); cur_vs[0] = cmd_ep.pop(_arrv0, vs["n"])
@@ -1372,12 +1539,13 @@ def main():
                             click_events.append({"gate": "voice_command_superseded", "at": "seed"}); log("voice: a newer PTT edge superseded this connection during restore; closing it")
                             await _close_bounded(client); tainted[0] = True; continue
                         if hover['defer_mic']:
-                            if hover['owner'] != own[0] or hover.get('epoch') != radial_binding['epoch'] or not hover_context.alive(hover['context'], own[0]):
+                            if shared_gestures and radial_gesture['retired'] or hover['owner'] != own[0] or hover.get('epoch') != radial_binding['epoch'] or not hover_context.alive(hover['context'], own[0]):
                                 await _close_bounded(client); _abort_voice('hover context no longer owned', _o); continue
                             try: mic.start()
                             except OSError:
                                 await _close_bounded(client); _abort_voice('microphone could not start', _o); continue
                             hover['defer_mic'] = False
+                        if hover.get('ready') and not hover['ready'].done(): hover['ready'].set_result(True)
                         _n = _install_writer(client)  # no await between the last ownership check and the install
                         _ms = int((time.time() - _tc0) * 1000); log("voice: fresh provider connection ready in %d ms (%d buffered audio chunks queued in order)" % (_ms, _n)); click_events.append({"gate": "voice_fresh_conn", "ms": _ms, "buffered": _n})
                     text = ""
@@ -1411,10 +1579,16 @@ def main():
                 with highlight_owner.lock:
                     committed, context_epoch = highlight_owner.context, highlight_owner.epoch
                 if a.serve and not voice_turn and not text.startswith("@") and committed:
-                    await client.send_text(_hl.prompt(committed, ack=False))
+                    resend_client, resend_generation = client, gen[0]
+                    try: await resend_client.send_text(_hl.prompt(committed, ack=False))
+                    except Exception as exc:
+                        if client is resend_client and gen[0] == resend_generation: tainted[0] = True
+                        log('highlight context resend failed (%s); request not sent' % type(exc).__name__)
+                        results.append({'ask': text, 'error': 'highlight context resend failed; request not sent'})
+                        continue
                     with highlight_owner.lock:
-                        if highlight_owner.epoch != context_epoch or highlight_owner.context is not committed:
-                            tainted[0] = True
+                        if highlight_owner.epoch != context_epoch or highlight_owner.context is not committed or client is not resend_client or gen[0] != resend_generation:
+                            if client is resend_client and gen[0] == resend_generation: tainted[0] = True
                             log('highlight context retired during typed resend; request not sent')
                             continue
                     log("serve: re-sent latest highlight context before utterance")
@@ -1422,6 +1596,7 @@ def main():
                     try: token = int(text.split()[1])
                     except (ValueError, IndexError):
                         results.append({'ask': text, 'highlight': 'no owned gesture token; nothing sent'}); continue
+                    highlight_phase['token'] = token
                     future = highlight_owner.take(token)
                     if not future or not highlight_owner.valid(token): continue
                     try: ctx, ask_chord = await asyncio.wait_for(asyncio.wrap_future(future), 40)
@@ -1433,9 +1608,13 @@ def main():
                     def hide_current():
                         if highlight_owner.valid(token):
                             highlight_owner.visible = False; hl['trail'].hide()
-                    on_gtk(hide_current); full, jpeg, size = await asyncio.to_thread(capture_clean, True)  # off the event loop (Skip/Retry/new-ask handling stays responsive during the ~0.3s+ grab); FRESH screenshot, pinned as this request's frame identity
+                    on_gtk(hide_current)
+                    try: full, jpeg, size = await asyncio.to_thread(capture_clean, True, False, lambda: highlight_owner.valid(token))
+                    except RuntimeError as exc:
+                        if str(exc) != 'stale capture discarded': raise
+                        log('stale highlight capture discarded; newer gesture retained'); continue  # off the event loop (Skip/Retry/new-ask handling stays responsive during the ~0.3s+ grab); FRESH screenshot, pinned as this request's frame identity
                     full.save(os.path.join(a.out, "highlight-screen-%d.png" % i))
-                    if not highlight_owner.valid(token) or _own_cap.get("token") != plan_tok["n"]:log("stale highlight capture discarded before provider delivery");continue
+                    if not highlight_owner.valid(token):log("stale highlight capture discarded before provider delivery");continue
                     async def owned(awaitable):
                         if not highlight_owner.valid(token):
                             if hasattr(awaitable, 'close'): awaitable.close()
@@ -1483,6 +1662,7 @@ def main():
                         elif k in ("turnComplete", "closed"): break
                     if not highlight_owner.valid(token): continue
                     if not highlight_owner.commit(token, ctx): continue
+                    highlight_phase['token'] = None
                     results.append({"ask": text, "highlight": "sent (fresh screenshot + context prompt)", "rect": ctx["rect"], "window": ctx.get("window"), "reply": "".join(out_tr).strip()}); log("highlight result recorded"); dlog("highlight result", json.dumps(results[-1])[:400]); out_tr.clear()
                     continue
                 try:
@@ -1656,7 +1836,11 @@ def main():
         if hl['commit_worker']:
             await asyncio.to_thread(hl['commit_worker'].join, .5)
             voice_cleanup['highlight_worker'] = not hl['commit_worker'].is_alive()
-        if radial_preview: voice_cleanup['radial_monitor'] = await asyncio.to_thread(radial_preview.monitor.close)
+        if shared_gestures:
+            # UI cancellation was posted at shutdown ingress; join only the one
+            # native worker here. No GTK cleanup from this asyncio worker thread.
+            voice_cleanup['shared_monitor'] = await asyncio.to_thread(shared_gestures.monitor.close)
+        elif radial_preview: voice_cleanup['radial_monitor'] = await asyncio.to_thread(radial_preview.monitor.close)
         if ptt_monitor: voice_cleanup['monitor'] = await asyncio.to_thread(ptt_monitor.close)
         if mic:
             if hasattr(mic, 'close'): voice_cleanup['mic'] = await asyncio.to_thread(mic.close)

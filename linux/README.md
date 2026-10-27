@@ -48,10 +48,40 @@ The Ask preview has an "Insert into" chooser: the window focused at press (defau
 `--radial-preview` opts into a Ctrl+Alt+Super hold-and-move visual preview. It cannot be combined with `--voice` or `--highlight`: partial modifier presses/releases could activate those monitors. Close separate Ask or other shortcut apps before trying it; this process cannot prevent their shortcuts. The UI says "Preview only: no dispatch". Speak/Type/Highlight release does not start any mode. This is a tested intermediate port slice, not the completed radial feature. Near-edge placement refuses instead of shifting the gesture center. X11 polling can miss short gestures or hang in native calls. Pinned Mac dispatch and mode semantics still require work; no JEV-to-Gemini substitution is implied.
 
 ## Radial Speak input (bounded, opt-in)
-`--radial-input --voice` replaces the separate Ctrl+Alt voice hotkey with radial Speak toggling existing Gemini voice. Both ON/OFF stop workflow work; an in-progress start can be toggled OFF. It cannot combine with --highlight or --radial-preview. Type refuses without JEV. Highlight is unavailable in this configuration. Before ON, the hovered identified app must already be focused; missing/own/unknown surfaces or expired checks refuse. This is not Mac hover/selection target override parity. Separate shortcut apps can still react to partial modifier chords. See R55 PARITY for tests and limits.
+`--radial-input --voice` replaces the separate Ctrl+Alt voice hotkey with radial Speak toggling existing Gemini voice. Both ON/OFF stop workflow work; an in-progress start can be toggled OFF. It cannot combine with `--radial-preview`. Adding `--highlight` enables the shared Ctrl+Shift painted-highlight monitor. Type still refuses without JEV. The radial Highlight wedge does not yet capture its hover target; in combined mode it points users to Ctrl+Shift painting. Before ON, the hovered identified app must already be focused; missing/own/unknown surfaces or expired checks refuse. This is not Mac hover/selection target override parity. Separate shortcut apps can still react to partial modifier chords. See R55 PARITY for tests and limits.
 
 
 ## Bounded radial native-selection context
 Radial Speak ON now captures the already-focused hovered native field before starting the microphone. This needs enabled AT-SPI lookup, two matching native reads and a matching hovered/focused window after the reads, within a two-second total context deadline after the initial 0.4-second target check. Missing, disabled, secret or expired context refuses without starting voice. A pending Speak can be cancelled by Speak again; Type/Highlight do not leave that pending microphone start running.
 
 The same Gemini connection receives a capped selected-text prompt before audio starts. Explicit currentSelection/currentHighlight plans can bind the owned native selection; painted context has precedence. The displayed proposal still needs Yes. The saved range is consumed once; later edits use the current caret. Changed field/text/window/PID refuses the saved-range write, and the range path will not activate a different window. This is a tested partial hover-context port, not a general AX target override, browser selection fallback, physical-STT result or full Mac parity. Tainted provider replacement refuses stale context rather than silently reconnecting without it. Hover state expires in under 300 seconds and clears on replacement/Stop/OFF/Quit. Source and exact controlled-test limits are in PARITY.md.
+
+
+### R59 shared radial and painted-highlight checkpoint
+
+`--text-ui --voice --radial-input --highlight --serve /tmp/tiptour.fifo`
+opts into one shared X11 gesture sampler. Genuine transitions between radial
+Ctrl+Alt+Super and painted Ctrl+Shift can end one gesture and begin the next
+without releasing every modifier. Only explicit Stop requires full modifier
+release before another gesture. Quit and sampler failure cancel, never commit.
+
+Speak admits its toggle and workflow cleanup before a later painted gesture.
+A native target/context check belongs to that reserved voice attempt; finishing
+it does not create a second voice edge. A normal painted release builds and
+stores owned local context. During voice startup it waits for the fresh session;
+while voice is active it sends the fresh screenshot/context alongside that
+session without taking over its transcript/tool event consumer. Spoken
+acknowledgement is requested, but global turnComplete is not proof of a separate
+highlight acknowledgement. Alt-at-release remains local-only Ask behavior.
+New paint retires older paint/context, not the reserved Speak startup. Stop
+retires both. Existing committed context can seed the next Speak session.
+
+Runtime evidence uses virtual X11 input, native GTK/AT-SPI fixtures, and scripted
+provider/native-delay seams. It does not establish real Gemini combined-mode
+behavior, physical microphone/STT, Wayland support, or complete Mac parity.
+Radial Highlight target capture, JEV Type mode, and the full port remain unfinished.
+X11 polling can miss fast gestures and can infer a chord already held at startup.
+Native X calls or capture locks can hang: logical retirement prevents late work
+from publishing, but is not a universal bounded worker-join guarantee. Shared
+consumer callbacks use a short nonblocking lock contract, not a universal close
+budget. Separate shortcut applications may still react to partial chords.

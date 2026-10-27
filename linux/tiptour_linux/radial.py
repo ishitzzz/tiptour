@@ -59,7 +59,7 @@ class Monitor:
 
 class RadialPreview(Gtk.Window):
     W, H = 270, 220  # Mac content220x190 plus capsule/shadow overflow padding
-    def __init__(self, status, select=None):
+    def __init__(self, status, select=None, external_monitor=False):
         super().__init__(type=Gtk.WindowType.POPUP)
         self.set_wmclass('tiptour-radial', 'TipTourRadial')
         self.set_name('tiptour-radial'); self.set_title('TipTour radial preview')
@@ -72,12 +72,16 @@ class RadialPreview(Gtk.Window):
         self.state = State(); self.status = status; self.select = select; self.closed = False; self.events = []
         self.connect('realize', lambda *_: self.shape())
         self.connect('draw', lambda _, c: (self.paint(c), False)[1])
-        self.monitor = Monitor(self.post); self.monitor.start()
+        self.monitor = None
+        if not external_monitor:
+            self.monitor = Monitor(self.post); self.monitor.start()
     def post(self, kind, point):
         if not self.closed: GLib.idle_add(self.transition, kind, point)
     def transition(self, kind, point):
-        if self.closed or self.monitor.closed.is_set(): return False
+        if self.closed or (self.monitor and self.monitor.closed.is_set()): return False
         self.events.append((kind, point))
+        if kind == 'cancel':
+            self.state.cancel(); self.hide(); return False
         if kind == 'error':
             self.state.cancel(); self.hide(); self.status('Radial preview unavailable: X11 monitor failed. No mode was selected.'); return False
         if kind == 'begin':
@@ -125,4 +129,4 @@ class RadialPreview(Gtk.Window):
             text=label.title();ext=c.text_extents(text);c.move_to(cx+dx-ext.x_advance/2,cy+dy+4);c.show_text(text)
     def close(self):
         self.closed = True; self.state.cancel(); self.hide()
-        return self.monitor.close()
+        return self.monitor.close() if self.monitor else True
