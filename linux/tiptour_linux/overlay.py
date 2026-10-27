@@ -231,7 +231,9 @@ class PointerOverlay(Gtk.Window):
                 if (now - f["t0"]) >= SETTLE_S + 0.02 and not f["fired"]: f["fired"] = True; self.cur = f["end"]; self.flight = None; f["done"]()
         if self.paws:
             self.paws.tick(now,self.get_visible())
-            if self.get_visible() and self.get_window():self.get_window().raise_()
+        # Override-redirect menus bypass the WM's keep-above policy. Raise our
+        # input-transparent art in either cursor mode, without taking focus.
+        if self.get_visible() and self.get_window():self.get_window().raise_()
         if self.neko and self.neko.tick(self.cur,now):
             self.queue_draw()
             if not self.composited and self.get_window():self.apply_shape()
