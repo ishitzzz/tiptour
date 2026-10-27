@@ -1,3 +1,21 @@
+# R78 bounded app-skill numeric input checkpoint
+
+Only actions.py changes from the published R75 runtime. The pinned Mac ActionExecutor.typeText skill-directed numeric input policy is now connected to the existing approved Linux type path. It trims numeric text accepted by the active app skill and sends one character command at a time. It does not add a provider, model, plan permission, arbitrary text fallback or setValue key path.
+
+Runtime source archive SHA256 `6dfdfefd158b7c0b545ba1e636d769f3cc33c0fa3a1034a8fd4f1cd18756386d`; 208-file test manifest `beeac9d51b48da16394a8f762a5d66ad4ff4f7c1212b624a47cfa15039636e07`. Runtime commit precedes this documentation-only update. Existing native focus identity, field/widget geometry, pointer arrival, window/PID, modal, exact-step approval and Stop checks are retained. A missing verified focused object/geometry still refuses; there is no guessed canvas or window-center fallback.
+
+Controlled provider tests use an explicitly owned GTK drawing-area fixture advertising the Blender app identity solely to select the bundled skill. This is NOT Blender, which is not installed here. Actual X11 character delivery and fixture readback match trimmed 2.5 and the numeric symbol expression. setValue and nonnumeric text stay on existing native text paths and refuse the noneditable fixture. Secret-field refusal is tested. Stop and owner change after the first character leave a partial result, not a whole-goal success. Simulated saved-range and pre-cancel negatives are separate from actual runtime evidence.
+
+A character dispatch can apply before its subprocess reports timeout or nonzero. Post-effect subprocess-fault tests verify one actual first character while the result reports attempted=1, confirmed=0, possibly_applied=true, retry_safe=false and text_verified=false. Counts are character dispatch commands, not raw keyboard events: symbols may include modifier events. The pinned 35ms inter-character sleep is retained, but native checks add overhead; no 35ms throughput or exact timing guarantee is claimed. Partial output cannot be undone, and retries must not assume nothing happened.
+
+Saved native-range numeric key input conservatively refuses rather than bypassing the range binding, an explicit parity exception. Other untested policy lengths/boundaries, unknown character mappings, missing-geometry runtime cases, actual Blender integration and physical input remain open. A controlled fixture is not proof of Blender behavior.
+
+Fresh actual configured Gemini Chrome workflow has FOUR steps after one proposal/Yes: type the query in the already focused field, Enter, Ctrl+F, type average. Exact article URL and native Find text/caret were checked. No initial-click or prior five-step credit is inherited. Fresh 27 selected offline scripts exit zero from the same frozen directory, but their unit-log group has no dedicated root snapshot; runtime runs carry original tested-tree captures. This is not a full regression suite or UI-green claim. Final fixture and Chrome pixels were inspected independently.
+
+No full port, release, physical voice/audio, Wayland, mixed-DPI, complete UI, JEV transport or HTTP action-facade parity is established. Prior limitations below remain unless explicitly superseded.
+
+## Prior bounded checkpoints
+
 # R74 bounded workflow and cursor checkpoint (not full-port acceptance)
 
 This checkpoint retains the pinned Mac engine and the requested propose-then-Yes multistep execution. Changes since R59 include request/revision authority, native app/browser action grounding, browser navigation and Find recipient checks, confirmation-owner retirement, and visible cursor arrival before click/type/setValue. Annotation work remains excluded. Existing provider/model configuration is unchanged.
