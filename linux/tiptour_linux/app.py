@@ -1308,10 +1308,10 @@ def main():
                     except Exception as e: log("cdp resolver error", type(e).__name__)
                 if not refuse and plan_tok["n"] != _gen0: refuse = "superseded by a skip, cancel or newer request while resolving"
                 if refuse: done = True
-                if not done and not refuse and detector:
+                if not done and not refuse:
                     _tr = _local_resolve_owned(lab, own)  # Mac tier 3 (after AX and CDP): label-only cache resolve, anchor = previous step point or cursor, NOT the model point
                     if _tr: px = (_half_up(_tr["global_point"][0]), _half_up(_tr["global_point"][1])); src = "target_cache:" + _tr["source"]; arm_rect = tuple(_tr["global_rect"])
-                    ref = None if (_tr or nohint) else perception.refine_coordinate(model_px, lab, _yolo, _ocr)  # nohint: refine would anchor on the placeholder; Mac: no hint + miss -> unresolved  # Linux-only fallback (not Mac semantics)
+                    ref = None if (_tr or nohint or not detector) else perception.refine_coordinate(model_px, lab, _yolo, _ocr)  # nohint: refine would anchor on the placeholder; Mac: no hint + miss -> unresolved  # Linux-only fallback (not Mac semantics)
                     if ref: px = (round(ref["center"][0]), round(ref["center"][1])); src = "yolo_ocr:" + ref["rule"]
                 if nohint and not refuse and src == "model_box" and defer_missing:
                     return {"ok": False, "status": "unresolved_no_hint"}, {"source": "UNRESOLVED", "label": lab}
@@ -1505,7 +1505,10 @@ def main():
                 if publish: _perc_seq["started"] += 1
                 _my_p = _perc_seq["started"] if publish else 0  # newest-STARTED perception owns TARGET_CACHE (older/cancelled worker-thread results must not overwrite it)
             yolo = detector.detect(full) if detector else []
-            ocr_el = perception.ocr(full.resize((full.width*2, full.height*2))) if detector else []
+            # Pinned native detector runs OCR independently of YOLO availability.
+            try: ocr_el = perception.ocr(full.resize((full.width*2, full.height*2)))
+            except (OSError, subprocess.SubprocessError):
+                log("local OCR unavailable; native/DOM grounding remains available"); ocr_el = []
             for e in ocr_el: e['bbox']=[v/2 for v in e['bbox']]; e['center']=[v/2 for v in e['center']]
             log('perception: %d yolo boxes, %d ocr lines' % (len(yolo), len(ocr_el)))
             _els = [{'bbox': [b['bbox'][0], b['bbox'][1], b['bbox'][0] + b['bbox'][2], b['bbox'][1] + b['bbox'][3]], 'label': b.get('label') or '', 'source': 'yolo', 'conf': b.get('conf', 0)} for b in yolo] + [{'bbox': [e['bbox'][0], e['bbox'][1], e['bbox'][0] + e['bbox'][2], e['bbox'][1] + e['bbox'][3]], 'label': e.get('label') or '', 'source': 'ocr', 'conf': e.get('conf', 0)} for e in ocr_el]; _sz = tuple(full.size); _dfr = (0, 0, _sz[0], _sz[1])  # from THIS pass's own image, not the shared nonlocal size
