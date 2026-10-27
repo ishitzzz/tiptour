@@ -66,6 +66,7 @@ class PointerOverlay(Gtk.Window):
         self.connect("destroy",lambda *_:self.paws.window.destroy() if self.paws else None)
         m = self._mouse(); self.cur = (m[0] + FOLLOW_OFFSET[0], m[1] + FOLLOW_OFFSET[1]); self.tip = self.cur; self.vel = (0.0, 0.0)
         self.mode = "follow"; self.rot = 0.0; self.scale = 1.0; self.flight = None; self.returning = False; self.nav_mouse = m; self.target = None; self.land_rot = 0.0; self.events = []
+        self._last_tick = time.monotonic()
         GLib.timeout_add(TICK_MS, self._tick)
     def set_neko_enabled(self, enabled):
         """GTK thread, called only while the app's capture ownership lock is held.
@@ -193,14 +194,15 @@ class PointerOverlay(Gtk.Window):
         self.flight = None; self.mode = "follow"; self.returning = False; self.rot = 0.0; self.scale = 1.0; self.show_label = False; self.retired = False; self.vel = (0.0, 0.0); self.queue_draw(); self._log("follow")
     # ---- frame tick ----
     def _tick(self):
-        now = time.monotonic(); m = self._mouse(); dt = TICK_MS / 1000.0
+        now = time.monotonic(); m = self._mouse(); dt = max(0.0, now - self._last_tick); self._last_tick = now
         if self.mode == "nav" and self.returning and math.hypot(m[0] - self.nav_mouse[0], m[1] - self.nav_mouse[1]) > RETURN_CANCEL_PX:
             self._log("return_cancelled_by_mouse"); self.show_label = False; self._finish_follow()
         if self.mode == "follow":
-            k = (2 * math.pi / SPRING_RESPONSE) ** 2; cc = 2 * SPRING_DAMPING * math.sqrt(k)   # SwiftUI spring(response, dampingFraction) as a mass-1 spring
-            tx, ty = m[0] + FOLLOW_OFFSET[0], m[1] + FOLLOW_OFFSET[1]; vx, vy = self.vel
-            vx += (k * (tx - self.cur[0]) - cc * vx) * dt; vy += (k * (ty - self.cur[1]) - cc * vy) * dt
-            self.cur = (self.cur[0] + vx * dt, self.cur[1] + vy * dt); self.vel = (vx, vy); self.tip = self.cur
+            from .spring import step as spring_step
+            tx, ty = m[0] + FOLLOW_OFFSET[0], m[1] + FOLLOW_OFFSET[1]
+            x, vx = spring_step(self.cur[0], self.vel[0], tx, dt, SPRING_RESPONSE, SPRING_DAMPING)
+            y, vy = spring_step(self.cur[1], self.vel[1], ty, dt, SPRING_RESPONSE, SPRING_DAMPING)
+            self.cur = (x, y); self.vel = (vx, vy); self.tip = self.cur
         elif self.flight:
             f = self.flight; p = min(1.0, (now - f["t0"]) / f["dur"])
             if f["kind"] == "dock":
