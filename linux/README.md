@@ -1,6 +1,12 @@
 # TipTour Linux port (experimental, X11 only, NOT a full port)
 Branch feature/linux-port, base upstream 6e97782. Python/GTK3. See PARITY.md for exactly what is verified and what is not. The R78 checkpoint adds bounded app-skill numeric character dispatch tested with an owned GTK fixture, not real Blender. A fresh four-step real-Gemini browser workflow also passes; this is not full-port acceptance. Pointing aims at the native field/widget, not necessarily its insertion caret. Selected UI tests still have two retained prior fixture failures.
 
+## Accurate Grounding
+
+The saved Accurate Grounding setting defaults to off, as on the pinned Mac version. It enables proactive local screenshot/OCR/YOLO cache refresh on startup, active-window/display-size changes, voice start and successful actions. In-app changes apply this session unless startup `TIPTOUR_ACCURATE_GROUNDING` explicitly overrides the saved value. Standalone settings apply to new launches.
+
+Off cancels proactive work and clears the shared local cache. It does not disable request-time local grounding or change Remote Screenshots permissions. After the event loop processes a setting/cancellation change, cancelled or older setting-epoch refresh results cannot publish later, even when their worker thread continues. GTK checkbox changes are posted to that loop, not synchronously revoked across threads. It does not physically stop a hung OCR process. See R88 in PARITY.md for source mapping, exact-byte tests and single-display X11 limits. Detection overlays, JEV and full-platform parity are not added.
+
 ## Native selection within an approved workflow
 
 A TYPE `currentSelection` step can now replace a nonempty native editable selection made during the same reviewed plan, such as Select All after typing a first draft. The field/window identity, text, range and geometry must still match before typing; Stop and changed-field/range checks remain active. Saved initial highlight ranges stay separate and once-consumed. This does not enable browser fallback or `setValue currentSelection`. See R86 in PARITY.md for the actual six-step Gemini result, controlled refusal checks and native race limits. The full port is unfinished.
