@@ -1019,7 +1019,7 @@ def main():
                 _ev({"action": "not_approved", "performed": False}); log("action step %s NOT performed: the current exact step is not approved" % t)
                 return {"ok": False, "status": "action_not_approved", "note": "This exact current step has no valid app-owned approval, so nothing was done."}, tool_seen
             tc = step.get("targetContext")
-            if (tc in ("currentSelection", "currentHighlight") and not step.get("_native_range")) or (tc == "focusedElement" and t not in ("type", "setValue")):
+            if (tc == "currentHighlight" and not step.get("_native_range")) or (tc == "currentSelection" and not step.get("_native_range") and t != "type") or (tc == "focusedElement" and t not in ("type", "setValue")):
                 _ev({"action": "refused_target_context", "performed": False}); log("action step %s NOT performed: targetContext %s is not implemented for this step type on Linux (no native selection binding); nothing sent" % (t, tc))
                 return {"ok": False, "status": "action_target_context_unsupported", "note": "targetContext %s is not supported for this action on Linux; nothing was done." % tc}, tool_seen
             if t not in ("openApp", "openURL") and execution_app and atspi_resolver:  # Mac modal gate: a blocking dialog in the plan's app pauses the plan instead of sending keys into it
@@ -1087,13 +1087,20 @@ def main():
                 _rect = _field.get('element_rect') if _field.get('ok') else None
                 if not _rect or _field.get('password'):
                     return {'ok':False,'status':'pointer_recipient_unavailable','error':'Verified field geometry unavailable; no text sent.'}, tool_seen
+                if tc == 'currentSelection' and not _exec_step.get('_native_range'):
+                    _selection=_field.get('selection');_text=_field.get('text')
+                    if (not isinstance(_text,str) or len(_text)>=20000 or not isinstance(_selection,list) or len(_selection)!=2 or
+                            not all(isinstance(n,int) for n in _selection) or not 0<=_selection[0]<_selection[1]<=len(_text) or not _field.get('editable')):
+                        return {'ok':False,'status':'current_selection_unavailable','error':'Verified nonempty native selection unavailable; no text sent.'},tool_seen
+                    _exec_step['_live_selection']={k:_field.get(k) for k in ('identity','text','selection','caret','element_rect','document_rect')}
                 _exec_step['_expected_focus'] = _field['identity']
                 _point = (_rect[0]+_rect[2]/2, _rect[1]+_rect[3]/2)
                 if not await _pointer_arrival(_point, step.get('label') or 'Text field', tok0):
                     return {'ok':False,'status':'pointer_arrival_revoked'}, tool_seen
                 _fresh = await asyncio.to_thread(_act.focus_info, execution_app, False)
                 if (tok0 != plan_tok['n'] or not _approved_step(args,idx,step) or ident()!=_action_ident or
-                        not _fresh.get('ok') or _fresh.get('identity')!=_field['identity'] or _fresh.get('element_rect')!=_rect):
+                        not _fresh.get('ok') or _fresh.get('identity')!=_field['identity'] or _fresh.get('element_rect')!=_rect or
+                        (_exec_step.get('_live_selection') and any(_fresh.get(k)!=v for k,v in _exec_step['_live_selection'].items()))):
                     return {'ok':False,'status':'pointer_recipient_changed','error':'Field changed while pointer moved; no text sent.'}, tool_seen
             try: resp = await asyncio.to_thread(_act.execute, _exec_step, None, execution_app, None, _cev, None, _expected)
             except BaseException: _cev.set(); log("action step %s cancelled (stop/supersede): worker told to stop before its next OS call" % t); raise  # STOP/supersede cancels the await; the worker checks this event before EVERY OS side effect
@@ -1702,7 +1709,7 @@ def main():
                 _l.append("  %d. [%s] %s%s" % (_n, _t, _w, (" - " + "; ".join(_x)) if _x else ""))
             if a.act and any(st.get("type") in ("pressKey", "keyboardShortcut", "scroll") for st in _st): _l.append("Keys go to the verified focused window; X11 has a small non-atomic check/input gap. Cmd means Ctrl.")
             if a.act and any(st.get("targetContext") in ("currentHighlight", "currentSelection") for st in _st):
-                _l.append("The saved native range is used ONCE. Later edits use the current selection/caret. A stale first range refuses." if all(st.get("_native_range") for st in _st if st.get("targetContext") in ("currentHighlight", "currentSelection")) else "Native highlighted range is unavailable; the action will be refused.")
+                _l.append("The saved native range is used ONCE. Later edits use the current selection/caret. A stale first range refuses." if all(st.get("_native_range") for st in _st if st.get("targetContext") in ("currentHighlight", "currentSelection")) else ("A currentSelection type step uses the verified native selection at that step. It refuses if missing or changed before typing." if all(st.get("targetContext")!="currentHighlight" and (st.get("targetContext")!="currentSelection" or st.get("type")=="type") for st in _st) else "Native highlighted range is unavailable; the action will be refused."))
             _l.append("Say yes / Confirm to run, no / Cancel to decline. Say stop to stop.")
             return "\n".join(_l)
         def _prop_clear(why):

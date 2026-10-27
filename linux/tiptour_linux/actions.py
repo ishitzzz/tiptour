@@ -208,7 +208,7 @@ def _skill_numeric_text(step, app_hint):
     skill = shared_registry().skill(app_hint)
     text = step.get('value') if step.get('value') is not None else step.get('label', '')
     if not skill or not skill.should_type_physical_keys(text): return None
-    if step.get('_native_range'):
+    if step.get('_native_range') or step.get('_live_selection'):
         raise _XFail('skill numeric key input cannot apply a saved native range; nothing sent')
     # The bundled numeric policy has an ASCII key mapping. Unknown policy
     # characters refuse; no Unicode clipboard/whole-value fallback is inferred.
@@ -243,6 +243,9 @@ def _native_text(step, app_hint):
         if str(ws[0]) != str(saved.get('xwindow')) or ws[1] != (saved.get('identity') or {}).get('pid'):
             raise _XFail('saved selection recipient no longer focused; nothing written')
     d = _focus(app_hint); f = _check_bound(app_hint, False)
+    live=step.get('_live_selection')
+    if live and (step.get('type')!='type' or not f.get('editable') or any(f.get(k)!=v for k,v in live.items())):
+        raise _XFail('current selected field/text/range changed; nothing written')
     if step.get('_browser_find'):
         # App-owned binding exists only for the immediate approved Find-text suffix.
         if (f.get('identity') != step['_browser_find'] or step.get('type') != 'type' or f.get('role') != 'entry' or f.get('name') != 'Find' or
@@ -266,8 +269,10 @@ def _native_text(step, app_hint):
             result = browser_text.write(step, app_hint, f, recheck, _chk); result["detail"] = d; return result
         raise _XFail("focused field not native EDITABLE; nothing written")
     f = _check_bound(app_hint, True)
+    if live and (not f.get('editable') or any(f.get(k)!=v for k,v in live.items())):
+        raise _XFail('current selected field/text/range changed before dispatch; nothing written')
     req = {"operation": step["type"], "text": step.get("value") if step.get("value") is not None else step.get("label", ""),
-           "app": app_hint, "identity": f["identity"], "xwindow": _TL.bound[0][0], "saved_range": step.get("_native_range")}
+           "app": app_hint, "identity": f["identity"], "xwindow": _TL.bound[0][0], "saved_range": step.get("_native_range"), "live_selection": live}
     raw = _run([sys.executable, "-m", "tiptour_linux.atspi_resolver", "--focused-write"], 7, "identity-bound native write", json.dumps(req))
     try: result = json.loads(raw)
     except Exception: raise _XFail("native write result unreadable")

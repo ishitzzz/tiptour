@@ -568,6 +568,9 @@ def _focused_write(req):
     if not st.contains(Atspi.StateType.FOCUSED) or not st.contains(Atspi.StateType.EDITABLE) or node.get_role_name() == "password text":
         return {"ok": False, "error": "field state changed; nothing written"}
     et = node.get_editable_text_iface(); ti = node.get_text_iface(); text = req["text"]
+    live=req.get('live_selection')
+    if live and (req.get('operation')!='type' or any(f.get(k)!=v or f2.get(k)!=v for k,v in live.items())):
+        return {'ok':False,'error':'current native selection changed before write; nothing written'}
     saved = req.get("saved_range")
     if saved:
         if saved.get("identity") != f["identity"] or saved.get("xwindow") != req.get("xwindow") or saved.get("text") != f["text"]:
