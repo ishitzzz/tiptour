@@ -1,5 +1,11 @@
 # TipTour Linux port (experimental, X11 only, NOT a full port)
-Branch feature/linux-port, base upstream 6e97782. Python/GTK3. See PARITY.md for exact evidence. R94 includes enabled native menu-bar headers, fixing the missing File target in one Mousepad teaching workflow. After an operator click, its native fingerprint changes and the engine completes the plan; this is not an automatic-click or general validator result. R92 focused-shortcut binding and R93 capture reconstruction remain. Edit/no-edit disambiguation, unsupported capture fallback, full port and whole-suite acceptance remain open.
+Branch feature/linux-port, base upstream 6e97782. Python/GTK3. See PARITY.md for exact evidence. R95 stops idle image attempts on intentionally retired provider sessions and rejects captures whose session owner changes before dispatch. It adds no automatic reconnect: the next real request uses the existing fresh-session path. A ten-second changed-scene idle wait and later correct selected-text answer are verified in one actual-model run. General transport, Edit/no-edit disambiguation, unsupported capture fallback, full port and whole-suite acceptance remain open.
+
+## R95 retired-session idle screenshots
+
+Idle streaming now skips tainted sessions before capture and rechecks the client, generation and plan ownership after capture and at queued dispatch. Remote Screenshots privacy tickets and best-effort cancellation remain unchanged. A write already entered may accept bytes that cannot be recalled; threaded changes are not atomically excluded.
+
+The actual test finishes a four-step Mousepad task, moves the window, waits ten seconds without closed-provider errors or a new connection, then sends an answer-only request. The existing replacement path opens one fresh session and correctly reports selected text. Trace/results establish the wait and answer; the silent video is visual evidence only. This does not fix all transport failures or prove physical speech. See PARITY.md for source binding, 43 selected tests and remaining limits.
 
 ## R94 native menu-bar headers
 
