@@ -475,7 +475,9 @@ def _focused_record(hint):
         if st.contains(Atspi.StateType.FOCUSED) and rn not in ("frame", "window", "application", "document web", "document frame"):
             txt = None; selection = None; caret = None
             ti = node.get_text_iface()
-            if ti is not None:
+            import re
+            secret = rn == "password text" or bool(re.search(r"password|passcode|\bpin\b|cvv|cvc|one[- ]time|verification code", node.get_name() or "", re.I))
+            if ti is not None and not secret:
                 txt = ti.get_text(0, min(ti.get_character_count(), 20000)); caret = ti.get_caret_offset()
                 if ti.get_n_selections():
                     r = ti.get_selection(0); selection = [r.start_offset, r.end_offset]
@@ -491,7 +493,7 @@ def _focused_record(hint):
                     document_rect = _screen_rect(parent); break
                 parent = parent.get_parent()
             return node, {"document_rect": document_rect, "identity": ident, "role": rn, "name": node.get_name() or "", "editable": bool(st.contains(Atspi.StateType.EDITABLE) and node.get_editable_text_iface() is not None),
-                          "editable_state": bool(st.contains(Atspi.StateType.EDITABLE)), "native_editable_iface": node.get_editable_text_iface() is not None, "element_rect": _screen_rect(node), "password": rn == "password text", "text": txt, "selection": selection, "caret": caret}
+                          "editable_state": bool(st.contains(Atspi.StateType.EDITABLE)), "native_editable_iface": node.get_editable_text_iface() is not None, "element_rect": _screen_rect(node), "password": secret, "text": txt, "selection": selection, "caret": caret}
         if dep < 60:
             for j in range(node.get_child_count()):
                 c = node.get_child_at_index(j)

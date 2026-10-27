@@ -362,6 +362,7 @@ def main():
         def _abort_voice(why, ow=None):  # ONE owner of voice-session failure; ONLY the current owner may abort: an older failed/superseded attempt must not stop a newer mic/buffer
             if ow is not None and own[0] != ow:
                 click_events.append({"gate": "abort_skipped_not_owner", "why": why}); log("voice: %s, but a newer edge owns the voice session; nothing of the newer session was touched" % why); return False
+            hover.update(context=None, owner=None, defer_mic=False)
             own[0] += 1; pipe["tok"] += 1; gen[0] += 1; vs["n"] += 1; ing["parts"] = []
             with vg["lock"]:
                 vg["ready"] = False; vg["buf"] = []
@@ -371,6 +372,7 @@ def main():
             except Exception: pass
             tainted[0] = True; q.put_nowait(("voice_stop", None)); click_events.append({"gate": "voice_aborted", "why": why}); _ret = True; log("voice: ABORTED (%s); mic stopped, queue discarded by an explicit abort, session will be replaced on the next turn" % why); return True
         def _off_edge():  # PTT-OFF edge (loop thread): invalidates the generation, the epoch AND the command edge, ends the audio gate (queued audio is flushed to the closing session, then the sentinel), so late old-provider callbacks and a delayed connect cannot publish after OFF
+            hover.update(context=None, owner=None, defer_mic=False)
             gen[0] += 1; vs["n"] += 1; edge["n"] += 1; own[0] += 1; ing["parts"] = []
             with vg["lock"]:
                 vg["ready"] = False
@@ -394,6 +396,13 @@ def main():
                     await cl.send_history(list(hist)); click_events.append({"gate": "voice_history_rehydrated", "turns": len(hist), "chars": sum(len(_t2) for _r2, _t2 in hist)}); log("voice: rehydrated the fresh connection with %d prior turns (text only: no audio, screenshots, or model audio without transcript)" % len(hist))
                 if seed and hl.get("last_ctx") and os.environ.get("TIPTOUR_VOICE_CTX", "seed") == "seed":
                     await cl.send_context(_hl.prompt(hl["last_ctx"], ack=False)); log("voice: seeded latest highlight context silently (no turn)")
+                hc = hover['context']
+                if hover['defer_mic'] and hover.get('epoch') != radial_binding['epoch']: raise RuntimeError('radial intent replaced')
+                if seed and hc:
+                    if not hover_context.alive(hc, hover['owner']) or hover['owner'] != own[0]: raise RuntimeError('hover context expired or replaced')
+                    await cl.send_context(hover_context.prompt(hc))
+                    if hover['context'] is not hc or hover['owner'] != own[0] or (hover['defer_mic'] and hover.get('epoch') != radial_binding['epoch']): raise RuntimeError('hover context superseded during seed')
+                    click_events.append({'gate': 'hover_context_seeded'})
                 return True
             except Exception as _hx:
                 log("voice: continuity restore FAILED (%s); this fresh connection is discarded, nothing was silently degraded" % type(_hx).__name__); click_events.append({"gate": "voice_history_failed", "err": type(_hx).__name__}); return False
@@ -444,10 +453,16 @@ def main():
         await asyncio.sleep(2.0 if stream_task else 0)
         serve_q = asyncio.Queue()
         cmd_ep = {}; cmd_gen = {}; edge = {"n": 0}; shutdown = {"requested": False}
-        radial_binding = {"epoch": 0, "worker": None}
+        radial_binding = {"epoch": 0, "worker": None, "context_worker": None, "pending": False}
+        hover = {"context": None, "owner": None, "defer_mic": False, "epoch": None}
+        from . import hover_context
         def _enq(t):
             if shutdown['requested']: return
-            if t != '@voice': radial_binding['epoch'] += 1
+            if t != '@voice':
+                radial_binding['epoch'] += 1; radial_binding['pending'] = False
+                if t != '@voice-next':
+                    if hover['defer_mic']: _abort_voice('pending hover request replaced')
+                    hover.update(context=None, owner=None, defer_mic=False)
             if t == '@quit':
                 shutdown['requested'] = True; ing['shutdown'] = True; shell_windows['closed'] = True
                 if ptt_monitor: ptt_monitor.stop()
@@ -535,25 +550,44 @@ def main():
                 else:
                     with vg["lock"]: vg["ready"] = False; vg["buf"] = []
                     _enq("@voice")  # establish owner before starting the native capture
+                    if hover["defer_mic"]:
+                        hover["owner"] = own[0]; return
                     try: mic.start()
                     except OSError: _abort_voice('microphone could not start', own[0]); return
                     log("voice: on")
             if not a.radial_input:
                 ptt_monitor = _v.PttMonitor(lambda: loop.call_soon_threadsafe(_ptt)); ptt_monitor.start()
             else:
-                radial_post['invalidate'] = lambda: radial_binding.__setitem__('epoch', radial_binding['epoch'] + 1)
+                def invalidate_hover():
+                    radial_binding['epoch'] += 1; radial_binding['pending'] = False
+                    if hover['defer_mic']: _abort_voice('pending hover control')
+                    hover.update(context=None, owner=None, defer_mic=False)
+                radial_post['invalidate'] = invalidate_hover
                 def _radial_select(option, point):
                     if ing.get('shutdown'): return
-                    radial_binding['epoch'] += 1; epoch = radial_binding['epoch']
+                    was_pending = radial_binding['pending']
+                    radial_binding['epoch'] += 1; epoch = radial_binding['epoch']; radial_binding['pending'] = False
                     def guarded_status(message):
                         GLib.idle_add(lambda: (radial_status(message), False)[1] if not ing.get('shutdown') and radial_binding['epoch'] == epoch else False)
+                    if option != 'speak' and (was_pending or hover['defer_mic']):
+                        _abort_voice('pending Speak replaced by radial mode')
                     if option == 'speak':
                         # OFF never needs a target probe. ON refuses a different
                         # hovered/focused app rather than silently changing target.
                         if mic.active:
                             if ing.get('ready'): _stop_work('radial-speak')
+                            hover.update(context=None, owner=None, defer_mic=False)
                             _ptt(); guarded_status('Gemini voice stopped. Ctrl+Alt hotkey disabled in radial-input mode.'); return
+                        if was_pending or hover['defer_mic']:
+                            if ing.get('ready'): _stop_work('radial-speak')
+                            _abort_voice('pending radial Speak cancelled'); guarded_status('Pending Speak cancelled. No voice started.'); return
                         if ing.get('ready'): _stop_work('radial-speak')
+                        if os.environ.get('TIPTOUR_USE_ATSPI', '1') != '1':
+                            hover.update(context=None, owner=None, defer_mic=False)
+                            guarded_status('Speak context unavailable: AT-SPI lookup is disabled. No voice started.'); return
+                        hover.update(context=None, owner=None, defer_mic=False)
+                        if radial_binding['context_worker'] and radial_binding['context_worker'].is_alive():
+                            guarded_status('Speak unavailable: context check still running.'); return
                         if radial_binding['worker'] and radial_binding['worker'].is_alive():
                             guarded_status('Speak unavailable: target check still running.'); return
                         from . import radial_target
@@ -563,9 +597,21 @@ def main():
                         def accept(target, deadline):
                             if not current(): return
                             if not target or time.monotonic() >= deadline:
+                                radial_binding['pending'] = False
                                 status('Speak refused: target unavailable or check expired. Focus the app under the cursor and try again. No voice started.'); return
-                            status('Gemini voice starting/listening. Radial Speak again stops it, including a pending start. Ctrl+Alt hotkey disabled.')
-                            _ptt()
+                            def context_accept(ctx, expires):
+                                if not current(): return
+                                radial_binding['pending'] = False
+                                if not ctx or time.monotonic() >= expires:
+                                    hover.update(context=None, owner=None, defer_mic=False)
+                                    status('Speak refused: native context unavailable or expired. No voice started.'); return
+                                hover.update(context=ctx, owner=None, defer_mic=True, epoch=epoch)
+                                _ptt(); ctx['owner'] = hover['owner']
+                                status('Gemini context captured. Connecting before microphone starts. Radial Speak cancels pending start.')
+                            radial_binding['pending'] = True
+                            radial_binding['context_worker'] = hover_context.request(point, target, epoch, current,
+                                lambda ctx, expires: loop.call_soon_threadsafe(context_accept, ctx, expires))
+                        radial_binding['pending'] = True
                         radial_binding['worker'] = radial_target.request(point, lambda target, deadline: loop.call_soon_threadsafe(accept, target, deadline), current)
                     elif option == 'type':
                         guarded_status('Type unavailable: pinned Mac text mode requires JEV. No provider was changed.')
@@ -1165,7 +1211,10 @@ def main():
         def _shown(rv):  # runs on the loop when the panel has ACTUALLY been drawn: only input arriving after this point can answer the proposal
             if prop["rev"] == rv and prop["state"] == "pending": prop["shown"] = arr["n"]; prop["displayed"] = True; click_events.append({"gate": "proposal_displayed", "rev": rv, "arrival_epoch": arr["n"]}); log("confirmation: proposal rev %d displayed (arrival epoch %d)" % (rv, arr["n"]))
         def _stop_work(src):
-            if src != 'radial-speak': radial_binding['epoch'] += 1
+            if src != 'radial-speak':
+                radial_binding['epoch'] += 1; radial_binding['pending'] = False
+                if hover['defer_mic']: _abort_voice('pending hover stopped')
+                hover.update(context=None, owner=None, defer_mic=False)
             """Explicit STOP: clear a pending proposal, revoke an approved record and stop whatever plan is running/queued (cursor retired, no later step renders)."""
             _live0 = _goal_live(); _had = prop["state"]
             _prop_clear("stop (%s)" % src)
@@ -1219,7 +1268,7 @@ def main():
                     else: _prop_clear("new unrelated request")  # any other user request invalidates the pending plan; it then goes to the model as usual
                 _had_state = prop["state"] if (voice_turn and prop["state"] in ("pending", "approved") and prop["turn"] < i) else None; _had_rev = prop["rev"]  # the record this voice turn may answer
                 if voice_turn:
-                    if not (mic and mic.active): continue  # toggled off before this turn started
+                    if not (mic and (mic.active or hover["defer_mic"])): continue  # toggled off before this turn started
                     _keep = []
                     while not q.empty(): _keep.append(q.get_nowait())
                     for _it in _keep:
@@ -1244,6 +1293,13 @@ def main():
                         if gen[0] != _pre + 1 or own[0] != _o:
                             click_events.append({"gate": "voice_command_superseded", "at": "seed"}); log("voice: a newer PTT edge superseded this connection during restore; closing it")
                             await _close_bounded(client); tainted[0] = True; continue
+                        if hover['defer_mic']:
+                            if hover['owner'] != own[0] or hover.get('epoch') != radial_binding['epoch'] or not hover_context.alive(hover['context'], own[0]):
+                                await _close_bounded(client); _abort_voice('hover context no longer owned', _o); continue
+                            try: mic.start()
+                            except OSError:
+                                await _close_bounded(client); _abort_voice('microphone could not start', _o); continue
+                            hover['defer_mic'] = False
                         _n = _install_writer(client)  # no await between the last ownership check and the install
                         _ms = int((time.time() - _tc0) * 1000); log("voice: fresh provider connection ready in %d ms (%d buffered audio chunks queued in order)" % (_ms, _n)); click_events.append({"gate": "voice_fresh_conn", "ms": _ms, "buffered": _n})
                     text = ""
@@ -1413,21 +1469,9 @@ def main():
                         # Pinned Mac semantic key normalization occurs before displaying/hashing the approval.
                         from .app_skills import normalize_semantic_keyboard_steps
                         args = dict(args, steps=normalize_semantic_keyboard_steps(args.get("steps", []), args.get("app", "")))
-                        # Native highlight binding is owned by the app context, never by model-supplied metadata.
-                        args = json.loads(json.dumps(args))
-                        for st in args.get("steps", []): st.pop("_native_range", None)
-                        _cxsteps = [st for st in args.get("steps", []) if st.get("targetContext") in ("currentSelection", "currentHighlight")]
-                        if _cxsteps and not any(st.get("type") in ("openApp", "openURL") for st in args.get("steps", [])):
-                            _ctx = hl.get("last_ctx") or {}; _wd = _ctx.get("window") or {}; _nr = _ctx.get("native_range")
-                            if _nr and _wd.get("title"):
-                                args["app"] = _wd["title"]
-                                # Mac stepsPreservingSelectedTextIfNeeded: preserve selection by removing a leading click.
-                                _ss = args.get("steps", [])
-                                if len(_ss) >= 2 and _ss[0].get("type") in ("click", "doubleClick") and _ss[1].get("type") in ("type", "setValue", "pressKey", "keyboardShortcut") and (_ss[1].get("targetContext") in ("currentHighlight", "currentSelection") or (bool((_ss[0].get("label") or "").strip()) and " ".join((_ss[0].get("label") or "").lower().split()) in " ".join(((_ctx.get("text_selection") or {}).get("text") or "").lower().split()))):
-                                    args["steps"] = _ss[1:]
-                                for st in args.get("steps", []):
-                                    _del = st.get("type") == "pressKey" and (st.get("label") or "").lower().strip(".,;: ") in ("delete", "del", "backspace")
-                                    if st.get("type") in ("type", "setValue") or _del: st["_native_range"] = _nr
+                        # Native context is app-owned, deep-copied before immutable approval.
+                        hc = hover['context'] if voice_turn and hover_context.alive(hover['context'], own[0]) else None
+                        args = hover_context.bind(args, hl.get('last_ctx'), hc)
                         _canon = _plan_canon(args); _ph = _hashlib.sha256(_canon.encode()).hexdigest()  # CONFIRMATION GATE (after the voice transcript wait and the answer-only gate): hold EVERY plan. Nothing resolves, arms, points or clicks before the user approves THIS record.
                         if prop["state"] == "pending" and prop["hash"] == _ph:  # identical plan re-submitted while the user is answering: SAME record, no new revision, the displayed proposal and any valid answer stay bound to it
                             click_events.append({"gate": "same_hash_resubmit_ignored", "id": _tid, "rev": prop["rev"]}); log("confirmation: identical plan re-submitted (call %s); same record rev %d kept pending" % (_tid, prop["rev"]))

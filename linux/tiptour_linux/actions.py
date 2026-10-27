@@ -197,6 +197,11 @@ def _focus(app_hint):
 
 def _native_text(step, app_hint):
     import json, sys
+    saved = step.get('_native_range')
+    if saved:
+        ws = _window_state()
+        if str(ws[0]) != str(saved.get('xwindow')) or ws[1] != (saved.get('identity') or {}).get('pid'):
+            raise _XFail('saved selection recipient no longer focused; nothing written')
     d = _focus(app_hint); f = _check_bound(app_hint, False)
     if not f.get("editable"):
         if f.get("editable_state") and not f.get("native_editable_iface"):
