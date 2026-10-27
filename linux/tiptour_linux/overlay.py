@@ -108,7 +108,8 @@ class PointerOverlay(Gtk.Window):
         return (g.width, g.height) if g else (1920, 1080)
     def _log(self, kind, **kw): self.events.append(dict(kind=kind, t=round(time.time(), 3), **kw)); self.events = self.events[-400:]
     def on_realize(self, *_):
-        self.get_window().input_shape_combine_region(cairo.Region(), 0, 0)
+        # Store on Gtk.Widget so the first map cannot reset the Gdk input region.
+        self.input_shape_combine_region(cairo.Region())
         if not self.composited: self.apply_shape()
     def apply_shape(self):
         s = cairo.ImageSurface(cairo.FORMAT_A8, self.W, self.H); self.paint(cairo.Context(s))
