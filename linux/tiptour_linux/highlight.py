@@ -160,7 +160,9 @@ def outside_window(utterance, ctx, point):
     return not (x <= point[0] <= x + ww and y <= point[1] <= y + hh)
 
 
-_NOACT_NEG = _re.compile(r"\b(do not|don't|dont|never|no need to|without)\b[^.?!]{0,25}\b(point|click|act|move|touch|press|type|do anything|take (any )?action)\b|\bno action\b|\b(just|only) (tell|answer|say|read|quote|describe)\b")
+_NOACT_NEG = _re.compile(r"\b(do not|don't|dont|never|no need to|without)\b[^.?!]{0,25}\b(point|click|act|move|touch|press|type|do anything|take (any )?action)\b|\bno action\b")
+_NOACT_ONLY = _re.compile(r"\b(just|only) (tell|answer|say|read|quote|describe)\b")
+_NEGATED_ONLY = _re.compile(r"\b(do not|don't|dont|never)\s+$")
 _ACT_VERB = _re.compile(r"\b(point|show me|where|click|press|tap|open|go to|take me|find|locate|type|change|rewrite|fix|edit|delete|move|scroll|drag|fill|submit|send|copy|paste|highlight where)\b")
 
 _Q_TEXT = _re.compile(r"\b(text|words?|says?|written|quote|read|selected|describe|explain|summari[sz]e)\b")
@@ -171,6 +173,11 @@ def no_action_requested(utterance):
     t = (utterance or "").lower().strip()
     if not t: return False
     if _re.search(_NOACT_NEG, t): return True
+    for match in _NOACT_ONLY.finditer(t):
+        # A negated answer-only phrase is not itself a request for an answer.
+        # Still require an action elsewhere, and never override explicit action prohibitions.
+        if not (_NEGATED_ONLY.search(t[:match.start()]) and _ACT_VERB.search(t[:match.start()] + t[match.end():])):
+            return True
     first = t.split()[0] if t.split() else ""
     question = first in ("what", "which", "quote", "read", "tell", "describe", "explain", "summarize", "summarise") or t.endswith("?") and first in ("is", "are", "does", "do")
     return bool(question and _re.search(_Q_TEXT, t) and not _re.search(_ACT_VERB, t))

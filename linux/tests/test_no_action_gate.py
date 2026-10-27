@@ -40,3 +40,22 @@ r = sp("q", {"text_selection": {"text": "B", "app": "x", "role": "heading"}}); a
 r = sp("q", {"text_selection": None, "atspi_status": "unavailable: probe exceeded 6s", "dom_selection_status": "none: x"}); assert "selected_text" not in r and "unavailable" in r["selected_text_note"] and "none: x" in r["selected_text_note"]
 r = sp("q", None); assert "selected_text" not in r and r["ok"] is True
 print("suppressed payload unit ok")
+
+# Negating an answer-only phrase must not turn an explicit action into answer-only.
+for text in ["Do not just describe the plan. Click the four buttons in order.",
+             "Don't only tell me the plan. Open Settings.",
+             "Never just describe the steps. Click Save."]:
+    assert not n(text), text
+    assert m("click", text), text
+for text in ["Do not click. Do not just describe the plan. Click Save.",
+             "Don't click anything, only tell me the plan.",
+             "Do not just describe the plan.",
+             "Just describe how to click Save.",
+             "Click Save, but only tell me what happens.",
+             "No action. Don't just describe the plan. Click Save.",
+             "Never press Save. Click it."]:
+    assert n(text), text
+    assert not m("click", text), text
+print("negated answer-only phrase regressions ok")
+
+assert not n("Yes, submit_workflow_plan now with those exact four click steps so the app can show its review panel. Do not just describe the plan. I will confirm the app panel after it appears.")

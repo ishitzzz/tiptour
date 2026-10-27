@@ -61,6 +61,16 @@ CLICKABLE = {"push button", "toggle button", "menu item", "check box", "radio bu
 class CoordinateError(RuntimeError): pass
 _COORD_CACHE = {}
 def _screen_rect(node, provenance=False):
+    # All failures while establishing native->X11 mapping are refusal conditions,
+    # including Display connection creation/close and native ancestry reads.
+    try:
+        return _screen_rect_unchecked(node, provenance)
+    except CoordinateError:
+        raise
+    except Exception as e:
+        raise CoordinateError("native/X11 coordinate mapping unavailable: " + type(e).__name__) from e
+
+def _screen_rect_unchecked(node, provenance=False):
     """Translate AT-SPI logical SCREEN units to X11 root pixels, bound to the same PID/title/frame.
     Only a uniquely matched window and uniform integer scale with matching origin/size are accepted.
     Unknown mapping is unavailable, never an inferred DPI default.
@@ -141,7 +151,10 @@ def walk(node, depth=0, out=None):
             st = ch.get_state_set()
             if st.contains(Atspi.StateType.SHOWING) and st.contains(Atspi.StateType.VISIBLE):
                 role = ch.get_role_name()
-                if role in CLICKABLE:
+                # AT-SPI controls expose ENABLED as a state, unlike optional AXEnabled.
+                # Do not make disabled controls candidates; still recurse into descendants.
+                actionable = role in {"push button", "toggle button", "menu item", "check box", "radio button", "link", "page tab", "entry"}
+                if role in CLICKABLE and (not actionable or st.contains(Atspi.StateType.ENABLED)):
                     coord = _screen_rect(ch,True); ext = type("Rect",(),dict(zip(("x","y","width","height"),coord["rect"])))()
                     if ext.width <= 0 or ext.height <= 0:continue
                     out.append({"label": ch.get_name() or "", "role": role, "rect": [ext.x, ext.y, ext.width, ext.height],
@@ -192,9 +205,9 @@ def _target_window_nodes(hint):
             for t in nodes:t["app"]=app.get_name()
             return nodes
     raise CoordinateError("coordinate-bound app disappeared")
-def resolve(label, hint=None):
+def resolve(label, hint=None, timeout=6):
     l = label.strip().lower()
-    ts = _sub(["--resolve-targets",hint],6)["targets"] if hint else all_targets()
+    ts = _sub(["--resolve-targets",hint],timeout)["targets"] if hint else all_targets()
     c = [t for t in ts if t["label"].strip().lower() == l] or [t for t in ts if l and l in t["label"].lower()]
     return c
 

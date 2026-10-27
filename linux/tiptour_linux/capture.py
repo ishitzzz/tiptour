@@ -2,8 +2,11 @@
 import io
 from PIL import ImageGrab
 
-def grab(max_w=1280):
-    full = ImageGrab.grab(xdisplay=None)
+def grab(max_w=1280, exclude_xid=None):
+    if exclude_xid is None:full = ImageGrab.grab(xdisplay=None)
+    else:
+        from .x11_capture import excluding
+        full=excluding(exclude_xid)
     W, H = full.size
     img = full if W <= max_w else full.resize((max_w, round(H * max_w / W)))
     buf = io.BytesIO(); img.convert("RGB").save(buf, "JPEG", quality=80)

@@ -49,6 +49,10 @@ class PointerOverlay(Gtk.Window):
     W, H = 420, 90
     CX, CY = 30, 30           # arrow center inside the window
     def __init__(self):
+        from . import x11_capture
+        self.clean_capture_ready=False
+        try:x11_capture.prepare();self.clean_capture_ready=True
+        except Exception as e:print('capture backing unavailable:',e,flush=True)
         super().__init__(type=Gtk.WindowType.POPUP)
         self.set_wmclass('tiptour-overlay', 'TipTourOverlay')  # lets the click detector ignore our own click-through pointer window
         self.set_app_paintable(True); self.set_decorated(False); self.set_keep_above(True); self.set_accept_focus(False)
@@ -186,19 +190,34 @@ class PausePanel(Gtk.Window):
     """Small on-screen Retry / Skip prompt shown while a taught step is paused (click had no observable effect, or another app took focus).
     Own WM_CLASS (ignored by the click detector). Never takes keyboard focus. on_retry/on_skip are called on the GTK thread: hand work off to another thread."""
     def __init__(self, on_retry, on_skip):
+        from . import x11_capture
+        self.clean_capture_ready=False
+        try:x11_capture.prepare();self.clean_capture_ready=True
+        except Exception as e:print('capture backing unavailable:',e,flush=True)
         super().__init__(type=Gtk.WindowType.POPUP)
         self.set_wmclass('tiptour-overlay', 'TipTourOverlay'); self.set_keep_above(True); self.set_accept_focus(False)
         box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8); box.set_border_width(8)
-        self.msg = Gtk.Label(label=""); self.retry = Gtk.Button(label="Retry"); self.skip = Gtk.Button(label="Skip")
-        self.retry.connect("clicked", lambda *_: on_retry()); self.skip.connect("clicked", lambda *_: on_skip())
-        for w in (self.msg, self.retry, self.skip): box.pack_start(w, False, False, 0)
+        self.msg = Gtk.Label(label=""); self.row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        self._on_retry, self._on_skip = on_retry, on_skip
+        self.retry = self.skip = None
+        box.pack_start(self.msg, False, False, 0); box.pack_start(self.row, False, False, 0)
         frame = Gtk.Frame(); frame.add(box); self.add(frame)
-    tok = -1  # -1 = hidden/no episode: a click on it can never match a live plan token
+    tok = -1
     def show_at(self, x, y, text, tok=None):
-        self.tok = tok; self.msg.set_text(text); self.show_all(); self.move(max(0, int(x) - 40), int(y) + 60)
+        self.tok = -1
+        for child in list(self.row.get_children()): self.row.remove(child); child.destroy()
+        self.retry = Gtk.Button(label="Retry"); self.skip = Gtk.Button(label="Skip")
+        # New widgets per pause episode; a queued old callback carries its OLD token.
+        self.retry.connect("clicked", lambda *_, t=tok: self._on_retry(t))
+        self.skip.connect("clicked", lambda *_, t=tok: self._on_skip(t))
+        self.row.pack_start(self.retry, False, False, 0); self.row.pack_start(self.skip, False, False, 0)
+        self.msg.set_text(text); self.tok = tok; self.show_all(); self.move(max(0, int(x) - 40), int(y) + 60)
         import os
         if os.environ.get("TIPTOUR_PANEL_COORDS"): GLib.timeout_add(600, self._dump)
-    def hide_panel(self): self.tok = -1; self.hide()
+    def hide_panel(self):
+        self.tok = -1
+        self.retry and self.retry.set_sensitive(False); self.skip and self.skip.set_sensitive(False)
+        self.hide()
 
     def _dump(self):  # test aid only (env-gated): screen centers of the buttons so a harness can press them with real synthetic input
         try:
@@ -215,6 +234,10 @@ class ProposalPanel(Gtk.Window):
     """On-screen plan proposal: the COMPLETE ordered plan text (goal, app, every step with its action values) plus revision-bound Confirm / Cancel buttons.
     Own WM_CLASS (ignored by the click detector), never takes keyboard focus. Buttons call on_answer(kind, rev) on the GTK thread: hand work off to another thread."""
     def __init__(self, on_answer):
+        from . import x11_capture
+        self.clean_capture_ready=False
+        try:x11_capture.prepare();self.clean_capture_ready=True
+        except Exception as e:print('capture backing unavailable:',e,flush=True)
         super().__init__(type=Gtk.WindowType.POPUP)
         self.set_wmclass('tiptour-overlay', 'TipTourOverlay'); self.set_keep_above(True); self.set_accept_focus(False)
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8); box.set_border_width(12)

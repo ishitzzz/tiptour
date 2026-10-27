@@ -1,24 +1,23 @@
-# Mac feature inventory vs Linux port (source-backed, orientation only)
-Basis: file headers and line counts under TipTour/ at the pinned commit 6e97782. "Impact" is what a user would notice on Linux. Status uses PARITY.md evidence classes; nothing here is a pass claim.
-Verified-by-run items are only those named in PARITY.md (virtual audio / Xvfb, no physical hardware, X11 only).
+# Linux TipTour feature inventory
 
-| Mac area (lines) | Linux status | User impact |
+Latest product is R42, documentation R43. Read the latest PARITY.md section before interpreting this earlier inventory. Supported X11 backing capture avoids capture-hide flicker and excludes three own UI windows; unsupported backing uses logged hide fallback. Autopilot uses the pinned 0.28s minimum with a bounded same-step validator-baseline dependency. Whole-product parity remains open.
+
+
+This replaces the superseded status tables kept in HISTORICAL_MAC_FEATURE_INVENTORY.md. Those tables describe earlier unfinished builds, not current capabilities. This is a work-in-progress port, not a whole-product readiness claim.
+
+Baseline: Mac commit 6e97782039b57a3f3dcd5a8bf7101438ba6b1c37. Linux-only adaptation plus the user-requested multi-step request and propose-then-yes behavior. Annotations excluded. No Mac/main/Dojo/Windows changes.
+
+| Area | Current implementation | Evidence and limits |
 |---|---|---|
-| Voice/Gemini Live (2738) | ported: client, key pool, mic/PTT toggle, playback; virtual audio only | works end to end only in tests with virtual devices; speaker echo not handled |
-| Perception: detector, OCR, AX resolver, browser resolver, continuity (2669) | ported in spirit: YOLO ONNX + OCR, AT-SPI, CDP DOM stage; target continuity cache and perceptual-hash not ported | pointing mostly matches; no cross-turn target memory across small UI shifts |
-| Utilities: highlight (Ctrl+Shift), push-to-talk (Ctrl+Alt) shortcuts | ported on X11 polling | no Wayland; no global hotkeys under Wayland |
-| Utilities: text-command shortcut and radial input switcher (Ctrl+Opt+Cmd) | NOT ported | no typed-question popup and no input-mode wheel; typed asks only via FIFO/CLI |
-| Ask harness (2237) | ported except scribble (excluded by user) and on-device SFSpeech (Vosk instead) | works in virtual tests; transcription quality differs from Mac |
-| UI: panel, menu bar, onboarding, provider setup, design system (6587) | NOT ported; tiny GTK settings window and untested tray only | no first-run setup, no provider UI; keys come from a vault glob / env |
-| UI: overlay cursor, trail, Neko mode, detection overlay | cursor + trail ported; Neko sprites not wired (BSD-2 assets present in repo), detection overlay not ported | original blue cursor look only; no cat, no debug boxes |
-| Actions: ActionExecutor, action driver (1243) | actions.py exists, never run live; --act off | no click/type automation; point-only |
-| Workflow: plans, element resolver, runner, ClickDetector (2490) | NOT ported | no multi-step guided workflows, no auto-advance on user click |
-| Core: engine, agent contract, modes (4280) | tracer-bullet equivalent only (app.py), single request loop | Mac mode switching (teaching/autopilot) absent |
-| Tutorials + Elorian client (2512) | NOT ported | no tutorial-video tours; needs Elorian service access |
-| Jev (761) | NOT ported | alternative grounding/pointer-loop provider unavailable |
-| Harness server on local port (1128) | NOT ported | external orchestrators cannot drive TipTour via HTTP |
-| Skills (markdown app skills, blender) | NOT ported | no per-app skill hints |
-| Analytics, keychain | not ported (keychain replaced by vault files) | none intended |
+| Gemini Live | Original model, prompt/schema extraction with explicit OS and approved multi-step deltas, key pool, audio/PTT | R23 real-provider static four-click chain, virtual-audio STT/voice approval of observe step. Later candidates need their own repeat. No physical mic or audio-quality claim. |
+| Plans and approval | Multi-step stored plan, displayed revision, exact-plan approval, STOP at ingress | Typed and simulated-event negatives, physical old-Confirm press/new-Confirm release tested. Not every callback interleaving. |
+| Resolution | Local cache/marks, native AT-SPI, Chrome CDP, local perception, model-hint fallback | Bound active window, integer-scale mapping, ambiguity/modal/mapping refusals. A raw model hint can still be inaccurate and does not authorize an automated click. |
+| Retry / Skip / Resume | Fresh capture and full resolution; ordered advance; post-click validator | R29 candidate restores bounded no-hint resolution and failure panel. Deadline, cancellation and late-capture cases tested; independent review remains required. |
+| Actions | Native click and editable text, key/shortcut/scroll adapters, cancellation checks | Owned-fixture effects verified in bounded cases. Native X11 dispatch is not atomic and already-dispatched input cannot be undone. |
+| Browser text | Plain input fallback bound to same DOM object/window/frame/text/selection | Setter and input event, not literal native typing, rich text or undo parity. Browser saved-highlight replacement unsupported. |
+| Saved native selection | Object/text/range bound and consumed once; next edit uses live caret | Two-step NEW then ! regression. Secret/readonly controls refused. |
+| Pointer and highlight | X11 blue companion, movement/follow/retire, focus highlight | Actual continuous R23 recording shows actions and movement, but capture-hide flicker is a confirmed unresolved visual flaw. No smooth/flicker-free or exact Mac-motion claim. |
+| Displays | Virtual wide desktop, uniform integer 100%/200% mapping | Not physical mixed-DPI, fractional scaling, negative origins or Wayland. Unknown mapping refuses. |
+| Product shell and other Mac features | Partial Linux shell only | Full onboarding/menu UI, radial/text-command UI, Neko/debug UI, tutorials/Elorian, JEV, skill integration and HTTP facade are not established as ported. See source audit before claiming equivalence. |
 
-Largest user-visible gaps for a "same TipTour": workflows/teaching mode, text-command and radial input, onboarding/menu panel, actions. These are large (each hundreds to thousands of Swift lines) and need a scoping decision, not an open queue.
-Hard limits independent of code: no physical mic/speakers/keyboard here, X11/XWayland only, no Wayland, no Windows, no tray host.
+See PARITY.md for the current evidence ledger and FIDELITY_CORRECTION.md for unresolved source differences.
