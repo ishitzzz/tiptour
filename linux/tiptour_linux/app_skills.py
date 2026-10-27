@@ -157,6 +157,20 @@ class AppSkillRegistry:
         return [s.info(active is not None and s.name == active.name) for s in self.skills]
 
 
+# Mac MarkdownAppSkillRegistry.shared is a lazy, process-owned snapshot.
+# Explicit AppSkillRegistry(...) construction remains independent for tests/tools.
+_shared_registry = None
+import threading as _threading
+_shared_registry_lock = _threading.Lock()
+
+def shared_registry():
+    global _shared_registry
+    with _shared_registry_lock:
+        if _shared_registry is None:
+            _shared_registry = AppSkillRegistry()
+        return _shared_registry
+
+
 def normalize_semantic_keyboard_steps(steps, app_name, registry=None):
     """Mac CompanionManager.normalizingSemanticKeyboardSteps, BEFORE proposal hashing.
 
@@ -164,7 +178,7 @@ def normalize_semantic_keyboard_steps(steps, app_name, registry=None):
     action permission, dispatches input, coalesces text, or changes non-key steps.
     """
     import copy
-    registry = registry if registry is not None else AppSkillRegistry()
+    registry = registry if registry is not None else shared_registry()
     skill = registry.skill(app_name)
     common = dict(selectall='Cmd+A', copy='Cmd+C', paste='Cmd+V', cut='Cmd+X',
                   undo='Cmd+Z', redo='Cmd+Shift+Z', save='Cmd+S')

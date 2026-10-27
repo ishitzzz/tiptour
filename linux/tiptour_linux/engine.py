@@ -6,7 +6,7 @@ Action submission is intentionally absent until shared local approval is wired.
 """
 import base64
 from datetime import datetime, timezone
-from .app_skills import AppSkillRegistry
+from .app_skills import shared_registry
 
 
 class ReadOnlyEngine:
@@ -19,7 +19,7 @@ class ReadOnlyEngine:
         self._refresh = refresh_targets
         self._detection_count = detection_count or target_cache.fresh_target_count
         self._capture = capture
-        self._registry = registry if registry is not None else AppSkillRegistry()
+        self._registry = registry if registry is not None else shared_registry()
 
     def _app(self):
         app = self._active_app() or {}

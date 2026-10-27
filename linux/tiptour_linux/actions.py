@@ -204,8 +204,8 @@ def _focus(app_hint):
 def _skill_numeric_text(step, app_hint):
     """Pinned ActionExecutor.typeText skill-directed key branch, never setValue."""
     if step.get('type') != 'type': return None
-    from .app_skills import AppSkillRegistry
-    skill = AppSkillRegistry().skill(app_hint)
+    from .app_skills import shared_registry
+    skill = shared_registry().skill(app_hint)
     text = step.get('value') if step.get('value') is not None else step.get('label', '')
     if not skill or not skill.should_type_physical_keys(text): return None
     if step.get('_native_range'):
