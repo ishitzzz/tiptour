@@ -478,14 +478,17 @@ def fingerprint(name, timeout=4):
 
 MODAL_ROLES = {"dialog", "alert", "file chooser"}
 
-def _modal_title(hint):
+def _modal_title(hint, expected_pid=None):
     """Inspect ALL top-level windows of the identity-matched application. Missing app is unavailable."""
     h = (hint or "").strip().lower()
     if not h: raise TimeoutError("modal check requires app identity")
+    if expected_pid is not None and (type(expected_pid) is not int or expected_pid <= 0):
+        raise TimeoutError("modal PID identity invalid")
     desk = Atspi.get_desktop(0); matches = []
     for i in range(desk.get_child_count()):
         app = desk.get_child_at_index(i)
         if app is None or _is_self(app): continue
+        if expected_pid is not None and app.get_process_id() != expected_pid: continue
         nm = (app.get_name() or "").lower()
         windows = [app.get_child_at_index(j) for j in range(app.get_child_count())]
         if nm == h or h in nm or any(w is not None and h in (w.get_name() or "").lower() for w in windows): matches.append(windows)
@@ -557,7 +560,7 @@ def _focused_write(req):
     if f["text"] is None or len(f["text"]) >= 20000: return {"ok": False, "error": "complete text unavailable; nothing written"}
     w = subprocess.run(["xdotool", "getactivewindow"], capture_output=True, text=True, timeout=2)
     if w.returncode or w.stdout.strip() != req.get("xwindow"): return {"ok": False, "error": "active X11 window changed; nothing written"}
-    if _modal_title(req.get("app")) is not None: return {"ok": False, "error": "blocking modal present; nothing written"}
+    if _modal_title(req.get("app"), f["identity"]["pid"]) is not None: return {"ok": False, "error": "blocking modal present; nothing written"}
     node2, f2 = _focused_record(req.get("app"))
     if not f2 or f2["identity"] != f["identity"] or any(f2[k] != f[k] for k in ("text", "selection", "caret")):
         return {"ok": False, "error": "focused field/text/selection changed during check; nothing written"}
@@ -595,10 +598,10 @@ def _focused_write(req):
             "caret_verified": (req["operation"] == "setValue" and not saved) or ti.get_caret_offset() == start + len(text),
             "delivery": "AT-SPI EditableText on identity-bound object", "field_identity": f["identity"]}
 
-def modal_title(hint, timeout=3):
+def modal_title(hint, timeout=3, expected_pid=None):
     """Bounded child read, like every other native AT-SPI read. Returns (status, title): ('ok', title|None) or ('unavailable', None) - unavailable is never reported as 'no modal'."""
     try:
-        d = _sub(["--modal", hint or ""], timeout) if ISOLATED else {"title": _W.call(_modal_title, (hint,), timeout)}
+        d = _sub(["--modal", hint or "", *([str(expected_pid)] if expected_pid is not None else [])], timeout) if ISOLATED else {"title": _W.call(_modal_title, (hint, expected_pid), timeout)}
         return "ok", d.get("title")
     except Exception: return "unavailable", None
 
@@ -622,7 +625,7 @@ if __name__ == "__main__":
             elif sys.argv[1] == "--fp": print(_json.dumps(_fingerprint(sys.argv[2] if len(sys.argv) > 2 else "")))
             elif sys.argv[1] == "--focused-write": print(_json.dumps(_focused_write(_json.load(sys.stdin))))
             elif sys.argv[1] in ("--focus", "--focus-document"): print(_json.dumps({"focus": _focus_info(sys.argv[2] if len(sys.argv) > 2 else "", sys.argv[1] == "--focus-document")}))
-            elif sys.argv[1] == "--modal": print(_json.dumps({"title": _modal_title(sys.argv[2] if len(sys.argv) > 2 else "")}))
+            elif sys.argv[1] == "--modal": print(_json.dumps({"title": _modal_title(sys.argv[2] if len(sys.argv) > 2 else "", int(sys.argv[3]) if len(sys.argv) > 3 else None)}))
             elif sys.argv[1] == "--ready": print(_json.dumps({"ready": bool(ready(2.5))}))
             elif len(sys.argv) > 3 and sys.argv[2] == "--app": print(_json.dumps({"targets": _app_targets(sys.argv[3])}))  # filter in the child
             else: print(_json.dumps({"targets": _all_targets()}))

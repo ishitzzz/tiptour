@@ -966,15 +966,16 @@ def main():
         def _gens(own): return {"own_pin": own["pin"], "own_perc": own["perc"], "applied_pin": _pin_seq["applied"], "applied_perc": _perc_seq["applied"]} if own else None  # LABELS ONLY: a newer global generation does not refuse; this resolve reads ITS OWN snapshot and the real screen-stale guard decides
         def _local_resolve_owned(lab, own): return _local_resolve(lab, own["cache"] if own else None)
         _range_consumed = set()  # (approved revision, canonical saved-range): native pending range is consumed ONCE per plan
-        async def _transition_ready(name, token, timeout=8):
+        async def _transition_ready(name, token, launched_pids, timeout=8):
             from .app_transition import context_matches
+            if not launched_pids or any(type(p) is not int or p <= 0 for p in launched_pids): return None
             end = time.monotonic() + timeout
             while time.monotonic() < end:
                 if token != plan_tok['n'] or prop.get('state') != 'approved': return None
                 try:
                     context = await asyncio.to_thread(atspi_resolver.active_context, 1)
                     if token != plan_tok['n'] or prop.get('state') != 'approved': return None
-                    if context_matches(context, name): return context
+                    if context_matches(context, name) and context["pid"] in launched_pids: return context
                 except Exception: pass
                 await asyncio.sleep(.1)
             return None
@@ -1029,7 +1030,8 @@ def main():
                 _ev({"action": "refused_target_context", "performed": False}); log("action step %s NOT performed: targetContext %s is not implemented for this step type on Linux (no native selection binding); nothing sent" % (t, tc))
                 return {"ok": False, "status": "action_target_context_unsupported", "note": "targetContext %s is not supported for this action on Linux; nothing was done." % tc}, tool_seen
             if t not in ("openApp", "openURL") and execution_app and atspi_resolver:  # Mac modal gate: a blocking dialog in the plan's app pauses the plan instead of sending keys into it
-                _ms, _mt = await asyncio.to_thread(atspi_resolver.modal_title, execution_app)
+                _modal_owner = last_call.get('execution_contexts', {}).get(idx)
+                _ms, _mt = await asyncio.to_thread(atspi_resolver.modal_title, execution_app, expected_pid=_modal_owner['pid'] if _modal_owner else None)
                 log("modal check (action step): %s" % ("dialog present" if _mt is not None else ("none" if _ms == "ok" else "unavailable (not treated as 'no dialog')")))
                 if _ms != "ok":
                     _ev({"action": "modal_unavailable", "performed": False}); pause_rs['r'] = 'modalStateUnavailable'
@@ -1132,7 +1134,7 @@ def main():
                 else: await _nav.close()
             if resp.get("ok"):grounding.post_action()
             if resp.get("ok") and t == 'openApp':
-                destination_context = await _transition_ready(step.get('label'), tok0)
+                destination_context = await _transition_ready(step.get('label'), tok0, resp.get('launched_pids'))
                 if destination_context is None:
                     pause_rs['r'] = 'destinationUnavailable'; cur['paused'] = 'destinationUnavailable'
                     _ev({'action': 'transition_partial', 'performed': True})

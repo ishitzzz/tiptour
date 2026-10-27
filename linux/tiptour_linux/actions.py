@@ -126,7 +126,21 @@ def open_application(name):
     if not (name or "").strip(): raise _XFail("openApp has no app name")
     de = _desktop_entry(name)
     if de:
-        _run(["gtk-launch", de[0]], 15, "gtk-launch " + de[0]); return "launched %s via gtk-launch (launcher exited 0; window/foreground not verified)" % de[0]
+        from gi.repository import Gio, GLib
+        app = Gio.DesktopAppInfo.new_from_filename(de[1])
+        if app is None: raise _XFail("desktop application metadata unavailable")
+        pids = []
+        def launched(_app, pid, _data):
+            if isinstance(pid, int) and pid > 0: pids.append(pid)
+        _chk("desktop app launch")
+        try:
+            ok = app.launch_uris_as_manager_with_fds([], None, GLib.SpawnFlags.SEARCH_PATH,
+                None, None, launched, None, -1, -1, -1)
+        except Exception as e: raise _XFail("desktop launch failed: " + type(e).__name__)
+        _chk("desktop launch result")
+        if not ok: raise _XFail("desktop launch was not accepted")
+        return {"detail": "desktop launch accepted; destination PID/window not yet verified",
+                "launched_pids": sorted(set(pids))}
     exe = shutil.which(name.strip().lower().replace(" ", "-")) or shutil.which(name.strip())
     if not exe: raise _XFail("application %r not found (no desktop entry, not on PATH)" % name)
     _chk("launching " + exe)
@@ -134,7 +148,8 @@ def open_application(name):
     except OSError as e: raise _XFail("could not start %s: %s" % (exe, e))
     _sleep(0.5)
     if p.poll() is not None and p.returncode != 0: raise _XFail("%s exited immediately with rc=%s" % (exe, p.returncode))
-    return "started %s pid %s (still running after 0.5 s; window/foreground not verified)" % (exe, p.pid)
+    return {"detail": "started %s pid %s; destination window not yet verified" % (exe, p.pid),
+            "launched_pids": [p.pid]}
 def open_url(raw, preferred_app=None):
     url = normalize_url(raw)
     if not url or url in ("https://",): raise _XFail("openURL has no URL")
@@ -183,7 +198,7 @@ def _check_bound(app_hint, editable=False):
     if ws[1] != f["identity"]["pid"]: raise _XFail("native app PID does not match active X11 window; nothing sent")
     if old and (ws != old[0] or f["identity"] != old[1]): raise _XFail("focused window or element identity changed; nothing further sent")
     from . import atspi_resolver as ar
-    status, title = ar.modal_title(app_hint)
+    status, title = ar.modal_title(app_hint, expected_pid=ws[1])
     if status != "ok" or title is not None: raise _XFail("modal state unavailable or blocking dialog present; nothing sent")
     f2 = focus_info(app_hint, editable)
     if not f2.get("ok") or f2.get("identity") != f["identity"]: raise _XFail("native focus changed during modal check; nothing sent")
@@ -292,7 +307,7 @@ def _execute(step, px, app_hint):
         if t == "doubleClick": _x("click", "--repeat", "2", "1")
         else: _x("click", "3" if t == "rightClick" else "1")
         return {"ok": True, "status": "performed " + t, "at": list(px)}
-    if t == "openApp": return {"ok": True, "status": "performed openApp", "detail": open_application(label or app_hint)}
+    if t == "openApp": return dict(ok=True, status="performed openApp", **open_application(label or app_hint))
     if t == "openURL": return {"ok": True, "status": "performed openURL", "detail": open_url(label, app_hint)}
     if t == "keyboardShortcut":
         if not label.strip(): return {"ok": False, "error": "keyboardShortcut step has no label"}
