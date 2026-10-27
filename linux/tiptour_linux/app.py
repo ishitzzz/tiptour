@@ -54,9 +54,12 @@ def main():
     ap.add_argument("--readonly-harness", action="store_true", help="opt-in loopback read-only observe/skills/targets/screenshots; no action endpoints")
     ap.add_argument("--text-ui", action="store_true", help="opt-in GTK text command panel and Ctrl+K, same local proposal/Yes path")
     ap.add_argument('--radial-preview', action='store_true', help='opt-in Ctrl+Alt+Super visual preview only; no input-mode dispatch')
+    ap.add_argument('--radial-input', action='store_true', help='opt-in radial Speak toggles enabled voice; replaces Ctrl+Alt hotkey; Type unsupported without JEV')
     a = ap.parse_args()
     if a.radial_preview and (a.voice or a.highlight):
         ap.error('--radial-preview cannot run with --voice or --highlight: partial modifier chords can activate those monitors')
+    if a.radial_input and (not a.voice or a.highlight or a.radial_preview):
+        ap.error('--radial-input requires --voice, cannot combine with --highlight or --radial-preview; its monitor replaces Ctrl+Alt hotkey')
     os.makedirs(a.out, exist_ok=True)
     if a.text_ui and not a.serve: a.serve = os.path.join(a.out, "control.fifo")
     from .keypool import configured_keys
@@ -84,19 +87,22 @@ def main():
     from .overlay import ProposalPanel
     hl_post = {"fn": None}
     pprop = ProposalPanel(lambda k, rev: hl_post["fn"] and hl_post["fn"]("@%s %d" % (k, rev)))
-    text_ui = None; status_item = None; radial_preview = None
+    text_ui = None; status_item = None; radial_preview = None; radial_post = {"fn": None, "invalidate": None}
     if a.text_ui:
         from .text_panel import TextPanel
         text_ui = TextPanel(lambda t: hl_post["fn"] and hl_post["fn"](t))
         text_status["panel"] = text_ui
         from .status_item import StatusItem
         status_item = StatusItem(text_ui.open_from_menu, text_ui.stop_work, lambda: hl_post['fn'] and hl_post['fn']('@quit'))
-    if a.radial_preview:
+    if a.radial_preview or a.radial_input:
         from .radial import RadialPreview
         def radial_status(message):
             log(message)
             if text_ui: text_ui.activity.set_text(message)
-        radial_preview = RadialPreview(radial_status)
+        def radial_select(option, point):
+            if radial_post['fn']: radial_post['fn'](option, point)
+            else: radial_status('Radial input unavailable: runtime is not ready.')
+        radial_preview = RadialPreview(radial_status, radial_select if a.radial_input else None)
     def own_windows():
         menu_window = status_item.capture_window() if status_item else None
         return tuple(w for w in (overlay, panel, pprop, text_ui, menu_window, radial_preview) if w is not None)
@@ -233,6 +239,7 @@ def main():
         _sk = hl.get('skip_adv')  # a previous Skip's advance for THIS plan token is still pending (queued behind a turn/replay or resolving): a further Skip is the same press, not another step. Check BEFORE cancelling, else the old code cancelled that valid advance and then refused ("no current target"), stranding the plan.
         if cmd == 'skip' and _sk and _sk[0] is hl.get('task') and not _sk[0].done() and _sk[1] == plan_tok['n']:
             click_events.append({"control": "skip_redundant", "reason": "previous Skip advance still pending"}); log("control skip: redundant, the previous Skip's advance is still pending (kept, not doubled)"); return
+        if cmd == 'skip' and radial_post.get('invalidate'): radial_post['invalidate']()
         if cmd == 'skip' and hl.get('cancel_task'): hl['cancel_task']()  # cancel queued/in-flight Retry/Resume/advance before the Skip takes effect
         """Pause controls for a target whose click was seen but whose effect is unverified/unchanged. Not routed through the model."""
         if cmd in ("retry", "resume") and hl.get("replay"):  # Mac retryCurrentStep()/resume(): re-capture + rerun the full cascade for the active step (resume only while paused, like `guard pausedReason != nil`)
@@ -241,6 +248,7 @@ def main():
             _paused = cur.get("paused") or pause_rs["r"] or (bool(validators) and validators[-1].verdict == "unchanged_paused")
             if cmd == "resume" and not _paused:
                 click_events.append({"control": "resume_refused", "reason": "not paused"}); log("control resume refused: not paused"); return
+            if radial_post.get("invalidate"): radial_post["invalidate"]()
             click_events.append({"control": cmd, "mode": "replay_full_cascade", "label": cur.get("label")}); GLib.idle_add(lambda: panel.hide_panel() and False); cur["paused"] = None
             hl["replay"](cmd, plan_tok["n"]); return
         with glock:
@@ -422,8 +430,10 @@ def main():
         await asyncio.sleep(2.0 if stream_task else 0)
         serve_q = asyncio.Queue()
         cmd_ep = {}; cmd_gen = {}; edge = {"n": 0}; shutdown = {"requested": False}
+        radial_binding = {"epoch": 0, "worker": None}
         def _enq(t):
             if shutdown['requested']: return
+            if t != '@voice': radial_binding['epoch'] += 1
             if t == '@quit':
                 shutdown['requested'] = True; ing['shutdown'] = True
                 if ptt_monitor: ptt_monitor.stop()
@@ -514,7 +524,42 @@ def main():
                     try: mic.start()
                     except OSError: _abort_voice('microphone could not start', own[0]); return
                     log("voice: on")
-            ptt_monitor = _v.PttMonitor(lambda: loop.call_soon_threadsafe(_ptt)); ptt_monitor.start()
+            if not a.radial_input:
+                ptt_monitor = _v.PttMonitor(lambda: loop.call_soon_threadsafe(_ptt)); ptt_monitor.start()
+            else:
+                radial_post['invalidate'] = lambda: radial_binding.__setitem__('epoch', radial_binding['epoch'] + 1)
+                def _radial_select(option, point):
+                    if ing.get('shutdown'): return
+                    radial_binding['epoch'] += 1; epoch = radial_binding['epoch']
+                    def guarded_status(message):
+                        GLib.idle_add(lambda: (radial_status(message), False)[1] if not ing.get('shutdown') and radial_binding['epoch'] == epoch else False)
+                    if option == 'speak':
+                        # OFF never needs a target probe. ON refuses a different
+                        # hovered/focused app rather than silently changing target.
+                        if mic.active:
+                            if ing.get('ready'): _stop_work('radial-speak')
+                            _ptt(); guarded_status('Gemini voice stopped. Ctrl+Alt hotkey disabled in radial-input mode.'); return
+                        if ing.get('ready'): _stop_work('radial-speak')
+                        if radial_binding['worker'] and radial_binding['worker'].is_alive():
+                            guarded_status('Speak unavailable: target check still running.'); return
+                        from . import radial_target
+                        def current(): return not ing.get('shutdown') and radial_binding['epoch'] == epoch
+                        def status(message):
+                            GLib.idle_add(lambda: (radial_status(message), False)[1] if current() else False)
+                        def accept(target, deadline):
+                            if not current(): return
+                            if not target or time.monotonic() >= deadline:
+                                status('Speak refused: target unavailable or check expired. Focus the app under the cursor and try again. No voice started.'); return
+                            status('Gemini voice starting/listening. Radial Speak again stops it, including a pending start. Ctrl+Alt hotkey disabled.')
+                            _ptt()
+                        radial_binding['worker'] = radial_target.request(point, lambda target, deadline: loop.call_soon_threadsafe(accept, target, deadline), current)
+                    elif option == 'type':
+                        guarded_status('Type unavailable: pinned Mac text mode requires JEV. No provider was changed.')
+                    elif option == 'highlight':
+                        guarded_status('Highlight unavailable in this configuration: its monitor is disabled. Restart without radial input and enable --highlight to use it.')
+                    click_events.append({'gate': 'radial_dispatch', 'option': option})
+                radial_post['fn'] = lambda option, point: loop.call_soon_threadsafe(_radial_select, option, point)
+                log('radial input: Ctrl+Alt voice hotkey disabled; Speak toggles existing Gemini voice; Type unsupported without JEV; highlight monitor disabled')
         async def _asks():
             if not a.serve:
                 for t in a.ask: yield t
@@ -1106,6 +1151,7 @@ def main():
         def _shown(rv):  # runs on the loop when the panel has ACTUALLY been drawn: only input arriving after this point can answer the proposal
             if prop["rev"] == rv and prop["state"] == "pending": prop["shown"] = arr["n"]; prop["displayed"] = True; click_events.append({"gate": "proposal_displayed", "rev": rv, "arrival_epoch": arr["n"]}); log("confirmation: proposal rev %d displayed (arrival epoch %d)" % (rv, arr["n"]))
         def _stop_work(src):
+            if src != 'radial-speak': radial_binding['epoch'] += 1
             """Explicit STOP: clear a pending proposal, revoke an approved record and stop whatever plan is running/queued (cursor retired, no later step renders)."""
             _live0 = _goal_live(); _had = prop["state"]
             _prop_clear("stop (%s)" % src)

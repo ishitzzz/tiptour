@@ -59,7 +59,7 @@ class Monitor:
 
 class RadialPreview(Gtk.Window):
     W, H = 270, 220  # Mac content220x190 plus capsule/shadow overflow padding
-    def __init__(self, status):
+    def __init__(self, status, select=None):
         super().__init__(type=Gtk.WindowType.POPUP)
         self.set_wmclass('tiptour-radial', 'TipTourRadial')
         self.set_name('tiptour-radial'); self.set_title('TipTour radial preview')
@@ -69,7 +69,7 @@ class RadialPreview(Gtk.Window):
         visual = self.get_screen().get_rgba_visual()
         self.composited = bool(visual and self.get_screen().is_composited())
         if self.composited: self.set_visual(visual)
-        self.state = State(); self.status = status; self.closed = False; self.events = []
+        self.state = State(); self.status = status; self.select = select; self.closed = False; self.events = []
         self.connect('realize', lambda *_: self.shape())
         self.connect('draw', lambda _, c: (self.paint(c), False)[1])
         self.monitor = Monitor(self.post); self.monitor.start()
@@ -81,7 +81,7 @@ class RadialPreview(Gtk.Window):
         if kind == 'error':
             self.state.cancel(); self.hide(); self.status('Radial preview unavailable: X11 monitor failed. No mode was selected.'); return False
         if kind == 'begin':
-            self.status('Radial preview only. Close separate Ask/shortcut apps: partial modifier chords may activate them.')
+            self.status(('Radial input. Ctrl+Alt voice hotkey disabled in this mode. ' if self.select else 'Radial preview only. ') + 'Close separate Ask/shortcut apps: partial modifier chords may activate them.')
             self.state.begin(point)
             display = Gdk.Display.get_default(); area = display.get_monitor_at_point(*point).get_workarea()
             # Keep the true gesture center; refuse instead of silently shifting wedges.
@@ -92,7 +92,9 @@ class RadialPreview(Gtk.Window):
         elif kind == 'move': self.state.move(point)
         elif kind == 'end':
             selected = self.state.end(point); self.hide()
-            if selected: self.status('Radial preview: %s selected. Input-mode dispatch is not connected.' % selected.title())
+            if selected:
+                if self.select: self.select(selected, point)
+                else: self.status('Radial preview: %s selected. Input-mode dispatch is not connected.' % selected.title())
         self.queue_draw()
         if self.get_window(): self.shape()
         return False
@@ -109,7 +111,7 @@ class RadialPreview(Gtk.Window):
         c.arc(cx,cy,27,0,math.tau); c.set_source_rgba(0,0,0,.22 if self.composited else 1); c.fill_preserve();c.set_source_rgb(55/255,59/255,57/255);c.set_line_width(.7);c.stroke()
         c.rectangle(28,self.H-22,self.W-56,19);c.set_source_rgba(0,0,0,.8 if self.composited else 1);c.fill()
         c.select_font_face('Sans',cairo.FONT_SLANT_NORMAL,cairo.FONT_WEIGHT_NORMAL);c.set_font_size(10)
-        text='Preview only: no dispatch';ext=c.text_extents(text)
+        text='Speak toggles voice; Type unavailable' if self.select else 'Preview only: no dispatch';ext=c.text_extents(text)
         c.set_source_rgb(.68,.71,.70);c.move_to(cx-ext.x_advance/2,self.H-8);c.show_text(text)
         for label,dx,dy in [('speak',0,-76),('type',74,46),('highlight',-74,46)]:
             # Linux top-left uses the SwiftUI view's down-positive offsets.
