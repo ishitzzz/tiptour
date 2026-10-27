@@ -1,6 +1,10 @@
 # TipTour Linux port (experimental, X11 only, NOT a full port)
 Branch feature/linux-port, base upstream 6e97782. Python/GTK3. See PARITY.md for exactly what is verified and what is not. The R78 checkpoint adds bounded app-skill numeric character dispatch tested with an owned GTK fixture, not real Blender. A fresh four-step real-Gemini browser workflow also passes; this is not full-port acceptance. Pointing aims at the native field/widget, not necessarily its insertion caret. Selected UI tests still have two retained prior fixture failures.
 
+## R80 app-skill lifetime
+
+Default app skills load once on first use and are shared by plan key normalization, numeric-key delivery and read-only skill metadata. Restart TipTour to pick up later skill-file edits. Search roots and precedence are unchanged; explicit registry instances used by tools/tests remain independent. This aligns the pinned Mac process snapshot and does not turn skill files into user approval or change the local plan/Yes boundary. Controlled-provider tests use an owned GTK fixture, not actual Blender or physical input.
+
 ## R79 read-only HTTP metadata candidate
 
 With `--readonly-harness`, GET `/v1/capabilities` and GET `/v1/agent-contract` (also `/v1/agent_contract`) describe the implemented Linux read-only subset. The listener remains opt-in on 127.0.0.1:19474. Metadata passes the same existing Host/Origin checks and does not invoke the provider or read private runtime state. Loopback filtering is not caller authentication. No HTTP action, workflow submission, task or consent endpoint is added.
