@@ -59,3 +59,9 @@ for text in ["Do not click. Do not just describe the plan. Click Save.",
 print("negated answer-only phrase regressions ok")
 
 assert not n("Yes, submit_workflow_plan now with those exact four click steps so the app can show its review panel. Do not just describe the plan. I will confirm the app panel after it appears.")
+
+for text in ["Can you put these words in the document?", "Describe this picture then put that description in the document", "Explain the paragraph and save the explanation in my draft", "Can you search Wikipedia for binary search tree?"]:
+    assert not n(text), text
+for text in ["Can you just describe this picture?", "Describe this, do not click or type", "Only tell me what to put in the document", "Write this, but no action"]:
+    assert n(text), text
+print("mixed informational/action requests and explicit restrictions PASS")

@@ -1,5 +1,5 @@
 """X11 action driver (counterpart of Mac ActionExecutor, ported from git 6e97782 TipTour/Actions/ActionExecutor.swift + WorkflowRunner execute*Step).
-Gated by the caller: --act (default OFF = point-only), the user-confirmed plan, and the per-type intent words check. Every xdotool call is CHECKED (non-zero exit, timeout or missing binary = ok False, never "performed").
+Gated by the caller: --act (default OFF = point-only), the user-confirmed plan, and exact current-step approval. Every xdotool call is CHECKED (non-zero exit, timeout or missing binary = ok False, never "performed").
 EXPLICIT DIFFERENCES: X11 keys are focus-bound rather than per-PID posted, with a non-atomic final check/dispatch gap. Type/setValue use identity-bound native EditableText and exact text/caret readback. Type reconstructs plain selected-span text in one whole-value call, not Mac AXSelectedText; rich text/events/undo and stored highlight ranges are not parity-proven. Cmd maps to Ctrl, Option to Alt; Wayland is not covered."""
 import subprocess, re, os, shutil, time, glob, threading
 _TL = threading.local()  # per-execution cancel Event (set by the caller on STOP/supersede/cancel): checked before EVERY OS side effect
@@ -146,16 +146,16 @@ def open_url(raw, preferred_app=None):
     if url.lower().startswith(("http://", "https://")): _sleep(2.0)  # Mac: wait 2 s after an http(s) open
     return "opened %s" % url
 ACTION_TYPES = ("openApp", "openURL", "keyboardShortcut", "pressKey", "type", "setValue", "scroll")
-def execute(step, px, app_hint=None, plan_app=None, cancel=None, click_guard=None):
+def execute(step, px, app_hint=None, plan_app=None, cancel=None, click_guard=None, expected_window=None):
     """One step. Click types need px (pointer position from the resolver); the other types need no pointer. Returns the tool-response dict; ok True only when every OS call succeeded."""
-    _TL.ev = cancel; _TL.bound = None; _TL.click_guard = click_guard
+    _TL.expected_focus = step.get('_expected_focus') or step.get('_browser_find'); _TL.document_shortcut = step.get('type') == 'keyboardShortcut' and step.get('label','').lower() in ('ctrl+f','control+f','cmd+f','command+f'); _TL.ev = cancel; _TL.bound = None; _TL.click_guard = click_guard; _TL.expected_window = expected_window
     try: return _execute(step, px, app_hint if app_hint is not None else plan_app)
     except _XFail as e: return {"ok": False, "error": str(e)}
-    finally: _TL.ev = None; _TL.bound = None; _TL.click_guard = None
+    finally: _TL.ev = None; _TL.bound = None; _TL.click_guard = None; _TL.expected_window = None
 def focus_info(app_hint, editable=True):
     try:
         from . import atspi_resolver as ar
-        d = ar._sub(["--focus", app_hint or ""], 5); f = d.get("focus")
+        d = ar._sub(["--focus-document" if getattr(_TL,"document_shortcut",False) and not editable else "--focus", app_hint or ""], 5); f = d.get("focus")
     except Exception as e: return {"ok": False, "error": "focused element unavailable: " + type(e).__name__}
     if not f or not f.get("identity"): return {"ok": False, "error": "focused native element identity unavailable"}
     if f.get("password") or SECRET.search(f.get("name") or ""): return {"ok": False, "error": "secret/password field refused"}
@@ -167,7 +167,10 @@ def _window_state():
     r = subprocess.run(["xprop", "-id", w, "_NET_WM_PID"], capture_output=True, text=True, timeout=2)
     m = re.search(r"=\s*(\d+)", r.stdout)
     if r.returncode or not m: raise _XFail("active X11 window PID unavailable; nothing sent")
-    return w, int(m.group(1))
+    state = (w, int(m.group(1)))
+    expected = getattr(_TL, 'expected_window', None)
+    if expected is not None and state != expected: raise _XFail('approved destination window/PID changed; nothing sent')
+    return state
 
 def _check_bound(app_hint, editable=False):
     _chk("native identity check")
@@ -175,6 +178,7 @@ def _check_bound(app_hint, editable=False):
     if old and _window_state() != old[0]: raise _XFail("active X11 window/PID changed; nothing further sent")
     f = focus_info(app_hint, editable)
     if not f.get("ok"): raise _XFail(f["error"])
+    if getattr(_TL,"expected_focus",None) and f.get("identity") != _TL.expected_focus: raise _XFail("original approved native focus changed; nothing sent")
     ws = _window_state()  # recheck AFTER potentially slow native read
     if ws[1] != f["identity"]["pid"]: raise _XFail("native app PID does not match active X11 window; nothing sent")
     if old and (ws != old[0] or f["identity"] != old[1]): raise _XFail("focused window or element identity changed; nothing further sent")
@@ -189,6 +193,8 @@ def _check_bound(app_hint, editable=False):
     return f
 
 def _focus(app_hint):
+    if getattr(_TL, 'expected_window', None) is not None:
+        _window_state()  # Do not activate a different same-name destination after a slow read.
     ok, d = activate_target(app_hint)
     if not ok: raise _XFail(d)
     _TL.bound = None
@@ -203,6 +209,21 @@ def _native_text(step, app_hint):
         if str(ws[0]) != str(saved.get('xwindow')) or ws[1] != (saved.get('identity') or {}).get('pid'):
             raise _XFail('saved selection recipient no longer focused; nothing written')
     d = _focus(app_hint); f = _check_bound(app_hint, False)
+    if step.get('_browser_find'):
+        # App-owned binding exists only for the immediate approved Find-text suffix.
+        if (f.get('identity') != step['_browser_find'] or step.get('type') != 'type' or f.get('role') != 'entry' or f.get('name') != 'Find' or
+                not f.get('editable_state') or f.get('password') or f.get('document_rect') is not None):
+            raise _XFail('verified browser Find recipient unavailable; nothing sent')
+        before = f; text = step.get('value');sel = f.get('selection') or [f.get('caret'),f.get('caret')]
+        if not isinstance(text,str) or '\n' in text or '\r' in text or None in sel:raise _XFail('Find text/range unsupported')
+        expected = f['text'][:sel[0]] + text + f['text'][sel[1]:]
+        fresh = _check_bound(app_hint,False)
+        if any(fresh.get(k)!=before.get(k) for k in ('identity','text','selection','caret','element_rect','document_rect','name')):raise _XFail('Find recipient changed before typing')
+        _chk('bound Find typing');_x('type','--clearmodifiers','--delay','0','--',text)
+        after = _check_bound(app_hint,False)
+        if after.get('text')!=expected or after.get('caret')!=sel[0]+len(text) or after.get('selection'):
+            return {'ok':False,'possibly_applied':True,'retry_safe':False,'error':'Find typing dispatched but readback differs; do not retry'}
+        return {'ok':True,'status':'performed type','chars':len(text),'text_verified':True,'caret_verified':True,'delivery':'identity-bound native Find keystrokes + AT-SPI readback','detail':d}
     if not f.get("editable"):
         if f.get("editable_state") and not f.get("native_editable_iface"):
             from . import browser_text
@@ -248,7 +269,10 @@ def _execute(step, px, app_hint):
         tok = normalize_token(label)
         if tok in _MOD or tok == "cmd": return {"ok": False, "error": "pressKey needs a non-modifier key, got %r" % label}
         d = _focus(app_hint); ks = _keysym(tok)
-        _check_bound(app_hint); _x("key", "--clearmodifiers", ks); return {"ok": True, "status": "performed pressKey", "keys": ks, "detail": d}
+        _check_bound(app_hint)
+        if step.get('_navigation_guard') and not step['_navigation_guard']():raise _XFail('original approved GET form changed; nothing sent')
+        if step.get('_navigation_guard'):_check_bound(app_hint)
+        _chk('navigation dispatch'); _x("key", "--clearmodifiers", ks); return {"ok": True, "status": "performed pressKey", "keys": ks, "detail": d}
     if t in ("type", "setValue"): return _native_text(step, app_hint)
     if t == "scroll":
         direction = step.get("direction") or label or "down"; amount = step.get("amount") if isinstance(step.get("amount"), int) else 3; gran = step.get("by") or "line"

@@ -181,7 +181,7 @@ def outside_window(utterance, ctx, point):
 _NOACT_NEG = _re.compile(r"\b(do not|don't|dont|never|no need to|without)\b[^.?!]{0,25}\b(point|click|act|move|touch|press|type|do anything|take (any )?action)\b|\bno action\b")
 _NOACT_ONLY = _re.compile(r"\b(just|only) (tell|answer|say|read|quote|describe)\b")
 _NEGATED_ONLY = _re.compile(r"\b(do not|don't|dont|never)\s+$")
-_ACT_VERB = _re.compile(r"\b(point|show me|where|click|press|tap|open|go to|take me|find|locate|type|change|rewrite|fix|edit|delete|move|scroll|drag|fill|submit|send|copy|paste|highlight where)\b")
+_ACT_VERB = _re.compile(r"\b(point|show me|where|click|press|tap|open|go to|take me|find|locate|type|change|rewrite|fix|edit|delete|move|scroll|drag|fill|submit|send|copy|paste|put|insert|write|save|record|highlight where)\b")
 
 _Q_TEXT = _re.compile(r"\b(text|words?|says?|written|quote|read|selected|describe|explain|summari[sz]e)\b")
 

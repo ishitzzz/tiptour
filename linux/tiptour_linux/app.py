@@ -580,6 +580,7 @@ def main():
         stream_task = asyncio.create_task(stream_frames()) if os.environ.get('TIPTOUR_STREAM', '1') == '1' else None
         await asyncio.sleep(2.0 if stream_task else 0)
         serve_q = asyncio.Queue()
+        typed_reply = {"active": False, "rev": None, "hash": None, "boundary": None, "generation": None}
         cmd_ep = {}; cmd_gen = {}; edge = {"n": 0}; shutdown = {"requested": False}
         radial_binding = {"epoch": 0, "worker": None, "context_worker": None, "pending": False}
         hover = {"context": None, "owner": None, "defer_mic": False, "epoch": None, "future": None}
@@ -692,8 +693,12 @@ def main():
             if hl.get("readonly_worker"): hl["readonly_worker"].cancel_current()
             if ing.get("ready") and not t.startswith("@") and _norm_resp(t) in _STOP:  # typed/UI STOP at INGRESS: stops at receipt, ahead of any queued/long voice turn; not enqueued (a late consumer must not stop NEWER work)
                 _stop_work("typed-ingress"); click_events.append({"gate": "typed_stop_at_ingress"}); return
+            if ing.get('ready') and not t.startswith('@') and _norm_resp(t) not in (_YES | _NO | _STOP):
+                request_boundary['n'] += 1  # revoke old voice candidate at meaningful typed ingress, before dequeue
             if ing.get("ready") and not t.startswith("@") and prop["state"] == "approved" and bool(_norm_resp(t)) and _norm_resp(t) not in (_YES | _NO | _STOP):
                 _revoke_approved("new typed request at ingress")
+            if t in ("@voice", "@voice-next"):
+                voice_command_boundaries[arr["n"] + 1] = request_boundary["n"]
             if t == "@voice":
                 pending_shared_context.update(token=None, owner=None)
                 retire_voice_context_writers()
@@ -717,6 +722,31 @@ def main():
                     if pending_shared_context['token'] == token and pending_shared_context['owner'] == context_owner: pending_shared_context.update(token=None, owner=None)
                 task.add_done_callback(completed)
                 return
+            # A typed confirmation can retire ONLY its already-rendered typed proposal reply.
+            # No spoken partial/finality path changes; no provider event can mutate the retired record.
+            _answer = _norm_resp(t) if not t.startswith('@') else None
+            _control = t.split() if t.startswith(('@confirm ', '@confirmseparate ')) else []
+            _rv = int(_control[1]) if len(_control) == 2 and _control[1].isdigit() else None
+            if (ing.get('ready') and typed_reply['active'] and prop['state'] == 'pending' and
+                    prop.get('displayed') and arr['n'] >= prop.get('shown', 10**12) and
+                    typed_reply['rev'] == prop['rev'] and typed_reply['hash'] == prop['hash'] and
+                    typed_reply['boundary'] == request_boundary['n'] == prop.get('boundary') and
+                    typed_reply['generation'] == gen[0] and
+                    (_answer in _YES or _rv == prop['rev'])):
+                if _answer in _YES:
+                    t = ('@confirmseparate ' if _answer in _SEPARATE_YES else '@confirm ') + str(prop['rev'])
+                from .confirmation_watch import Watch
+                try:
+                    _watch = Watch(loop, typed_reply.get('native_owner') or {})
+                except Exception:
+                    _prop_clear('confirmation ownership watch unavailable'); return
+                prop['confirmation_watch'] = _watch
+                typed_reply['active'] = False
+                gen[0] += 1; tainted[0] = True  # invalidate delivery BEFORE releasing the turn owner
+                player and player.flush()
+                q.put_nowait(('typed_proposal_reply_retired', {'turn':prop['turn'],'rev':prop['rev'],'hash':prop['hash'],'native_owner':typed_reply.get('native_owner')}))
+                click_events.append({'gate':'typed_proposal_reply_retired','rev':prop['rev'],'hash':prop['hash'],'at':time.time()})
+                log('confirmation: typed answer retired proposal reply rev %d' % prop['rev'])
             arr["n"] += 1; serve_q.put_nowait((arr["n"], t))  # every serve input gets an ARRIVAL number when it enters the queue (on the loop): approval binds to arrival AFTER the proposal display, never to dequeue order
         hl_post["fn"] = lambda t: loop.call_soon_threadsafe(_enq, t)  # the Confirm/Cancel buttons enter as @confirm/@cancel <rev>: the SAME revision-bound path as the serve control
         if a.serve:
@@ -870,8 +900,54 @@ def main():
         def _gens(own): return {"own_pin": own["pin"], "own_perc": own["perc"], "applied_pin": _pin_seq["applied"], "applied_perc": _perc_seq["applied"]} if own else None  # LABELS ONLY: a newer global generation does not refuse; this resolve reads ITS OWN snapshot and the real screen-stale guard decides
         def _local_resolve_owned(lab, own): return _local_resolve(lab, own["cache"] if own else None)
         _range_consumed = set()  # (approved revision, canonical saved-range): native pending range is consumed ONCE per plan
-        async def _run_action_step(step, args, text, idx, _steps, own=None):
-            """Mac WorkflowRunner executeOpenApplicationStep/executeOpenURLStep/executeKeyboardShortcutStep/executePressKeyStep/executeTypeTextStep/executeSetValueStep/executeScrollStep: NO pointing. Without --act the Mac pauses (actionRequiresAutopilot); here the step is NOT performed and the plan stops there. With --act it runs only when the user's words ask for that kind of action; success advances to the next step, failure stops the plan at this step (Mac currentStepResolutionFailureLabel)."""
+        async def _transition_ready(name, token, timeout=8):
+            from .app_transition import context_matches
+            end = time.monotonic() + timeout
+            while time.monotonic() < end:
+                if token != plan_tok['n'] or prop.get('state') != 'approved': return None
+                try:
+                    context = await asyncio.to_thread(atspi_resolver.active_context, 1)
+                    if token != plan_tok['n'] or prop.get('state') != 'approved': return None
+                    if context_matches(context, name): return context
+                except Exception: pass
+                await asyncio.sleep(.1)
+            return None
+        async def _execution_app(args, idx, own):
+            from .app_transition import destination, context_matches, same_window
+            transition, name = destination(args, idx)
+            if transition is None: return args.get('app')
+            proof = last_call.get('transition_proofs', {}).get(transition)
+            token = plan_tok['n']
+            if not proof or not atspi_resolver: raise RuntimeError('approved app transition has no verified destination')
+            context = await asyncio.to_thread(atspi_resolver.active_context, 2)
+            if token != plan_tok['n'] or not _approved_step(args, idx, args['steps'][idx]):
+                raise RuntimeError('app transition ownership revoked')
+            if not context_matches(context, name, own['pair'][0] if own else None) or not same_window(proof, context):
+                raise RuntimeError('destination window changed or does not match approved app')
+            last_call.setdefault('execution_contexts', {})[idx] = context
+            return context['app']
+        async def _pointer_arrival(point, label, token):
+            """Visual arrival is an execution barrier, never a new authorization."""
+            ready = loop.create_future()
+            def drawn():
+                if not ready.done():ready.set_result(True)
+            def start():
+                if token == plan_tok['n']:
+                    overlay.point_to(point[0], point[1], label, on_arrived=lambda:loop.call_soon_threadsafe(drawn))
+                return False
+            GLib.idle_add(start)
+            end=time.monotonic()+6
+            try:
+                while not ready.done():
+                    if token != plan_tok['n'] or time.monotonic()>end: return False
+                    await asyncio.sleep(.02)
+                if token != plan_tok['n']:return False
+                click_events.append({'pointer':'arrived_drawn','point':point,'at':time.time(),'token':token})
+                return True
+            finally:
+                if not ready.done():ready.cancel()
+        async def _run_action_step(step, args, text, idx, _steps, own=None, execution_app=None):
+            """Mac WorkflowRunner executeOpenApplicationStep/executeOpenURLStep/executeKeyboardShortcutStep/executePressKeyStep/executeTypeTextStep/executeSetValueStep/executeScrollStep: NO pointing. Without --act the Mac pauses (actionRequiresAutopilot); here the step is NOT performed and the plan stops there. With --act it runs only as the exact current step of the displayed, user-approved plan; success advances to the next step, failure stops the plan at this step (Mac currentStepResolutionFailureLabel)."""
             from . import actions as _act
             t = step.get("type"); tool_seen = {"label": step.get("label"), "source": "ACTION_STEP", "step_type": t}
             _ev = lambda d: click_events.append(dict(d, step_type=t, step_index=idx))
@@ -879,15 +955,15 @@ def main():
                 pause_rs['r'] = 'actionRequiresAutopilot'; cur['paused'] = 'actionRequiresAutopilot'
                 _ev({"action": "requires_act", "performed": False}); log("action step %s NOT performed: action mode (--act) is OFF; the plan stops here (Mac: pause actionRequiresAutopilot)" % t)
                 return {"ok": False, "status": "action_requires_act", "note": "This step is an action (%s). Action mode is OFF, so nothing was done. Tell the user it was not performed." % t}, tool_seen
-            if not __import__("tiptour_linux.highlight", fromlist=["x"]).action_type_matches_intent(t, text):
-                _ev({"action": "not_requested", "performed": False}); log("action step %s NOT performed: the user's words do not ask for it" % t)
-                return {"ok": False, "status": "action_not_requested", "note": "The user's words do not ask for this kind of action, so nothing was done."}, tool_seen
+            if not _approved_step(args, idx, step):
+                _ev({"action": "not_approved", "performed": False}); log("action step %s NOT performed: the current exact step is not approved" % t)
+                return {"ok": False, "status": "action_not_approved", "note": "This exact current step has no valid app-owned approval, so nothing was done."}, tool_seen
             tc = step.get("targetContext")
             if (tc in ("currentSelection", "currentHighlight") and not step.get("_native_range")) or (tc == "focusedElement" and t not in ("type", "setValue")):
                 _ev({"action": "refused_target_context", "performed": False}); log("action step %s NOT performed: targetContext %s is not implemented for this step type on Linux (no native selection binding); nothing sent" % (t, tc))
                 return {"ok": False, "status": "action_target_context_unsupported", "note": "targetContext %s is not supported for this action on Linux; nothing was done." % tc}, tool_seen
-            if t not in ("openApp", "openURL") and args.get("app") and atspi_resolver:  # Mac modal gate: a blocking dialog in the plan's app pauses the plan instead of sending keys into it
-                _ms, _mt = await asyncio.to_thread(atspi_resolver.modal_title, args.get("app"))
+            if t not in ("openApp", "openURL") and execution_app and atspi_resolver:  # Mac modal gate: a blocking dialog in the plan's app pauses the plan instead of sending keys into it
+                _ms, _mt = await asyncio.to_thread(atspi_resolver.modal_title, execution_app)
                 log("modal check (action step): %s" % ("dialog present" if _mt is not None else ("none" if _ms == "ok" else "unavailable (not treated as 'no dialog')")))
                 if _ms != "ok":
                     _ev({"action": "modal_unavailable", "performed": False}); pause_rs['r'] = 'modalStateUnavailable'
@@ -905,10 +981,93 @@ def main():
             _exec_step = dict(step)
             _range_key = (last_call.get("rev"), json.dumps(step.get("_native_range"), sort_keys=True)) if step.get("_native_range") else None
             if _range_key in _range_consumed: _exec_step.pop("_native_range", None)
+            if not _approved_step(args, idx, step):
+                return {"ok": False, "status": "action_not_approved", "note": "Approval changed while checking the target; nothing sent."}, tool_seen
             tok0 = plan_tok["n"]; _cev = threading.Event()
-            try: resp = await asyncio.to_thread(_act.execute, _exec_step, None, args.get("app"), None, _cev)
+            _destination = last_call.get('execution_contexts', {}).get(idx)
+            _expected = (str(_destination['x11_client_id']), _destination['pid']) if _destination else None
+            _nav = None
+            _nav_existing = last_call.get('navigation_observer')
+            if _nav_existing:
+                _browser_ui = t == 'type' and idx > 0 and _steps[idx-1].get('type') == 'keyboardShortcut' and _steps[idx-1].get('label','').lower() in ('ctrl+f','control+f','cmd+f','command+f')
+                _find_enter = t == 'pressKey' and step.get('label','').lower() in ('enter','return') and bool(last_call.get('browser_find_recipient'))
+                if not await _nav_existing.check(browser_ui=_browser_ui or _find_enter) or not _approved_step(args, idx, step):
+                    _ev({'action':'navigation_owner_refused','performed':False})
+                    return {'ok':False,'status':'navigation_partial','error':'Owned browser tab/document changed; no action sent.'}, tool_seen
+                _expected = _nav_existing.owner
+                if t == 'keyboardShortcut' and step.get('label','').lower() in ('ctrl+f','control+f','cmd+f','command+f'): _nav_existing.allow_find_blur = True
+                if _find_enter: _exec_step['_expected_focus'] = last_call['browser_find_recipient']
+                if _browser_ui:
+                    _find = last_call.get('browser_find_recipient')
+                    if not _find: return {'ok':False,'status':'find_partial','error':'Find field was not bound after approved shortcut.'}, tool_seen
+                    _exec_step['_browser_find'] = _find
+            if t == 'pressKey' and step.get('label','').lower() in ('enter','return') and not last_call.get('browser_find_recipient'):
+                from .navigation import prepare
+                try: _nav = await prepare()
+                except Exception: _nav = None
+                if _nav:
+                    _navigation_observers.append(_nav)
+                    _expected = _nav.owner
+                    _return_focus = await asyncio.to_thread(_act.focus_info, execution_app, False)
+                    if not _return_focus.get('ok'):
+                        await _nav.close(); return {'ok':False,'status':'navigation_partial','error':'Original Enter recipient unavailable.'}, tool_seen
+                    _exec_step['_expected_focus'] = _return_focus['identity']
+                    async def _pre_dispatch(_observer=_nav):
+                        try:return bool(tok0 == plan_tok['n'] and _approved_step(args,idx,step) and await _observer.preflight())
+                        except Exception:return False
+                    def _form_guard():
+                        try:return asyncio.run_coroutine_threadsafe(_pre_dispatch(),loop).result(timeout=4)
+                        except Exception:return False
+                    _exec_step['_navigation_guard'] = _form_guard
+                if not _approved_step(args, idx, step):
+                    if _nav: await _nav.close()
+                    return {'ok':False,'status':'not_approved'}, tool_seen
+            if t in ('type','setValue'):
+                _field = await asyncio.to_thread(_act.focus_info, execution_app, False)
+                _rect = _field.get('element_rect') if _field.get('ok') else None
+                if not _rect or _field.get('password'):
+                    return {'ok':False,'status':'pointer_recipient_unavailable','error':'Verified field geometry unavailable; no text sent.'}, tool_seen
+                _exec_step['_expected_focus'] = _field['identity']
+                _point = (_rect[0]+_rect[2]/2, _rect[1]+_rect[3]/2)
+                if not await _pointer_arrival(_point, step.get('label') or 'Text field', tok0):
+                    return {'ok':False,'status':'pointer_arrival_revoked'}, tool_seen
+                _fresh = await asyncio.to_thread(_act.focus_info, execution_app, False)
+                if (tok0 != plan_tok['n'] or not _approved_step(args,idx,step) or ident()!=_action_ident or
+                        not _fresh.get('ok') or _fresh.get('identity')!=_field['identity'] or _fresh.get('element_rect')!=_rect):
+                    return {'ok':False,'status':'pointer_recipient_changed','error':'Field changed while pointer moved; no text sent.'}, tool_seen
+            try: resp = await asyncio.to_thread(_act.execute, _exec_step, None, execution_app, None, _cev, None, _expected)
             except BaseException: _cev.set(); log("action step %s cancelled (stop/supersede): worker told to stop before its next OS call" % t); raise  # STOP/supersede cancels the await; the worker checks this event before EVERY OS side effect
             log("action executed (%s), ok=%s" % (t, resp.get("ok"))); dlog("action", json.dumps(resp)); _ev({"action": "performed" if resp.get("ok") else "failed", "performed": bool(resp.get("ok")), "detail": resp.get("detail") or resp.get("error")})
+            if resp.get('ok') and _nav_existing and t == 'keyboardShortcut' and step.get('label','').lower() in ('ctrl+f','control+f','cmd+f','command+f'):
+                _find = await asyncio.to_thread(_act.focus_info, execution_app, False)
+                if (tok0 != plan_tok['n'] or not _approved_step(args, idx, step) or not await _nav_existing.check(browser_ui=True) or
+                        not _find.get('ok') or _find.get('name') != 'Find' or _find.get('role') != 'entry' or
+                        not _find.get('editable_state') or _find.get('password') or _find.get('document_rect') is not None):
+                    return {'ok':False,'status':'find_partial','error':'Find shortcut performed but exact field not verified.'}, tool_seen
+                last_call['browser_find_recipient'] = _find['identity']
+            if _nav:
+                if resp.get('ok'):
+                    try:
+                        _proof = await _nav.settle(lambda: tok0 == plan_tok['n'] and _approved_step(args, idx, step))
+                        last_call['navigation_observer'] = _nav
+                        _ev({'action':'navigation_verified','proof':_proof})
+                    except Exception as exc:
+                        await _nav.close()
+                        _ev({'action':'navigation_partial','performed':True,'error':str(exc)})
+                        log('Approved Enter performed, navigation not verified: PARTIAL, not complete; ' + str(exc))
+                        return {'ok':False,'status':'navigation_partial','error':str(exc)}, tool_seen
+                else: await _nav.close()
+            if resp.get("ok") and t == 'openApp':
+                destination_context = await _transition_ready(step.get('label'), tok0)
+                if destination_context is None:
+                    pause_rs['r'] = 'destinationUnavailable'; cur['paused'] = 'destinationUnavailable'
+                    _ev({'action': 'transition_partial', 'performed': True})
+                    log('App launch requested, but destination not verified; original task is PARTIAL, not complete')
+                    return {'ok': False, 'status': 'transition_partial', 'error': 'Destination not verified; no following action sent.'}, tool_seen
+                if plan_tok['n'] != tok0 or not _approved_step(args, idx, step):
+                    return {'ok': False, 'status': 'transition_revoked'}, tool_seen
+                last_call.setdefault('transition_proofs', {})[idx] = destination_context
+                _ev({'action': 'transition_verified', 'app': destination_context['app'], 'pid': destination_context['pid'], 'x11_client_id': destination_context['x11_client_id']})
             if resp.get("ok") and plan_tok["n"] == tok0:
                 if _range_key: _range_consumed.add(_range_key)
                 last_call["idx"] = idx
@@ -979,13 +1138,27 @@ def main():
                 if last_call: last_call["idx"] = idx
             if idx >= len(_steps):  # nothing left after the skipped step(s): the plan is complete, no pointer is placed
                 with glock:
-                    plan_tok["n"] += 1; clicks.disarm(); ov['hidden'] = True; ov['covered'] = False; GLib.idle_add(overlay.retire); cur['armed'] = False; cur['paused'] = None; pause_rs['r'] = None; last_call.clear(); PREV_STEP_POINT['p'] = None
+                    plan_tok["n"] += 1; clicks.disarm(); ov['hidden'] = True; ov['covered'] = False; GLib.idle_add(overlay.retire); cur['armed'] = False; cur['paused'] = None; pause_rs['r'] = None; _clear_last(); PREV_STEP_POINT['p'] = None
                 click_events.append({"wait_for_state": "skipped", "plan_complete": True})
                 return {"ok": True, "status": "wait_for_state_skipped", "note": "waitForState is not implemented (skipped, as on the Mac); no pointer was placed"}, None
             step = _steps[idx]
-            if (step.get("type") or "click") in __import__("tiptour_linux.actions", fromlist=["x"]).ACTION_TYPES: return await _run_action_step(step, args, text, idx, _steps, own)
-            pt = step.get("point_2d")
-            if not pt and step.get("box_2d"):
+            if not _approved_step(args, idx, step):
+                click_events.append({"gate": "step_approval_refused", "step_index": idx})
+                return {"ok": False, "status": "not_executed", "error": "Exact current plan step is no longer approved"}, {"source": "REFUSED"}
+            _owned_navigation = last_call.get('navigation_observer')
+            if _owned_navigation and (step.get('type') or 'click') not in __import__('tiptour_linux.actions',fromlist=['x']).ACTION_TYPES:
+                if not await _owned_navigation.check() or not _approved_step(args,idx,step):
+                    return {'ok':False,'status':'navigation_partial','error':'Owned browser document changed; no target resolved.'}, {'source':'REFUSED'}
+            try: execution_app = await _execution_app(args, idx, own)
+            except Exception as exc:
+                pause_rs['r'] = 'destinationUnavailable'; cur['paused'] = 'destinationUnavailable'
+                click_events.append({'gate': 'destination_context_refused', 'step_index': idx, 'error': str(exc)})
+                return {'ok': False, 'status': 'transition_partial', 'error': str(exc)}, {'source': 'REFUSED'}
+            if (step.get("type") or "click") in __import__("tiptour_linux.actions", fromlist=["x"]).ACTION_TYPES: return await _run_action_step(step, args, text, idx, _steps, own, execution_app)
+            from .app_transition import destination
+            _destination_step = destination(args, idx)[0] is not None
+            pt = None if _destination_step else step.get("point_2d")
+            if not _destination_step and not pt and step.get("box_2d"):
                 y1, x1, y2, x2 = step["box_2d"]; pt = [(y1 + y2) // 2, (x1 + x2) // 2]
             nohint = False
             if not pt and (step.get("label") or "").strip(): pt = [500, 500]; nohint = True  # Mac resolves a step WITHOUT a spatial hint label-only (AX -> CDP -> local cache tier 3); the placeholder point is never used: unresolved + nohint = refuse
@@ -1010,13 +1183,13 @@ def main():
                         if _fr > float(os.environ.get("TIPTOUR_STALE_FRAME_MAX", "0.03")) or _tf > float(os.environ.get("TIPTOUR_STALE_TARGET_MAX", "0.06")): refuse = "the screen content changed since the screenshot this answer was based on (frame %.0f%%, around target %.0f%%); ask again" % (_fr * 100, _tf * 100); done = True
                     except Exception as _e: log("stale-frame check unavailable: %s" % type(_e).__name__)
                 # Mac modal gate (WorkflowRunner :586): if the plan's target app currently shows a blocking dialog, pause instead of resolving (pause reason modalDialogPresented, text "dialog appeared: <title>")
-                if not done and not refuse and args.get("app") and atspi_resolver:
-                    _ms, _mt = await read(atspi_resolver.modal_title, args.get("app"))
+                if not done and not refuse and execution_app and atspi_resolver:
+                    _ms, _mt = await read(atspi_resolver.modal_title, execution_app)
                     log("modal check: %s" % ("dialog present" if _mt is not None else ("none" if _ms == "ok" else "unavailable (not treated as 'no dialog')")))
                     if _ms != "ok": refuse = "modal state unavailable; not pointing or clicking"; done = True; pause_rs['r'] = 'modalStateUnavailable'
                     if _mt is not None: refuse = "dialog appeared" + (": " + _mt if _mt else "") + " (paused; deal with it, then ask again)"; done = True; click_events.append({"pause": "modalDialogPresented", "title": _mt}); pause_rs['r'] = 'modalDialogPresented'
                 if not done and not refuse and atspi_resolver:
-                    _cs,_cm=await read(atspi_resolver.coordinate_status,args.get("app") or now_id[1])
+                    _cs,_cm=await read(atspi_resolver.coordinate_status,execution_app or now_id[1])
                     dlog("native coordinate mapping",json.dumps({"status":_cs,"mapping":_cm}))
                     if _cs!="ok":refuse="unsupported or unavailable native/X11 coordinate mapping; no pointer or click";done=True
                 # Mac ElementResolver.exactLocalTargetResolution (:95): an explicit target_id / target_mark in the plan step binds to the cache entry first
@@ -1033,11 +1206,11 @@ def main():
                 if atspi_resolver and os.environ.get("TIPTOUR_USE_ATSPI", "1") == "1":
                     try:
                         poll_until = time.monotonic() + 0.9
-                        hits = await read(atspi_resolver.resolve, lab, args.get("app") or now_id[1], **({"timeout": 0.9} if nohint else {}))
+                        hits = await read(atspi_resolver.resolve, lab, execution_app or now_id[1], **({"timeout": 0.9} if nohint else {}))
                         if nohint and not hits:
                             while not hits and time.monotonic() < poll_until:
                                 await asyncio.sleep(min(0.08, max(0, poll_until - time.monotonic())))
-                                hits = await read(atspi_resolver.resolve, lab, args.get("app") or now_id[1], timeout=max(0.01, poll_until-time.monotonic()))
+                                hits = await read(atspi_resolver.resolve, lab, execution_app or now_id[1], timeout=max(0.01, poll_until-time.monotonic()))
                         # off the event loop: a hung AT-SPI read (child killed at its own timeout) must not delay Skip/new-ask handling; the plan_tok check after the await discards a stale result
                         dist = []
                         for t in hits:
@@ -1078,7 +1251,11 @@ def main():
                 if nohint and not refuse and src == "model_box": refuse = "could not resolve \"%s\": no matching control and no spatial hint (Mac: resolve returns nothing); not pointing" % lab
                 if not refuse and not (0 <= px[0] < _size[0] and 0 <= px[1] < _size[1]): refuse = "the model's coordinate (%d,%d) is outside the %dx%d screen; not pointing" % (px[0], px[1], size[0], size[1])
                 with highlight_owner.lock:
-                    _committed, _context_epoch = highlight_owner.context, highlight_owner.epoch
+                    _request_scope = (prop.get('request') or {})
+                    _committed = _request_scope.get('context')
+                    _context_epoch = highlight_owner.epoch
+                    if _committed and id(highlight_owner.context) != _request_scope.get('context_identity'):
+                        refuse = 'original request highlight context retired; not pointing' 
                 if not refuse and src == "model_box" and _committed and any(w in lab.lower() for w in ("highlight", "this", "area", "region")):
                     try:
                         from . import cdp_resolver as _c
@@ -1098,7 +1275,7 @@ def main():
                 if not refuse and _committed and _hlm.outside_window(text, _committed, px):
                     refuse = "the request refers to the highlighted region in window %r, but the resolved target is outside that window; not pointing" % ((_committed.get("window") or {}).get("title", "")[:50],)
                 with highlight_owner.lock:
-                    if highlight_owner.epoch != _context_epoch:
+                    if _committed and highlight_owner.epoch != _context_epoch:
                         refuse = 'highlight context changed during resolution; not pointing'
                 unconf = (not refuse) and src == "model_box"
                 if defer_missing:
@@ -1134,7 +1311,7 @@ def main():
                         _ok = clicks.arm(px if arm_rect is None else (arm_rect[0] + arm_rect[2] / 2, arm_rect[1] + arm_rect[3] / 2), arm_rect, _clicked)
                         _cd_status = clicks.backend if _ok else "UNAVAILABLE"
                         if _ok:  # while the target is still pending/paused: hide the pointer when a window covers it or another app takes focus (misleading guidance), show it again when restored
-                            def _guard(_tok=_tok, _pt=(px if arm_rect is None else (arm_rect[0] + arm_rect[2] / 2, arm_rect[1] + arm_rect[3] / 2)), _pin=clicks._pin, _lab=step.get("label"), _rect=arm_rect, _app=arm_app, _plan_app=args.get("app")):
+                            def _guard(_tok=_tok, _pt=(px if arm_rect is None else (arm_rect[0] + arm_rect[2] / 2, arm_rect[1] + arm_rect[3] / 2)), _pin=clicks._pin, _lab=step.get("label"), _rect=arm_rect, _app=arm_app, _plan_app=execution_app):
                                 last = "ok"; _matcher = PlanTargetMatcher(_plan_app, step.get("type"), step.get("label"), (clicks.app_identity_of_window(_pin[0])[1] if _pin else None))
                                 def _live(): return _tok == plan_tok["n"] and not ov['hidden']  # hidden = terminal (dismissed/refused/skipped/paused); covered is separate and reversible
                                 def _show():
@@ -1189,7 +1366,7 @@ def main():
                         refuse = "superseded by a skip, cancel or newer request while resolving"  # no disarm here: the superseding transition already disarmed, and this must never disarm a NEWER plan's detector
                     ov['hidden'] = bool(refuse); ov['covered'] = False; GLib.idle_add(lambda: panel.hide_panel() and False)
                     if refuse: GLib.idle_add(overlay.retire)  # a refusal must not leave the previous answer's cursor on screen
-                    if not refuse: PREV_STEP_POINT['p'] = (px[0], px[1]); stream_state['suppressed'] = True; log('render cursor at', px, 'src', src); GLib.idle_add(overlay.point_to, px[0], px[1], ("? " if unconf else "") + step.get("label", ""))
+                    if not refuse: PREV_STEP_POINT['p'] = (px[0], px[1]); stream_state['suppressed'] = True; log('render cursor at', px, 'src', src); (None if a.act and step.get('type','click') in ('click','rightClick','doubleClick') else GLib.idle_add(overlay.point_to, px[0], px[1], ("? " if unconf else "") + step.get("label", "")))
                     if not refuse and (step.get("type") or "click") == "observe":  # Mac WorkflowRunner.swift:913-921: .observe = ClickDetector.disarm(), point, then after 650ms advance (never waits for a click) if the operation token is unchanged
                         clicks.disarm(); _otok = plan_tok["n"]; _ot = asyncio.ensure_future(_observe_advance(_otok)); hl["obs_task"] = _ot; click_events.append({"observe": "pointed_no_arm", "auto_advance_ms": 650})
                 if ambiguous and src == "model_box": src = "model_box(UNCONFIRMED:%d DOM candidates)" % ambiguous
@@ -1197,9 +1374,9 @@ def main():
                 if _cd_status: tool_seen["click_detector"] = _cd_status
                 if refuse: tool_seen["source"] = "REFUSED"; tool_seen["refused"] = refuse; log("refused to point (reason in debug log only)"); dlog("refused to point:", refuse)
                 if refuse: resp = {"ok": False, "status": "not_pointed", "error": refuse}
-                elif a.act and (step.get("type") or "click") in ("click", "doubleClick", "rightClick") and not _hlg.action_matches_intent(step.get("type") or "click", text):
-                    log("action NOT executed: the user's words do not ask for a %s" % (step.get("type") or "click"))
-                    resp = {"ok": False, "status": "not_executed", "error": "The user's request does not ask for this action; the cursor was only pointed. Tell the user where it is and let them act."}
+                elif a.act and (step.get("type") or "click") in ("click", "doubleClick", "rightClick") and not _approved_step(args, idx, step):
+                    log("action NOT executed: no exact approved step for %s" % (step.get("type") or "click"))
+                    resp = {"ok": False, "status": "not_executed", "error": "The exact current step is not approved; no action was sent."}
                 elif a.act and (step.get("type") or "click") in ("click", "doubleClick", "rightClick"):
                     from . import actions
                     # Mac WorkflowRunner130 starts a 0.28s autopilot delay after arming.
@@ -1219,6 +1396,8 @@ def main():
                     # Keep the loop responsive while the pointer lands. STOP/supersede must win before dispatch.
                     _click_cancel = threading.Event()
                     try:
+                        if not await _pointer_arrival(px, step.get('label') or 'Click target', _gen0):
+                            return {'ok':False,'status':'pointer_arrival_revoked'},tool_seen
                         await asyncio.sleep(max(0.0, 0.28-(time.monotonic()-_armed_at)))
                         if plan_tok["n"] != _baseline_token or cur.get("click_validator") is not _baseline:
                             return {"ok":False,"status":"not_executed","error":"click baseline superseded"},tool_seen
@@ -1235,11 +1414,11 @@ def main():
                         _click_ident = ident()
                         if _click_ident != now_id: return {"ok": False, "status": "not_executed", "error": "focused window changed while pointer landed"}, tool_seen
                         _click_valid = await asyncio.to_thread(_target_valid, arm_app, step.get("label"), arm_rect, _click_native)
-                        _click_ms, _click_mt = await asyncio.to_thread(atspi_resolver.modal_title, args.get("app") or arm_app) if atspi_resolver else ("unavailable", None)
+                        _click_ms, _click_mt = await asyncio.to_thread(atspi_resolver.modal_title, execution_app or arm_app) if atspi_resolver else ("unavailable", None)
                         if plan_tok["n"] != _gen0 or ident() != _click_ident or not _click_valid or _click_ms != "ok" or _click_mt is not None:
                             resp = {"ok": False, "status": "not_executed", "error": "click target/window changed or unavailable before dispatch"}
                         else:
-                            resp = await asyncio.to_thread(actions.execute, step, px, arm_app, None, _click_cancel, lambda: plan_tok["n"] == _gen0 and _click_pin is not None and clicks.pin_state(px, _click_pin) == "ok")
+                            resp = await asyncio.to_thread(actions.execute, step, px, arm_app, None, _click_cancel, lambda: plan_tok["n"] == _gen0 and _approved_step(args, idx, step) and _click_pin is not None and clicks.pin_state(px, _click_pin) == "ok")
                     except BaseException:
                         _click_cancel.set(); log("click cancelled before next OS dispatch (an already dispatched event cannot be undone)"); raise
                     log("action executed, ok=%s" % resp.get("ok")); dlog("action", json.dumps(resp))
@@ -1312,7 +1491,15 @@ def main():
                 return _read_worker.invoke(lambda: getattr(_engine,method)(True) if method == 'targets' else getattr(_engine,method)(), eligible)
             readonly_harness = ReadOnlyHarness(_invoke_readonly)
             readonly_harness.start(); log('read-only harness listening on 127.0.0.1:%d (no action endpoints)' % readonly_harness.port)
+        _navigation_observers = []
         last_call = {}; hl['last_call'] = last_call
+        def _clear_last():
+            for _observer in _navigation_observers[:]:
+                _observer.retire()
+                asyncio.create_task(_observer.close())
+            _navigation_observers.clear()
+            last_call.clear()
+
         def _cancel_task(keep_obs=False):
             """Mac cancels the in-flight resolution task BEFORE every transition (skip/advance/start/stop/resume/retry). Loop-thread only. keep_obs=True (used at ASK DEQUEUE only): a new UTTERANCE is not a transition on the Mac - the active plan (incl. a pending observe auto-advance) keeps running until a toolCall supersedes it or a control (skip/stop) cancels it."""
             _ob = hl.get('obs_task')
@@ -1366,7 +1553,7 @@ def main():
             try:
                 if c["idx"] + 1 >= n:
                     with glock:
-                        plan_tok["n"] += 1; clicks.disarm(); ov['hidden'] = True; ov['covered'] = False; GLib.idle_add(overlay.retire); cur['armed'] = False; cur['paused'] = None; pause_rs['r'] = None; last_call.clear(); PREV_STEP_POINT['p'] = None
+                        plan_tok["n"] += 1; clicks.disarm(); ov['hidden'] = True; ov['covered'] = False; GLib.idle_add(overlay.retire); cur['armed'] = False; cur['paused'] = None; pause_rs['r'] = None; _clear_last(); PREV_STEP_POINT['p'] = None
                     click_events.append({"advance": kind, "plan_complete": True}); log("advance (%s): no next step, plan complete" % kind); return
                 last_call["idx"] = c["idx"] + 1; pause_rs['r'] = None
                 if kind == "click":
@@ -1395,12 +1582,32 @@ def main():
         if os.environ.get('TIPTOUR_TEST_MODE') == '1' and os.environ.get('TIPTOUR_TEST_NO_REPLAY') == '1': hl.pop('replay', None)  # TEST SEAM (needs TIPTOUR_TEST_MODE=1): exercise the legacy re-arm fallback of _control retry; never set in production
         # ---- USER-REQUIRED CONFIRMATION GATE (Ishit, voice notes 19:30/19:31 IST 26 Oct): NO plan (one step or several) runs until the user says yes to THAT plan. App-owned record; the model can neither approve nor execute. Not a Mac gate.
         import hashlib as _hashlib, re as _re2
+        from .request_chain import Requests
+        requests = Requests()
+        request_turn = {"key": None}
+        request_boundary = {"n": 0}
+        voice_command_boundaries = {}
+        request_context_refs = {}  # strong references held until Stop; no recycled object identity
         prop = {"rev": 0, "hash": None, "args": None, "text": None, "state": None, "turn": -1, "id": None}
         _YES = {"yes", "yeah", "yep", "yup", "sure", "ok", "okay", "confirm", "confirmed", "go ahead", "do it", "proceed", "yes please", "yes do it", "yes go ahead", "go for it"}
+        _SEPARATE_YES = {"start separate task and run", "start the separate task and run"}
+        _YES |= _SEPARATE_YES
         _NO = {"no", "nope", "dont", "do not", "don't", "never mind", "nevermind", "no thanks"}  # DECLINES the pending proposal only; an already-approved/running plan is left alone (new ask is not a transition)
         _STOP = {"stop", "cancel", "abort", "stop it", "stop that", "cancel it", "cancel that", "stop please", "no stop", "no cancel"}  # explicit STOP: clears any pending proposal AND stops approved/running work
         def _norm_resp(t): return _re2.sub(r"\s+", " ", _re2.sub(r"[.,!?]", "", (t or "").lower().replace("\u2019", "'"))).strip()  # WHOLE response, only sentence punctuation removed: digits/other words are kept, so "yes 2" or "ok but change it" is NOT a yes
         def _plan_canon(args): return json.dumps(args, sort_keys=True, ensure_ascii=False)  # EVERY field the model sent is part of the approved record
+        def _approved_step(args, idx, step):
+            from .plan_authority import approved_step
+            from .highlight import no_action_requested
+            from .request_limits import forbidden_plan
+            _rq = prop.get('request') or {}
+            with highlight_owner.lock:
+                if _rq.get('context') is not None and id(highlight_owner.context) != _rq.get('context_identity'):
+                    return False
+            return (prop.get("request") is not None and
+                    _plan_canon(prop.get("request")) == _plan_canon(requests.snapshot()) == _plan_canon(last_call.get("request")) and
+                    not no_action_requested(prop.get("text")) and not forbidden_plan(prop.get("text"), args) and
+                    approved_step(prop, last_call, args, idx, step))
         def _kv(d, skip): return "".join(" %s=%s" % (k, json.dumps(v, ensure_ascii=False)) for k, v in d.items() if k not in skip and not k.startswith("_") and v not in (None, ""))
         def _plan_text(args):
             lines = ["Plan%s%s (%d step%s):" % ((" '%s'" % args.get("goal")) if args.get("goal") else "", (" in %s" % args.get("app")) if args.get("app") else "", len(args.get("steps") or []), "" if len(args.get("steps") or []) == 1 else "s")]
@@ -1415,8 +1622,8 @@ def main():
             _shown_ranges = set()
             for _n, _s2 in enumerate(_st, 1):
                 _t = str(_s2.get("type") or "click"); _lab = _s2.get("label") or (args.get("app") if str(_s2.get("type")) == "openApp" else None) or "(no label)"; _v = _s2.get("value")
-                _w = {"click": ('Click "%s" (I perform it if it matches your words, action mode ON)' if a.act else 'Point at "%s" for you to click'), "rightClick": ('Right-click "%s" (I perform it, action mode ON)' if a.act else 'Point at "%s" for you to right-click'), "doubleClick": ('Double-click "%s" (I perform it, action mode ON)' if a.act else 'Point at "%s" for you to double-click'), "openApp": 'Point at the app "%s" for you to open', "openURL": 'Point at where "%s" would be opened', "keyboardShortcut": 'Point at the target for the shortcut "%s" (you press the keys)', "pressKey": 'Point at the target for the key "%s" (you press it)', "type": 'Point at the field "%s" (you type the text yourself)', "setValue": 'Point at the field "%s" (you set the value yourself)', "scroll": 'Point at "%s" for you to scroll', "waitForState": 'SKIPPED: "%s" (waiting for a state is not implemented; no waiting happens and no pointer is placed)', "observe": 'Point at "%s" (no click)'}.get(_t, 'Step of type "' + _t + '" on "%s"') % _lab
-                if a.act and _t in ("openApp", "openURL", "keyboardShortcut", "pressKey", "type", "scroll"): _w = {"openApp": 'Open the app "%s" (I do it only if your words ask me to open or launch it)', "openURL": 'Open "%s" (I do it only if your words ask for it)', "keyboardShortcut": 'Press the shortcut "%s" in the plan\'s app (Cmd means Ctrl; only if your words ask for it)', "pressKey": 'Press the key "%s" in the plan\'s app (only if your words ask for it)', "type": 'Replace the selected text or insert at the caret in verified field "%s" (native plain-text whole-value write; caret/readback checked)', "scroll": 'Scroll the plan\'s app with the keyboard ("%s"; only if your words ask for it)'}[_t] % _lab
+                _w = {"click": ('Click "%s" (I perform this approved step, action mode ON)' if a.act else 'Point at "%s" for you to click'), "rightClick": ('Right-click "%s" (I perform it, action mode ON)' if a.act else 'Point at "%s" for you to right-click'), "doubleClick": ('Double-click "%s" (I perform it, action mode ON)' if a.act else 'Point at "%s" for you to double-click'), "openApp": 'Point at the app "%s" for you to open', "openURL": 'Point at where "%s" would be opened', "keyboardShortcut": 'Point at the target for the shortcut "%s" (you press the keys)', "pressKey": 'Point at the target for the key "%s" (you press it)', "type": 'Point at the field "%s" (you type the text yourself)', "setValue": 'Point at the field "%s" (you set the value yourself)', "scroll": 'Point at "%s" for you to scroll', "waitForState": 'SKIPPED: "%s" (waiting for a state is not implemented; no waiting happens and no pointer is placed)', "observe": 'Point at "%s" (no click)'}.get(_t, 'Step of type "' + _t + '" on "%s"') % _lab
+                if a.act and _t in ("openApp", "openURL", "keyboardShortcut", "pressKey", "type", "scroll"): _w = {"openApp": 'Open the app "%s" (approved plan step)', "openURL": 'Open "%s" (approved plan step)', "keyboardShortcut": 'Press the shortcut "%s" in the plan\'s app (Cmd means Ctrl; approved plan step)', "pressKey": 'Press the key "%s" in the plan\'s app (approved plan step)', "type": 'Replace the selected text or insert at the caret in verified field "%s" (native plain-text whole-value write; caret/readback checked)', "scroll": 'Scroll the plan\'s app with the keyboard ("%s"; approved plan step)'}[_t] % _lab
                 if (not a.act) and _t in ("openApp", "openURL", "keyboardShortcut", "pressKey", "type", "scroll", "setValue"): _w = 'ACTION step (%s "%s"): action mode is OFF, so I will PAUSE the plan here, place no pointer and do nothing' % (_t, _lab)
                 if a.act and _t == "setValue": _w = 'Replace the entire verified editable field "%s" with the supplied value (native whole-value write; exact readback required)' % _lab
                 if a.act and _s2.get("_native_range") and _t in ("type", "setValue", "pressKey"):
@@ -1425,7 +1632,9 @@ def main():
                     elif _t == "type": _w = 'Insert/replace at the CURRENT caret/selection in "%s" (saved range already used)' % _lab
                     elif _t == "setValue": _w = 'Replace the WHOLE current field "%s" (saved range already used)' % _lab
                     elif _t == "pressKey": _w = 'Press the deletion key in the CURRENT field "%s" (saved range already used)' % _lab
-                _x = []
+                from .app_transition import destination
+                _transition, _app = destination(args, _n - 1)
+                _x = ['execution app after approved transition: ' + _app] if _transition is not None else []
                 if _v not in (None, ""): _x.append('value "%s"' % _v)
                 if _t == "scroll": _x.append("scroll args direction=%s amount=%s by=%s (%s)" % (_s2.get("direction", "not given"), _s2.get("amount", "not given"), _s2.get("by", "not given"), "applied as keys, amount clamped 1..50, default 3" if a.act else "NOT applied: point-only"))
                 if _s2.get("targetContext"): _x.append("target context: %s" % _s2["targetContext"])
@@ -1438,14 +1647,41 @@ def main():
             return "\n".join(_l)
         def _prop_clear(why):
             if prop["state"] == "pending": _note("the proposed plan rev %d was cleared without running (%s)" % (prop["rev"], why)); log("confirmation: pending plan rev %d cleared (%s)" % (prop["rev"], why)); click_events.append({"gate": "proposal_cleared", "rev": prop["rev"], "why": why})
+            _watch = prop.pop('confirmation_watch', None)
+            if _watch: _watch.close()
             prop["state"] = None; GLib.idle_add(lambda: pprop.hide_panel() and False)
         def _approve_pending(src, turn_i):
             """Execute the STORED plan of the pending proposal (never a model resubmit). Returns True if started."""
             if prop["state"] != "pending": return False
+            _watch = prop.get('confirmation_watch')
+            if _watch and not _watch.valid():
+                _prop_clear('confirmation native ownership changed'); return False
+            if prop.get("boundary") != request_boundary["n"]:
+                _prop_clear("request boundary revoked"); return False
+            if prop.get('task_boundary'):
+                if prop.get('relation') == 'separate' and src not in ('separate-control', 'separate-voice', 'separate-text'):
+                    click_events.append({'gate': 'separate_task_explicit_approval_required'})
+                    log('confirmation: use Start separate task and run to approve the displayed task change; ordinary yes does not discard the old task')
+                    return False
+                if _plan_canon(requests.boundary()) != _plan_canon(prop['task_boundary']):
+                    _prop_clear('task boundary changed'); return False
+                with highlight_owner.lock:
+                    _scope = prop['request'].get('context')
+                    if _scope is not None and (prop['request'].get('context_identity') != id(highlight_owner.context) or _plan_canon(_scope) != _plan_canon(highlight_owner.context)):
+                        _prop_clear('task scope changed before boundary approval'); return False
+                    if _scope is not None:
+                        request_context_refs[id(highlight_owner.context)] = highlight_owner.context
+                requests.record = json.loads(json.dumps(prop['request']))
+                requests.revision = requests.record['id']; requests.blocked = False
+                requests.pending_text = None
+            if _plan_canon(prop.get('request')) != _plan_canon(requests.snapshot()):
+                _prop_clear('original request binding changed'); return False
+            _watch = prop.pop('confirmation_watch', None)
+            if _watch: _watch.close()  # drained above, no await before immutable approval
             _a = prop["args"]; _g2 = str(_a.get("goal") or "").strip()
-            _note("the user APPROVED plan rev %d (%s); the app is executing the stored plan" % (prop["rev"], src)); prop["state"] = "approved"; prop["started"] = False; prop["appr"] = arr["n"]; prop["kick"] = (src == "voice"); GLib.idle_add(lambda: pprop.hide_panel() and False); click_events.append({"gate": "proposal_approved", "rev": prop["rev"], "hash": prop["hash"], "via": src, "turn": turn_i}); log("confirmation: user approved plan rev %d (%s) via %s; executing the stored plan" % (prop["rev"], prop["hash"][:12], src))
+            _note("the user APPROVED plan rev %d (%s); the app is executing the stored plan" % (prop["rev"], src)); prop["state"] = "approved"; prop["started"] = False; prop["appr"] = arr["n"]; prop["kick"] = (src in ("voice", "separate-voice")); GLib.idle_add(lambda: pprop.hide_panel() and False); click_events.append({"gate": "proposal_approved", "rev": prop["rev"], "hash": prop["hash"], "via": src, "turn": turn_i}); log("confirmation: user approved plan rev %d (%s) via %s; executing the stored plan" % (prop["rev"], prop["hash"][:12], src))
             if _goal_live(): log("tool: superseding active plan %r with approved plan %r" % (hl.get("active_goal"), _g2)); click_events.append({"gate": "supersede_active_plan", "id": prop["id"]}); (hl.get('cancel_task') or (lambda *_: None))(); clicks.disarm(); plan_tok["n"] += 1
-            hl["active_goal"] = _g2; last_call.update(v={"id": prop["id"], "name": "submit_workflow_plan"}, args=_a, text=prop["text"], idx=0, rev=prop["rev"], hash=prop["hash"])
+            hl["active_goal"] = _g2; _clear_last(); last_call.update(v={"id": prop["id"], "name": "submit_workflow_plan"}, args=_a, text=prop["text"], idx=0, rev=prop["rev"], hash=prop["hash"], request=json.loads(json.dumps(prop["request"])))
             plan_tok["n"] += 1; hl["replay"]("approved_plan", plan_tok["n"]); return True  # token-bound: a cancel/stop/new plan before the replay actually starts revokes it
         def _shown(rv):  # runs on the loop when the panel has ACTUALLY been drawn: only input arriving after this point can answer the proposal
             if prop["rev"] == rv and prop["state"] == "pending": prop["shown"] = arr["n"]; prop["displayed"] = True; click_events.append({"gate": "proposal_displayed", "rev": rv, "arrival_epoch": arr["n"]}); log("confirmation: proposal rev %d displayed (arrival epoch %d)" % (rv, arr["n"]))
@@ -1460,14 +1696,16 @@ def main():
                 if hover['defer_mic']: _abort_voice('pending hover stopped')
                 hover.update(context=None, owner=None, defer_mic=False)
             """Explicit STOP: clear a pending proposal, revoke an approved record and stop whatever plan is running/queued (cursor retired, no later step renders)."""
+            request_boundary["n"] += 1
+            requests.clear(); request_context_refs.clear()
             _live0 = _goal_live(); _had = prop["state"]
             _prop_clear("stop (%s)" % src)
             if _had == "approved": prop["state"] = "revoked"  # honest record state (pending was already cleared above)
-            hl["active_goal"] = None; plan_tok["n"] += 1; clicks.disarm(); last_call.clear(); (hl.get('cancel_task') or (lambda *_: None))(); GLib.idle_add(overlay.retire); ov['hidden'] = True; ov['covered'] = False; cur['armed'] = False; cur['paused'] = None; PREV_STEP_POINT['p'] = None
+            hl["active_goal"] = None; plan_tok["n"] += 1; clicks.disarm(); _clear_last(); (hl.get('cancel_task') or (lambda *_: None))(); GLib.idle_add(overlay.retire); ov['hidden'] = True; ov['covered'] = False; cur['armed'] = False; cur['paused'] = None; PREV_STEP_POINT['p'] = None
             _note("the user said STOP (%s): any pending/approved/running plan was stopped" % src); click_events.append({"gate": "stop_work", "via": src, "record_state": _had, "was_live": bool(_live0)}); log("confirmation: STOP (%s): pending cleared, approved/queued/running work stopped (record %s, live %s)" % (src, _had, _live0))
         def _revoke_approved(src):
             if prop["state"] != "approved": return False
-            prop["state"] = "revoked"; hl["active_goal"] = None; plan_tok["n"] += 1; clicks.disarm(); last_call.clear(); (hl.get('cancel_task') or (lambda *_: None))(); GLib.idle_add(overlay.retire)
+            prop["state"] = "revoked"; hl["active_goal"] = None; plan_tok["n"] += 1; clicks.disarm(); _clear_last(); (hl.get('cancel_task') or (lambda *_: None))(); GLib.idle_add(overlay.retire)
             click_events.append({"gate": "approved_plan_revoked", "rev": prop["rev"], "hash": prop["hash"], "via": src}); log("confirmation: approved plan rev %d revoked (%s); queued/active execution stopped" % (prop["rev"], src)); return True
         if text_ui: GLib.idle_add(text_ui.show_command)
         async def sync_text_tracking():
@@ -1482,20 +1720,27 @@ def main():
           # prior conversation text (role, text), rehydrated into a fresh per-PTT provider connection so model context is not lost  # events a voice turn dequeued but did not consume (e.g. transcript chunks after the turnComplete that ended it) belong to the NEXT utterance of the same voice session: kept here so they are never discarded between turns
         try:
             async for text in _asks():
+                typed_reply['active'] = False
                 highlight_phase['token'] = None
                 i += 1; pause_rs['r'] = None; PREV_STEP_POINT['p'] = None; stream_state['suppressed'] = False  # Mac: user speech / PTT clears the post-tool-call suppression
                 _arrv0 = gate.get("arrival", 0); voice_turn = text in ("@voice", "@voice-next"); in_tr = []; seg_pos = [None]; _h0 = len(hist)
+                voice_request_boundary = voice_command_boundaries.pop(_arrv0, None) if voice_turn else None
+                def voice_request_live():
+                    return (voice_request_boundary is not None and voice_request_boundary == request_boundary['n']
+                            and cur_vs[0] == vs['n'] and not shutdown['requested'])
                 if text == "@voice": pend_store.clear(); cur_vs[0] = cmd_ep.pop(_arrv0, vs["n"])
                 def _stale(_k, _v): return voice_turn and _k in ("inputTranscript", "turnComplete") and getattr(_v, "sess", cur_vs[0]) != cur_vs[0]  # a NEW voice session starts clean. A typed/other ask must NOT clear it: the voice stream keeps its chunk chronology (a typed control cannot erase a pre-display prefix while its suffix is still queued)
                 pending = pend_store if voice_turn else []
                 if not voice_turn: ing["parts"] = []
-                _arrv = gate.get("arrival", 0); _m = _re2.fullmatch(r"@(confirm|cancel) (\d+)", text)
+                _arrv = gate.get("arrival", 0); _m = _re2.fullmatch(r"@(confirm|confirmseparate|cancel) (\d+)", text)
                 if text.startswith("@confirm") or text.startswith("@cancel"):  # EXACT "@confirm <rev>" / "@cancel <rev>" only
                     if not _m: log("confirmation: malformed control %r ignored" % text[:40]); click_events.append({"gate": "confirm_malformed"}); results.append({"ask": text, "confirmation": "malformed control ignored"}); continue
                     _kind, _rv = _m.group(1), int(_m.group(2))
                     if prop["state"] not in ("pending", "approved") or _rv != prop["rev"] or _arrv <= (prop.get("shown") or 0) or (prop["state"] == "pending" and not prop.get("displayed")):
                         log("confirmation: %s refused: stale/unbound (pending rev %s, state %s)" % (text, prop["rev"], prop["state"])); click_events.append({"gate": "confirm_refused_stale", "given": str(_rv), "pending": prop["rev"]}); results.append({"ask": text, "confirmation": "refused stale"}); continue
-                    if _kind == "confirm" and prop["state"] == "pending": _approve_pending("control", i); results.append({"ask": text, "confirmation": "approved rev %d" % prop["rev"]})
+                    if _kind in ("confirm", "confirmseparate") and prop["state"] == "pending":
+                        _accepted = _approve_pending("separate-control" if _kind == "confirmseparate" else "control", i)
+                        results.append({"ask": text, "confirmation": ("approved rev %d" % prop["rev"]) if _accepted else "not approved"})
                     elif _kind == "cancel" and prop["state"] == "pending": _prop_clear("user declined"); results.append({"ask": text, "confirmation": "declined, nothing executed"})
                     elif _kind == "cancel" and prop["state"] == "approved": _stop_work("control"); results.append({"ask": text, "confirmation": "approved plan revoked"})
                     else: results.append({"ask": text, "confirmation": "no change"})
@@ -1507,10 +1752,18 @@ def main():
                     if prop["state"] == "approved": pass
                     elif _r in _YES or _r in _NO:
                         if _arrv <= (prop.get("shown") or 0) or not prop.get("displayed"): log("confirmation: %r arrived BEFORE the proposal was displayed; ignored, plan stays pending" % _r); click_events.append({"gate": "answer_before_display_ignored", "rev": prop["rev"]}); results.append({"ask": text, "confirmation": "ignored: arrived before the proposal was displayed"}); continue
-                        if _r in _YES: _approve_pending("text", i); results.append({"ask": text, "confirmation": "approved rev %d" % prop["rev"]})
+                        if _r in _YES:
+                            _accepted = _approve_pending("separate-text" if _r in _SEPARATE_YES else "text", i)
+                            results.append({"ask": text, "confirmation": ("approved rev %d" % prop["rev"]) if _accepted else "not approved"})
                         else: _prop_clear("user declined"); results.append({"ask": text, "confirmation": "declined, nothing executed"})
                         continue
                     else: _prop_clear("new unrelated request")  # any other user request invalidates the pending plan; it then goes to the model as usual
+                if not voice_turn and not text.startswith("@"):
+                    with highlight_owner.lock:
+                        _rq_status = requests.accept(text, highlight_owner.context, highlight_owner.epoch)
+                        request_context_refs[id(highlight_owner.context)] = highlight_owner.context
+                    request_turn['key'] = (i, 'typed')
+                    click_events.append({"gate": "request_record", "status": _rq_status, "request_id": (requests.snapshot() or {}).get('id')})
                 _had_state = prop["state"] if (voice_turn and prop["state"] in ("pending", "approved") and prop["turn"] < i) else None; _had_rev = prop["rev"]  # the record this voice turn may answer
                 if voice_turn:
                     if not (mic and (mic.active or hover["defer_mic"])): continue  # toggled off before this turn started
@@ -1674,7 +1927,35 @@ def main():
                 yolo, ocr_el, _mp, _pcn = await asyncio.to_thread(_perceive, full, True); ask_own = _own_rec((full, jpeg, size), _oc, yolo, ocr_el, _mp, _pcn)  # this ask's OWN capture/perception record: its toolCall resolves bind to it
                 if _oc.get("token") != plan_tok["n"]:
                     log("stale ask capture discarded before provider delivery");continue
+                if voice_turn and not voice_request_live():
+                    click_events.append({'gate': 'voice_startup_owner_refused', 'at': 'before screenshot'}); continue
+                native_context = None
+                if atspi_resolver:
+                    try:
+                        native_context = await asyncio.to_thread(atspi_resolver.active_context)
+                        if (str(native_context['x11_client_id']) != _oc['pair'][0][0] or
+                            native_context['window_name'] != _oc['pair'][0][1] or ident() != _oc['pair'][0]):
+                            raise RuntimeError('active native context does not match captured window')
+                    except Exception as exc:
+                        native_context = None
+                        click_events.append({'gate': 'native_context_unavailable', 'error': type(exc).__name__})
+                if voice_turn and not voice_request_live(): continue
+                _boundary_context = requests.boundary()
+                if voice_turn and not _boundary_context and requests.record:
+                    await client.send_context('[TipTour prior task provenance, not approval] ' + json.dumps(requests.record) +
+                        '\nFor the next complete spoken request, propose requestRelation=continue for modifiers/restatements, separate for independent goals, ambiguous if uncertain. The app preserves old limits and reviews any separate boundary explicitly; do not treat this context as an action request.')
+                if _boundary_context:
+                    await client.send_context('[TipTour task provenance, not approval] ' + json.dumps(_boundary_context) + '\nInterpret the latest incoming words against the original task. Set requestRelation=continue for a modifier or restatement, separate for an independent goal, ambiguous if unclear. Never discard old limits by assertion. The app alone asks for any task-change approval.')
+                if voice_turn and not voice_request_live(): continue
+                if native_context:
+                    await client.send_context('[TipTour native current-screen facts, not a user request] ' + json.dumps(native_context) +
+                        '\nFor actions in this current window use this exact native app name. Do not guess a browser or generic editor name. A non-secret editable focused field shown here is already focused, so typing needs no prerequisite focus click. These facts grant no action or approval.')
+                if voice_turn and not voice_request_live(): continue
+                if _oc.get('token') != plan_tok['n'] or ident() != _oc['pair'][0]:
+                    click_events.append({'gate': 'native_context_capture_retired'}); continue
                 await client.send_screenshot(jpeg)
+                if voice_turn and not voice_request_live():
+                    click_events.append({'gate': 'voice_startup_owner_refused', 'at': 'after screenshot'}); continue
                 from PIL import Image as _I; import io as _io; jw,jh=_I.open(_io.BytesIO(jpeg)).size; log("sent JPEG %dx%d (%d bytes) of %dx%d screen" % (jw,jh,len(jpeg), size[0], size[1])); dlog("ask:", repr(text))
                 open(os.path.join(a.out,"sent-%d.jpg"%i),"wb").write(jpeg)
                 if os.environ.get('FRAME_SETTLE'): await asyncio.sleep(float(os.environ['FRAME_SETTLE']))  # diagnostic only, off by default
@@ -1689,6 +1970,8 @@ def main():
                         gate_ids["handled"].clear(); gate_ids["accepted"] = None; log("utterance boundary: input transcript empty->nonempty, tool-call gate ids reset"); click_events.append({"gate": "utterance_boundary_reset", "transcript_len": len(_full)})
                     tr_state["prev"] = len(_full)
                 def _voice_utt(chunks):  # called ONLY when an utterance is FINAL (a turnComplete closed it; a model call is not finality). The WHOLE utterance must be fresh: any chunk that arrived at/before the display (pending) / approval (approved) makes the entire utterance ineligible - never a suffix of it.
+                    if not voice_request_live():
+                        click_events.append({"gate": "voice_confirmation_owner_refused"}); return None
                     if not chunks or not _had_state or not (prop["state"] == _had_state and prop["rev"] == _had_rev): return None
                     if _had_state == "pending" and not prop.get("displayed"): return None
                     _mark = prop["shown"] if _had_state == "pending" else prop["appr"]
@@ -1700,9 +1983,81 @@ def main():
                     if _had_state == "approved":
                         if _vr not in (_YES | _NO):_revoke_approved("new completed voice request")
                         return None
-                    if _vr in _YES: _approve_pending("voice", i); return "approved"
+                    if _vr in _YES: return "approved" if _approve_pending("separate-voice" if _vr in _SEPARATE_YES else "voice", i) else "not approved"
                     if _vr in _NO: _prop_clear("user declined (voice)"); return "declined"
                     _prop_clear("new unrelated request (voice)"); return "cleared"
+                async def offer_plan(v, args, text, send_reply=True, voice_hover=None):
+                    nonlocal tool_seen
+                    from . import highlight as _hlg
+                    async def reply(payload):
+                        if send_reply:
+                            await client.tool_response(v["id"], v["name"], payload)
+                    _request = requests.snapshot()
+                    _task_boundary = None
+                    if _request is None and requests.boundary():
+                        _candidate_boundary = requests.boundary()
+                        _relation = args.get('requestRelation')
+                        if _relation in ('continue', 'separate'):
+                            import copy as _copy
+                            _preview = _copy.deepcopy(requests)
+                            with highlight_owner.lock:
+                                if _preview.choose_boundary(_candidate_boundary['request_id'], _candidate_boundary['incoming'], _relation == 'separate', highlight_owner.context, highlight_owner.epoch):
+                                    _request = _preview.snapshot()
+                                    _task_boundary = _candidate_boundary
+                    if _request is None:
+                        await reply({"ok": False, "status": "not_executed", "error": "No unambiguous original task is bound. Ask the user to restate the complete task and limits; no plan proposed."})
+                        click_events.append({"gate": "request_continuity_refused"})
+                        return
+                    _request_text = _request['text']
+                    if native_context:
+
+                        if (args.get('app') or '').strip().casefold() != native_context['app'].strip().casefold():
+                            click_events.append({'gate': 'proposal_native_app_mismatch'})
+                            await reply({'ok': False, 'status': 'not_executed', 'error': 'The proposed app does not match the native current-window identity. Use the supplied exact app name for this window; nothing proposed or executed.'})
+                            return
+                    if _hlg.no_action_requested(_request_text):  # original request constraints survive proposal-only continuation; USER intent gate: answer-only request -> no cursor, click, right-click or workflow, whatever the model calls
+                        GLib.idle_add(overlay.retire); tool_seen = {"source": "NO_ACTION_REQUESTED", "refused": "user asked for an answer only"}
+                        log("tool call suppressed: the request is answer-only (no pointing or action)")
+                        _aw = float(os.environ.get('TIPTOUR_ANSWER_WAIT_S', '20')); answer_wait.update(need=True, got=False, until=time.time() + _aw)
+                        _resp = _hlg.suppressed_payload(_request_text, _request.get("context"))
+                        await reply(_resp)
+                        return
+                    from .request_limits import forbidden_plan
+                    _forbidden = forbidden_plan(_request_text, args)
+                    if _forbidden:
+                        click_events.append({'gate': 'original_limit_refused', 'reason': _forbidden})
+                        await reply({'ok': False, 'status': 'not_executed', 'error': _forbidden})
+                        return
+                    # Pinned Mac semantic key normalization occurs before displaying/hashing the approval.
+                    from .app_skills import normalize_semantic_keyboard_steps
+                    from .app_transition import destination
+                    _raw_steps = args.get('steps') or []
+                    args = dict(args, steps=[normalize_semantic_keyboard_steps([st], destination(args, n)[1] or args.get('app', ''))[0] for n, st in enumerate(_raw_steps)])
+                    # Native context is app-owned, deep-copied before immutable approval.
+                    hc = voice_hover if voice_turn else None
+                    if _hlg.refers_to_highlight(_request_text):
+                        with highlight_owner.lock:
+                            _scope_live = _request.get('context') is not None and _request.get('context_identity') == id(highlight_owner.context)
+                        if not _scope_live:
+                            await reply({"ok": False, "status": "not_executed", "error": "The original task's highlight scope is unavailable or changed; restate the task with a fresh highlight."})
+                            click_events.append({"gate": "request_scope_retired"})
+                            return
+                    args = hover_context.bind(args, _request.get('context'), hc)
+                    _canon = _plan_canon(args); _ph = _hashlib.sha256(_canon.encode()).hexdigest()  # CONFIRMATION GATE (after the voice transcript wait and the answer-only gate): hold EVERY plan. Nothing resolves, arms, points or clicks before the user approves THIS record.
+                    if prop["state"] == "pending" and prop["hash"] == _ph:  # identical plan re-submitted while the user is answering: SAME record, no new revision, the displayed proposal and any valid answer stay bound to it
+                        click_events.append({"gate": "same_hash_resubmit_ignored", "id": v["id"], "rev": prop["rev"]}); log("confirmation: identical plan re-submitted (call %s); same record rev %d kept pending" % (v["id"], prop["rev"]))
+                        await reply({"ok": False, "reason": "awaiting_user_confirmation", "status": "not_executed", "message": "This exact plan is already proposed and waiting for the user's answer. Do not call any tool again."}); return
+                    if prop["state"] == "approved":_revoke_approved("replacement proposal before display")
+                    if prop["state"] == "pending": _prop_clear("replaced by a newer proposal")
+                    prop.update(rev=prop["rev"] + 1, hash=_ph, args=json.loads(json.dumps(args)), text=_request_text, request=_request, task_boundary=_task_boundary, relation=args.get('requestRelation') if _task_boundary else None, boundary=request_boundary["n"], state="pending", turn=i, id=v["id"], shown=10**12, displayed=False, appr=0)  # shown stays unreachable until the render ack
+                    _change_notice = ("TASK CHANGE REQUIRES EXPLICIT REVIEW\nPrevious task and limits: " + _task_boundary['original']['text'] + "\nProposed SEPARATE task: " + _task_boundary['incoming'] + "\nPrevious task limits/scope do not carry to this separate task. Ordinary yes cannot approve this change.\n\n") if _task_boundary and args.get('requestRelation') == 'separate' else ''
+                    _pt = _change_notice + "Original request #%s: %s\n" % (_request["id"], _request_text) + _plan_text(args); _note("plan rev %d was PROPOSED and is waiting for the user's yes (nothing executed): %s" % (prop["rev"], _pt.replace("\n", " | ")[:1500])); log("confirmation: plan HELD, rev %d hash %s: %s" % (prop["rev"], _ph[:12], _pt.replace("\n", " | "))); print("PLAN PROPOSAL rev %d:\n%s\n%s" % (prop["rev"], _pt, "Use Start separate task and run to approve this task change, or Cancel." if _task_boundary and args.get('requestRelation') == 'separate' else "Say yes to run it, or no to cancel."), flush=True); GLib.idle_add(lambda _r=prop["rev"], _sep=bool(_task_boundary and args.get('requestRelation') == 'separate'), _pl=_change_notice + "Original request #%s: %s\n\n" % (_request["id"], _request_text) + _plain_text(json.loads(json.dumps(args))).replace("Say yes / Confirm to run, no / Cancel to decline. Say stop to stop.", "Say start separate task and run or use that button to approve the task change and plan. Cancel declines. Stop stops all work." if _task_boundary and args.get('requestRelation') == 'separate' else "Say yes / Confirm to run, no / Cancel to decline. Say stop to stop.").replace("Action mode ON: I will perform the steps below after your yes.", "Action mode ON: I will perform these steps only after explicit separate-task approval." if _task_boundary and args.get('requestRelation') == 'separate' else "Action mode ON: I will perform the steps below after your yes."), _t=_pt: pprop.show_plan(_r, _pl, _t, lambda rv: loop.call_soon_threadsafe(_shown, rv), separate=_sep) and False)  # rev, plain text and raw details are bound IMMUTABLY at scheduling
+                    click_events.append({"gate": "plan_held_for_confirmation", "id": v["id"], "rev": prop["rev"], "hash": _ph, "steps": len(args.get("steps") or []), "text_len": len(text or "")})
+                    if not voice_turn:
+                        typed_reply.update(active=True, rev=prop['rev'], hash=prop['hash'], boundary=request_boundary['n'], generation=gen[0], native_owner=json.loads(json.dumps(native_context)) if native_context else None)
+                    await reply({"ok": False, "reason": "awaiting_user_confirmation", "status": "not_executed", "message": "Nothing was done. The app is holding this plan until the USER says yes to it. Tell the user the plan in plain words (what you will do, in what order) and ask them to confirm. Do not call any tool again for this request.\n" + _pt})
+                correction = {'error': None, 'attempts': 0, 'boundary': request_boundary['n'], 'request': None, 'voice_text': None}
+                voice_candidate = {"call": None}
                 turn_audio = [0]; audio_mark = len(audio); answer_wait = {"need": False, "got": False, "until": 0}; saw_event = False; voice_stopped = False
                 while time.time() - t0 < 60:
                     try: k, v = pending.pop(0) if pending else await asyncio.wait_for(q.get(), 5)
@@ -1711,16 +2066,74 @@ def main():
                         if answer_wait["need"] and time.time() > answer_wait["until"]: log("no answer after the suppressed tool call within the wait window"); tainted[0] = True; break
                         continue
                     if shutdown['requested']: break
+                    if k == 'typed_proposal_reply_retired' and not voice_turn and all(v.get(key) == value for key,value in {'turn':i,'rev':prop['rev'],'hash':prop['hash']}.items()):
+                        try:
+                            _watch = prop.get('confirmation_watch')
+                            if not _watch or not _watch.valid():raise RuntimeError('confirmation owner changed before native read')
+                            _fresh_owner = await asyncio.to_thread(atspi_resolver.active_context, 2) if atspi_resolver else None
+                            _fields = ('pid','x11_client_id','window_path','window_name')
+                            if not _fresh_owner or any(_fresh_owner.get(key) != (v.get('native_owner') or {}).get(key) for key in _fields) or not _watch.valid():
+                                raise RuntimeError('confirmation native owner unavailable at ingress')
+                            _retired_client = client
+                            _close_task = asyncio.create_task(_retired_client.close())
+                            _close_task.add_done_callback(lambda task: task.exception() if not task.cancelled() else None)
+                            _done, _pending = await asyncio.wait((_close_task,), timeout=3)
+                            if not _done:
+                                _close_task.cancel()  # do not await cancellation-resistant transport code
+                                raise TimeoutError('provider close deadline')
+                            _close_task.result()
+                            _owner = v.get('native_owner')
+                            _now_owner = await asyncio.to_thread(atspi_resolver.active_context, 2) if atspi_resolver else None
+                            _fields = ('pid','x11_client_id','window_path','window_name')
+                            if not _owner or not _now_owner or any(_owner.get(key) != _now_owner.get(key) for key in _fields) or not _watch.valid():
+                                raise RuntimeError('confirmation native owner changed during provider close')
+                        except Exception as exc:
+                            # Generation was retired at ingress; failed close never licenses execution.
+                            if prop.get('turn') == v['turn'] and prop.get('rev') == v['rev'] and prop.get('hash') == v['hash']:
+                                _prop_clear('typed proposal provider retirement failed')
+                            click_events.append({'gate':'typed_proposal_retirement_failed','error':type(exc).__name__})
+                            log('confirmation: typed proposal provider retirement failed; approval withheld (%s: %s)' % (type(exc).__name__, str(exc))); dlog('confirmation watch trace', getattr(_watch,'events',None))
+                        else:
+                            log('confirmation: retired typed proposal provider closed')
+                        break
                     if _stale(k, v): dlog("stale-epoch event dropped:", k, getattr(v, "sess", None), "turn epoch", cur_vs[0]); click_events.append({"gate": "stale_voice_epoch_dropped", "kind": k}); continue
                     if k in ("audio", "outputTranscript", "inputTranscript", "toolCall"): saw_event = True
                     if k == "audio": audio.extend(v); answer_wait["got"] = True; (log("voice: reply playback unavailable or backlog exceeded") if player and not player.write(v) else None)
-                    elif k == "interrupted": player and player.flush()
+                    elif k == "interrupted":
+                        player and player.flush()
+                        if voice_turn:
+                            request_boundary['n'] += 1
+                            voice_candidate['call'] = None
+                            in_tr.clear(); tr_state.update(prev=0, base=0); seg_pos[0] = None
+                            gate_ids['handled'].clear(); gate_ids['accepted'] = None
+                            click_events.append({'gate': 'voice_utterance_interrupted', 'candidate_retired': True})
                     elif k == "inputTranscript":
                         _ingest_tr(v)
                     elif k == "voice_stop":
                         if voice_turn: voice_stopped = True; break
                     elif k == "outputTranscript": out_tr.append(v); answer_wait["got"] = True
                     elif k == "toolCall":
+                        if correction['error'] and (correction['boundary'] != request_boundary['n'] or
+                                (voice_turn and (not voice_request_live() or (correction['voice_text'] and _cur_tr()))) or
+                                (correction['request'] is not None and correction['request'] != _plan_canon(requests.snapshot() or requests.boundary()))):
+                            click_events.append({'gate':'invalid_plan_correction_retired','reason':'original request owner changed'})
+                            break
+                        from .plan_validation import structure, semantics
+                        _invalid = structure(v)
+                        if not _invalid:
+                            from .app_transition import destination
+                            from .app_skills import normalize_semantic_keyboard_steps
+                            _original_args = v['args']
+                            _normalized_args = dict(_original_args, steps=[normalize_semantic_keyboard_steps([st], destination(_original_args,n)[1] or _original_args['app'])[0] for n,st in enumerate(_original_args['steps'])])
+                            _invalid = semantics(_normalized_args)
+                        if _invalid:
+                            click_events.append({'gate':'malformed_plan_refused','error':_invalid})
+                            log('Invalid plan rejected before proposal: ' + _invalid)
+                            correction['error'] = _invalid
+                            # Invalid input consumes no accepted tool slot and cannot replace an approved record.
+                            if isinstance(v,dict) and isinstance(v.get('id'),str) and isinstance(v.get('name'),str):
+                                await client.tool_response(v['id'],v['name'],{'ok':False,'status':'not_executed','reason':'invalid_plan','error':_invalid,'message':'Nothing proposed or executed. Correct and resubmit the full plan for the SAME original user goal and limits. No approval exists for this invalid plan.'})
+                            continue
                         args = v.get("args", {}); log("toolCall", v.get("name")); dlog("toolCall args", json.dumps(args))
                         _tid = v.get("id")  # Mac CompanionManager.rejectIfToolCallShouldNotRun (6e97782 lines 611-632), then the same-goal / supersede check of handleToolSubmitWorkflowPlan (674-721)
                         if _tid in gate_ids["handled"]:
@@ -1730,6 +2143,8 @@ def main():
                             gate_ids["handled"].add(_tid); log("tool: rejecting %s id=%s - already accepted tool id=%s for this utterance" % (v.get("name"), _tid, gate_ids["accepted"])); click_events.append({"gate": "tool_already_handled_this_utterance", "id": _tid}); stream_state["hash"] = None  # Mac voiceBackend.invalidateScreenshotHashCache() on this reject (CompanionManager 6e97782:622-623)
                             await client.tool_response(v["id"], v["name"], {"ok": False, "reason": "tool_already_handled_this_utterance", "message": "A tool call has already been accepted for this spoken request. Do not call another tool until the user speaks again."}); continue
                         if v.get("name") != "submit_workflow_plan": log("tool: unsupported tool %r refused (fail closed)" % v.get("name")); click_events.append({"gate": "unknown_tool_refused", "name": str(v.get("name"))}); await client.tool_response(v["id"], v["name"], {"ok": False, "status": "not_executed", "error": "unsupported tool"}); continue
+                        _corrected_voice_text = correction["voice_text"]
+                        correction["error"] = None
                         gate_ids["handled"].add(_tid); gate_ids["accepted"] = _tid
                         _g = str(args.get("goal") or "").strip()
                         _live = _goal_live()
@@ -1738,77 +2153,74 @@ def main():
                             await client.tool_response(v["id"], v["name"], {"ok": False, "reason": "plan_already_running", "message": "This exact plan is already executing on the user's machine. The user reads at human speed; an unchanged screenshot is normal. Do not re-submit this plan. Stay silent and wait for the user to speak again."}); continue
                         # A replacement proposal must not leave old delayed effects running behind pending UI.
                         from . import highlight as _hlg
-                        if voice_turn:  # the user's words come from the input transcript, which can lag the toolCall: wait (bounded), buffering other events
-                            _closed = [False]  # set once a turnComplete is QUEUED during this drain: every later transcript belongs to a NEW utterance and keeps its event order (buffered, not flattened into this call's intent)
-                            _scan = [0]
-                            async def _next_drain(_to):  # ordered consumption: FIRST the events already buffered in pending (an earlier drain's leftovers), then the live queue; skipped events stay queued in their original order
-                                while _scan[0] < len(pending):
-                                    _pk, _pv = pending[_scan[0]]
-                                    if _stale(_pk, _pv): pending.pop(_scan[0]); click_events.append({"gate": "stale_voice_epoch_dropped", "kind": _pk, "where": "pending-scan"}); continue  # a saved stale event is discarded BEFORE it can close this drain or be skipped over
-                                    if _pk == "turnComplete": _closed[0] = True
-                                    if _pk == "inputTranscript" and not _closed[0]: pending.pop(_scan[0]); return _pk, _pv, False
-                                    _scan[0] += 1
-                                _qk, _qv = await asyncio.wait_for(q.get(), _to); return _qk, _qv, True
-                            def _drain_ev(_k2, _v2, _fromq):
-                                if _stale(_k2, _v2): dlog("stale-epoch event dropped (drain):", _k2); click_events.append({"gate": "stale_voice_epoch_dropped", "kind": _k2, "where": "drain"}); return
-                                if _k2 == "turnComplete": _closed[0] = True
-                                if _k2 == "inputTranscript" and not _closed[0]: _ingest_tr(_v2, boundary=False)
-                                elif _fromq: pending.append((_k2, _v2)); _scan[0] = len(pending)
-                            _dl = time.time() + 3.0
-                            while not _cur_tr() and time.time() < _dl:
-                                try: _k2, _v2, _fq = await _next_drain(0.3)
-                                except asyncio.TimeoutError: continue
-                                _drain_ev(_k2, _v2, _fq)
-                            if _cur_tr():
-                                _dl = time.time() + 0.7  # let the last transcript chunks land
-                                while time.time() < _dl:
-                                    try: _k2, _v2, _fq = await _next_drain(0.2)
-                                    except asyncio.TimeoutError: continue
-                                    _drain_ev(_k2, _v2, _fq)
-                            text = _cur_tr()
-                            if not text:
-                                log("voice: no transcript of the spoken request; refusing to act or point")
-                                await client.tool_response(v["id"], v["name"], {"ok": False, "status": "not_executed", "error": "The spoken request could not be transcribed; ask the user to repeat it. Do not point."}); continue
-                        if _hlg.no_action_requested(text):  # USER intent gate: answer-only request -> no cursor, click, right-click or workflow, whatever the model calls
-                            GLib.idle_add(overlay.retire); tool_seen = {"source": "NO_ACTION_REQUESTED", "refused": "user asked for an answer only"}
-                            log("tool call suppressed: the request is answer-only (no pointing or action)")
-                            _aw = float(os.environ.get('TIPTOUR_ANSWER_WAIT_S', '20')); answer_wait.update(need=True, got=False, until=time.time() + _aw)
-                            _resp = _hlg.suppressed_payload(text, highlight_owner.committed())
-                            await client.tool_response(v["id"], v["name"], _resp)
+                        if voice_turn:
+                            if not voice_request_live():
+                                click_events.append({'gate': 'voice_candidate_refused', 'reason': 'request owner revoked before candidate'})
+                                await client.tool_response(v['id'], v['name'], {'ok': False, 'status': 'not_executed', 'error': 'The user stopped or replaced this request.'})
+                                continue
+                            if _corrected_voice_text:
+                                # The original utterance already reached finality before app-owned correction.
+                                # No new user utterance or authority is fabricated by the provider continuation.
+                                text = _corrected_voice_text
+                                await offer_plan(v, args, _corrected_voice_text, voice_hover=hover['context'] if hover_context.alive(hover['context'], own[0]) else None)
+                                continue
+                            voice_candidate['call'] = json.loads(json.dumps(v))
+                            click_events.append({"gate": "voice_candidate_held_until_complete", "id": _tid})
+                            await client.tool_response(v["id"], v["name"], {"ok": False, "status": "not_executed", "reason": "awaiting_complete_user_utterance", "message": "This is a nonexecuting candidate only. Finish transcribing the entire current user utterance, including restrictions. No proposal is displayed and nothing may execute before the enclosing turnComplete. Do not resubmit."})
                             continue
-                        # Pinned Mac semantic key normalization occurs before displaying/hashing the approval.
-                        from .app_skills import normalize_semantic_keyboard_steps
-                        args = dict(args, steps=normalize_semantic_keyboard_steps(args.get("steps", []), args.get("app", "")))
-                        # Native context is app-owned, deep-copied before immutable approval.
-                        hc = hover['context'] if voice_turn and hover_context.alive(hover['context'], own[0]) else None
-                        args = highlight_owner.bind(lambda committed: hover_context.bind(args, committed, hc))
-                        _canon = _plan_canon(args); _ph = _hashlib.sha256(_canon.encode()).hexdigest()  # CONFIRMATION GATE (after the voice transcript wait and the answer-only gate): hold EVERY plan. Nothing resolves, arms, points or clicks before the user approves THIS record.
-                        if prop["state"] == "pending" and prop["hash"] == _ph:  # identical plan re-submitted while the user is answering: SAME record, no new revision, the displayed proposal and any valid answer stay bound to it
-                            click_events.append({"gate": "same_hash_resubmit_ignored", "id": _tid, "rev": prop["rev"]}); log("confirmation: identical plan re-submitted (call %s); same record rev %d kept pending" % (_tid, prop["rev"]))
-                            await client.tool_response(v["id"], v["name"], {"ok": False, "reason": "awaiting_user_confirmation", "status": "not_executed", "message": "This exact plan is already proposed and waiting for the user's answer. Do not call any tool again."}); continue
-                        if prop["state"] == "approved":_revoke_approved("replacement proposal before display")
-                        if prop["state"] == "pending": _prop_clear("replaced by a newer proposal")
-                        prop.update(rev=prop["rev"] + 1, hash=_ph, args=json.loads(json.dumps(args)), text=text, state="pending", turn=i, id=_tid, shown=10**12, displayed=False, appr=0)  # shown stays unreachable until the render ack
-                        _pt = _plan_text(args); _note("plan rev %d was PROPOSED and is waiting for the user's yes (nothing executed): %s" % (prop["rev"], _pt.replace("\n", " | ")[:1500])); log("confirmation: plan HELD, rev %d hash %s: %s" % (prop["rev"], _ph[:12], _pt.replace("\n", " | "))); print("PLAN PROPOSAL rev %d:\n%s\nSay yes to run it, or no to cancel." % (prop["rev"], _pt), flush=True); GLib.idle_add(lambda _r=prop["rev"], _pl=_plain_text(json.loads(json.dumps(args))), _t=_pt: pprop.show_plan(_r, _pl, _t, lambda rv: loop.call_soon_threadsafe(_shown, rv)) and False)  # rev, plain text and raw details are bound IMMUTABLY at scheduling
-                        click_events.append({"gate": "plan_held_for_confirmation", "id": _tid, "rev": prop["rev"], "hash": _ph, "steps": len(args.get("steps") or []), "text_len": len(text or "")})
-                        await client.tool_response(v["id"], v["name"], {"ok": False, "reason": "awaiting_user_confirmation", "status": "not_executed", "message": "Nothing was done. The app is holding this plan until the USER says yes to it. Tell the user the plan in plain words (what you will do, in what order) and ask them to confirm. Do not call any tool again for this request.\n" + _pt})
+                        await offer_plan(v, args, text)
                     elif k == "turnComplete":
+                        if voice_turn and voice_request_live() and _cur_tr() and _norm_resp(_cur_tr()) not in (_YES | _NO | _STOP):
+                            with highlight_owner.lock:
+                                requests.accept(_cur_tr(), highlight_owner.context, highlight_owner.epoch)
+                                request_context_refs[id(highlight_owner.context)] = highlight_owner.context
+                            request_turn['key'] = (i, tr_state['base'])
+                        candidate = voice_candidate.pop('call', None) if voice_turn else None
+                        if candidate is not None:
+                            if not voice_request_live():
+                                click_events.append({'gate': 'voice_candidate_refused', 'reason': 'request owner revoked before finality'})
+                            elif not _cur_tr():
+                                click_events.append({"gate": "voice_candidate_refused", "reason": "complete utterance missing transcript"})
+                            elif _norm_resp(_cur_tr()) not in (_YES | _NO | _STOP):
+                                text = _cur_tr()
+                                click_events.append({"gate": "voice_candidate_finalized", "id": candidate['id'], "text_len": len(text)})
+                                await offer_plan(candidate, candidate.get('args', {}), text, send_reply=False,
+                                                 voice_hover=hover['context'] if hover_context.alive(hover['context'], own[0]) else None)
                         if voice_turn: _voice_utt(in_tr[tr_state["base"]:])
                         if voice_turn:
                             _sg = "".join(str(_x) for _x in in_tr[tr_state["base"]:]).strip()
                             if _sg: hist.insert(min(seg_pos[0] if seg_pos[0] is not None else len(hist), len(hist)), ("user", _sg))  # one entry per turnComplete-delimited utterance, at the position where it began
                             seg_pos[0] = None
                         tr_state["prev"] = 0; tr_state["base"] = len(in_tr)  # Mac onTurnComplete: previousInputTranscriptLength = 0; the next transcript is a NEW full transcript
+                        if correction['error'] and gate_ids['accepted'] is None and correction['attempts'] < 2:
+                            _correction_request = requests.snapshot() or requests.boundary()
+                            if (correction['boundary'] == request_boundary['n'] and _correction_request and
+                                    (not voice_turn or voice_request_live()) and not shutdown['requested']):
+                                correction['attempts'] += 1
+                                correction['request'] = _plan_canon(_correction_request)
+                                if voice_turn and not correction['voice_text']: correction['voice_text'] = _sg or None
+                                _fix = ('[TipTour invalid-plan correction, NOT user approval] The prior plan was rejected before review: ' + correction['error'] +
+                                        '\nOriginal complete user task and limits: ' + json.dumps(_correction_request) +
+                                        '\nAny unresolved continue/separate relation must remain unresolved until the normal full-plan review; do not drop previous limits. Submit the FULL corrected submit_workflow_plan now for app review. Do not ask for conversational approval first. Correct only invalid structure/key encoding, preserve the original goal, action order, literal values and limits. This is not execution approval; the user must review and confirm the resulting plan.')
+                                await client.send_text(_fix)
+                                if correction['boundary'] != request_boundary['n'] or (voice_turn and not voice_request_live()):
+                                    break
+                                click_events.append({'gate':'invalid_plan_correction_requested','attempt':correction['attempts']})
+                                continue
+                        if correction['error'] and gate_ids['accepted'] is None:
+                            log('Invalid plan correction ended without a valid proposal; nothing executed.')
+                            click_events.append({'gate':'invalid_plan_correction_unresolved','attempts':correction['attempts']})
                         if answer_wait["need"] and not answer_wait["got"] and time.time() < answer_wait["until"]:  # answer-only request: a turnComplete seen before any spoken answer is not the answer; keep listening (bounded)
                             log("turnComplete before any answer after the suppressed tool call; still waiting (bounded)"); continue
                         break
                     elif k == "closed": log("socket closed"); dlog("socket closed", v); tainted[0] = True; break
                 else:
                     if saw_event or not voice_turn: log("turn hit the 60s ceiling without a definitive completion"); tainted[0] = True
+                typed_reply['active'] = False  # reply consumer ended: no sentinel can be consumed during tail bookkeeping
                 if prop["state"] == "approved" and prop.get("kick"):  # voice approval: this turn body is finished, but the next listening turn would hold gate["turn"] open and the (unbounded-wait) approved replay would never start; release the gate and wait for the replay's real START (not a fixed delay)
                     prop["kick"] = False; gate["turn"] = False
                     while prop["state"] == "approved" and not prop.get("started"): await asyncio.sleep(0.05)
-                await asyncio.sleep(1.0 + 0.6)  # let glide finish
+                if k != 'typed_proposal_reply_retired': await asyncio.sleep(1.0 + 0.6)  # let glide finish
                 if tool_seen:
                     await asyncio.sleep(a.hold)
                     snap, _, _ = await asyncio.to_thread(grab); snap.save(os.path.join(a.out, "pointed-%d.png" % i))
@@ -1827,6 +2239,9 @@ def main():
         except asyncio.CancelledError:
             if not shutdown['requested']: raise
             log('shutdown: active body cancelled')
+        for _observer in _navigation_observers:
+            try: await _observer.close()
+            except Exception: pass
         voice_cleanup = {}
         highlight_owner.invalidate(close=True); hl['closed'].set()
         if hl['mon']: voice_cleanup['highlight_monitor'] = await asyncio.to_thread(hl['mon'].close)

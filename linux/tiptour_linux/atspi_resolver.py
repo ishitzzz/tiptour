@@ -133,6 +133,50 @@ def _coordinate_status(hint):
     if not h or len(found)!=1:raise RuntimeError("active native target window unavailable or ambiguous")
     return _screen_rect(found[0],True)
 
+def _active_context():
+    """Bind the X11 active client to a unique native application/window."""
+    from Xlib import display as xd
+    d = xd.Display()
+    try:
+        active = d.screen().root.get_full_property(d.intern_atom('_NET_ACTIVE_WINDOW'), 0)
+        if active is None or not len(active.value) or any(active.value[1:]): raise RuntimeError('X11 active window unavailable')
+        xid = int(active.value[0]); xw = d.create_resource_object('window', xid)
+        pp = xw.get_full_property(d.intern_atom('_NET_WM_PID'), 0)
+        np = xw.get_full_property(d.intern_atom('_NET_WM_NAME'), d.intern_atom('UTF8_STRING'))
+        pid = int(pp.value[0]) if pp is not None and len(pp.value) else None
+        title = np.value.decode('utf-8', 'replace') if np is not None else xw.get_wm_name()
+    finally: d.close()
+    if not pid or not title: raise RuntimeError('active X11 identity incomplete')
+    desk = Atspi.get_desktop(0); found = []
+    for i in range(desk.get_child_count()):
+        app = desk.get_child_at_index(i)
+        if app is None or _is_self(app) or app.get_process_id() != pid: continue
+        for j in range(app.get_child_count()):
+            w = app.get_child_at_index(j)
+            if w is not None and w.get_state_set().contains(Atspi.StateType.ACTIVE) and w.get_name() == title:
+                found.append((app, w))
+    if len(found) != 1: raise RuntimeError('active native/X11 identity unavailable or ambiguous')
+    app, w = found[0]; name = app.get_name() or ''
+    if not name or not w.path: raise RuntimeError('native identity incomplete')
+    mapping = _screen_rect(w, True)
+    focus = _focus_info(name)
+    if focus and (focus['identity']['pid'] != pid or focus['identity']['window_path'] != w.path):
+        raise RuntimeError('native focus is not bound to the active window')
+    d = xd.Display()
+    try:
+        active_after = d.screen().root.get_full_property(d.intern_atom('_NET_ACTIVE_WINDOW'), 0)
+        if active_after is None or not len(active_after.value) or int(active_after.value[0]) != xid or any(active_after.value[1:]):
+            raise RuntimeError('active X11 client changed during native context read')
+        after_map = _screen_rect(w, True)
+        if after_map != mapping: raise RuntimeError('native window mapping changed during context read')
+    finally: d.close()
+    return {'app': name, 'pid': pid, 'x11_client_id': xid, 'window_path': w.path,
+            'window_name': title, 'mapping': mapping,
+            'focus': {k: focus.get(k) for k in ('identity', 'role', 'name', 'editable', 'password', 'element_rect')} if focus else None}
+
+def active_context(timeout=5):
+    return _sub(['--active-context'], timeout)['context']
+
 def coordinate_status(hint,timeout=4):
     try:
         d=_sub(["--coordinates",hint or ""],timeout)
@@ -453,7 +497,7 @@ def _modal_title(hint):
         if w.get_role_name() in MODAL_ROLES or st.contains(Atspi.StateType.MODAL): return w.get_name() or ""
     return None
 
-def _focused_record(hint):
+def _focused_record(hint, allow_document=False):
     """Return the focused native object and stable per-session identity. No role-based editable inference."""
     h = (hint or "").strip().lower()
     if not h: return None, None
@@ -472,7 +516,7 @@ def _focused_record(hint):
     while stack and n < 20000:
         node, dep = stack.pop(); n += 1
         st = node.get_state_set(); rn = node.get_role_name()
-        if st.contains(Atspi.StateType.FOCUSED) and rn not in ("frame", "window", "application", "document web", "document frame"):
+        if st.contains(Atspi.StateType.FOCUSED) and rn not in (("frame", "window", "application") if allow_document else ("frame", "window", "application", "document web", "document frame")):
             txt = None; selection = None; caret = None
             ti = node.get_text_iface()
             import re
@@ -500,8 +544,8 @@ def _focused_record(hint):
                 if c is not None: stack.append((c, dep + 1))
     return None, None
 
-def _focus_info(hint):
-    return _focused_record(hint)[1]
+def _focus_info(hint, allow_document=False):
+    return _focused_record(hint, allow_document)[1]
 
 def _focused_write(req):
     # Identity-bound native write: a later focus change cannot redirect the write to another object.
@@ -564,16 +608,17 @@ def targets_isolated(timeout=6):
 
 
 if __name__ == "__main__":
-    if len(sys.argv) > 1 and sys.argv[1] in ("--probe", "--targets", "--ready", "--modal", "--fp", "--focus", "--focused-write", "--coordinates", "--resolve-targets"):
+    if len(sys.argv) > 1 and sys.argv[1] in ("--active-context", "--probe", "--targets", "--ready", "--modal", "--fp", "--focus", "--focus-document", "--focused-write", "--coordinates", "--resolve-targets"):
         try:
-            if sys.argv[1] == "--probe":
+            if sys.argv[1] == "--active-context": print(_json.dumps({"context": _active_context()}))
+            elif sys.argv[1] == "--probe":
                 rect = _json.loads(sys.argv[2]); hp = int(sys.argv[3]) or None; wall = _time.monotonic() + float(sys.argv[4])
                 el, sel = _probe(rect, hp, 4000, wall); print(_json.dumps({"element": el, "selection": sel}))
             elif sys.argv[1] == "--resolve-targets": print(_json.dumps({"targets": _target_window_nodes(sys.argv[2])}))
             elif sys.argv[1] == "--coordinates": print(_json.dumps({"mapping": _coordinate_status(sys.argv[2] if len(sys.argv)>2 else "")}))
             elif sys.argv[1] == "--fp": print(_json.dumps(_fingerprint(sys.argv[2] if len(sys.argv) > 2 else "")))
             elif sys.argv[1] == "--focused-write": print(_json.dumps(_focused_write(_json.load(sys.stdin))))
-            elif sys.argv[1] == "--focus": print(_json.dumps({"focus": _focus_info(sys.argv[2] if len(sys.argv) > 2 else "")}))
+            elif sys.argv[1] in ("--focus", "--focus-document"): print(_json.dumps({"focus": _focus_info(sys.argv[2] if len(sys.argv) > 2 else "", sys.argv[1] == "--focus-document")}))
             elif sys.argv[1] == "--modal": print(_json.dumps({"title": _modal_title(sys.argv[2] if len(sys.argv) > 2 else "")}))
             elif sys.argv[1] == "--ready": print(_json.dumps({"ready": bool(ready(2.5))}))
             elif len(sys.argv) > 3 and sys.argv[2] == "--app": print(_json.dumps({"targets": _app_targets(sys.argv[3])}))  # filter in the child

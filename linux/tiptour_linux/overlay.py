@@ -60,10 +60,17 @@ class PointerOverlay(Gtk.Window):
         scr = self.get_screen(); vis = scr.get_rgba_visual()
         self.composited = bool(vis and scr.is_composited())
         if self.composited: self.set_visual(vis)
-        self.connect("draw", lambda w, c: (self.paint(c), False)[1]); self.connect("realize", self.on_realize)
+        self.connect("draw", self._draw_pointer); self.connect("realize", self.on_realize)
         m = self._mouse(); self.cur = (m[0] + FOLLOW_OFFSET[0], m[1] + FOLLOW_OFFSET[1]); self.tip = self.cur; self.vel = (0.0, 0.0)
         self.mode = "follow"; self.rot = 0.0; self.scale = 1.0; self.flight = None; self.returning = False; self.nav_mouse = m; self.target = None; self.land_rot = 0.0; self.events = []
         GLib.timeout_add(TICK_MS, self._tick)
+    def _draw_pointer(self, widget, context):
+        self.paint(context)
+        if self.mode == 'point' and not self.retired and getattr(self, '_arrival_callback', None):
+            cb=self._arrival_callback;self._arrival_callback=None
+            self._log('arrival_drawn', target=self.target)
+            GLib.idle_add(lambda: (cb(), False)[1])
+        return False
     # ---- helpers ----
     def _mouse(self):
         try:
@@ -118,8 +125,9 @@ class PointerOverlay(Gtk.Window):
         c1 = (sx + ux * cd + nx * ah, sy + uy * cd + ny * ah); c2 = (dest[0] - ux * cd - nx * ah * 0.65, dest[1] - uy * cd - ny * ah * 0.65)
         self.flight = dict(kind="bezier", t0=time.monotonic(), dur=dur, start=(sx, sy), end=dest, c1=c1, c2=c2, land=land_rot, follows=follows, done=on_done, prev=(sx, sy), smooth_rot=self.rot)
         self._log("flight_start", dist=round(dist, 1), dur=round(dur, 3), to=(round(dest[0], 1), round(dest[1], 1)), returning=self.returning)
-    def point_to(self, x, y, label="", glide_ms=None):
+    def point_to(self, x, y, label="", glide_ms=None, on_arrived=None):
         """startNavigatingToElement: leave follow mode, fly a bezier arc to the landing pose, settle, then hold and point (bubble shown)."""
+        self._arrival_callback = on_arrived
         self.label = label[:40]; self.show_label = False; self.retired = False; self.target = (float(x), float(y)); self.show_all()
         self.nav_mouse = self._mouse(); self.mode = "nav"; self.returning = False
         pose_c, pose_rot, side = self.landing_pose(self.target); self.land_rot = pose_rot; self.tip = self.target
@@ -127,10 +135,11 @@ class PointerOverlay(Gtk.Window):
         self._start_flight(pose_c, pose_rot, True, self._arrived)
     def _arrived(self):   # startPointingAtElement
         if self.mode != "nav" or self.returning or getattr(self, "retired", False): self._log("arrival_ignored", retired=getattr(self, "retired", False)); return   # release must win: a late arrival may not revive the label
-        self.mode = "point"; self.rot = self.land_rot; self.show_label = True; self._log("pointing", at=(round(self.cur[0], 1), round(self.cur[1], 1)))
+        self.mode = "point"; self.rot = self.land_rot; self.show_label = True; self.queue_draw(); self._log("pointing", at=(round(self.cur[0], 1), round(self.cur[1], 1)))
     def retire(self):
         """releaseHeldPointerAndFlyBack: the held pointer is released (target clicked / skipped / plan ended); 0.25s later it flies back to the user's cursor."""
         if self.mode not in ("point", "nav") or self.returning: return
+        self._arrival_callback = None
         self.retired = True; self.show_label = False; self.queue_draw(); self._log("release", mode=self.mode)
         GLib.timeout_add(int(RELEASE_DELAY_S * 1000), lambda: (self._fly_back(), False)[1])
     def _fly_back(self):   # startFlyingBackToCursor
@@ -251,11 +260,11 @@ class ProposalPanel(Gtk.Window):
         box.pack_start(self.head, False, False, 0); box.pack_start(sw, True, True, 0); box.pack_start(row, False, False, 0)
         frame = Gtk.Frame(); frame.add(box); self.add(frame)
     rev = -1  # -1 = hidden: a click can never match a live proposal
-    def show_plan(self, rev, text, details="", on_shown=None):
+    def show_plan(self, rev, text, details="", on_shown=None, separate=False):
         self.rev = -1; self._pending_rev = rev; self._on_shown = on_shown
         for _c in list(self.row.get_children()): self.row.remove(_c); _c.destroy()  # NEW button instances per episode, each bound to ITS revision at creation (closure), dead until this episode is drawn: an old button/queued click cannot exist for a newer revision
-        self.ok = Gtk.Button(label="Confirm"); self.no = Gtk.Button(label="Cancel")
-        self.ok.connect("clicked", lambda *_, r=rev: self._on_answer("confirm", r)); self.no.connect("clicked", lambda *_, r=rev: self._on_answer("cancel", r))
+        self.ok = Gtk.Button(label="Start separate task and run" if separate else "Confirm"); self.no = Gtk.Button(label="Cancel")
+        self.ok.connect("clicked", lambda *_, r=rev: self._on_answer("confirmseparate" if separate else "confirm", r)); self.no.connect("clicked", lambda *_, r=rev: self._on_answer("cancel", r))
         self.ok.set_sensitive(False); self.no.set_sensitive(False); self.row.pack_start(self.ok, False, False, 0); self.row.pack_start(self.no, False, False, 0); self.row.show_all()
         if not getattr(self, "_draw_hooked", False): self._draw_hooked = True; self.connect("draw", self._drawn)
         self.head.set_markup("<b>Proposed plan, revision %d. Nothing runs until you confirm.</b>" % rev); self.body.set_text(text); self.detail.set_text(details); self.show_all(); GLib.idle_add(lambda: (self.sw.get_vadjustment().set_value(0), False)[1])  # always start at the TOP of the plan
