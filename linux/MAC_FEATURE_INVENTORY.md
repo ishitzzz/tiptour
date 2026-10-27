@@ -1,6 +1,6 @@
 # Linux TipTour feature inventory
 
-Candidate R44 adds app-skill loading and pre-proposal semantic keyboard normalization; R42 remains the accepted runtime milestone. Read the latest PARITY.md section before interpreting this earlier inventory. Supported X11 backing capture avoids capture-hide flicker and excludes three own UI windows; unsupported backing uses logged hide fallback. Autopilot uses the pinned 0.28s minimum with a bounded same-step validator-baseline dependency. Whole-product parity remains open.
+Read the latest R52 PARITY section for current bounded tray/shutdown/voice-lifecycle evidence. The inventory below predates those checkpoints and is not a complete current status table. Read the latest PARITY.md section before interpreting this earlier inventory. Supported X11 backing capture avoids capture-hide flicker and excludes three own UI windows; unsupported backing uses logged hide fallback. Autopilot uses the pinned 0.28s minimum with a bounded same-step validator-baseline dependency. Whole-product parity remains open.
 
 
 This replaces the superseded status tables kept in HISTORICAL_MAC_FEATURE_INVENTORY.md. Those tables describe earlier unfinished builds, not current capabilities. This is a work-in-progress port, not a whole-product readiness claim.

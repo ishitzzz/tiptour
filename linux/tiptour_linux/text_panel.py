@@ -99,6 +99,12 @@ class TextPanel(Gtk.Window):
         if not self.async_call(read, done): self.target = None
         return False
 
+    def open_from_menu(self):
+        # A tray menu can own focus. Never interpret that as the old app's consent.
+        self.epoch += 1; self.target = None; self.busy = False
+        self.activity.set_text('Focus the target app, then press Ctrl+K before submitting.')
+        self.show_all(); self.present(); self.entry.grab_focus()
+
     def restore(self, target, valid):
         # Cancellation before dispatch prevents activation. An activation already
         # delivered to the WM cannot be recalled. Cancel kills a waiting client.

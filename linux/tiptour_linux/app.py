@@ -80,12 +80,16 @@ def main():
     from .overlay import ProposalPanel
     hl_post = {"fn": None}
     pprop = ProposalPanel(lambda k, rev: hl_post["fn"] and hl_post["fn"]("@%s %d" % (k, rev)))
-    text_ui = None
+    text_ui = None; status_item = None
     if a.text_ui:
         from .text_panel import TextPanel
         text_ui = TextPanel(lambda t: hl_post["fn"] and hl_post["fn"](t))
         text_status["panel"] = text_ui
-    def own_windows(): return tuple(w for w in (overlay, panel, pprop, text_ui) if w is not None)
+        from .status_item import StatusItem
+        status_item = StatusItem(text_ui.open_from_menu, text_ui.stop_work, lambda: hl_post['fn'] and hl_post['fn']('@quit'))
+    def own_windows():
+        menu_window = status_item.capture_window() if status_item else None
+        return tuple(w for w in (overlay, panel, pprop, text_ui, menu_window) if w is not None)
     hl = {"loop": None, "q": None, "mon": None, "trail": None}
     if a.highlight:
         from . import highlight as _hl
@@ -159,7 +163,9 @@ def main():
         def _hide_own():
             if _capture_token != plan_tok["n"]:return
             for w in own_windows():
-                if w.get_visible():_was.append(w);w.hide()
+                if w.get_visible():
+                    if status_item and w is status_item.capture_window(): status_item.dismiss_for_capture()
+                    else: _was.append(w);w.hide()
             _hidden_ack[0]=True
         try:
             if not _clean:
@@ -263,6 +269,7 @@ def main():
             click_events.append({"control": "retry_refused", "reason": "target not verifiable at its place"}); log("control retry refused: target not verifiable at its place"); return
         _retry_tail()
     async def run():
+        run_task = asyncio.current_task()
         class _SV(str): arr = 0; sess = 0
         class _TCv(dict): sess = 0
         pipe = {"tok": 0, "task": None}
@@ -280,7 +287,7 @@ def main():
                 if _late: k, v = v
                 _e = vs["n"]  # the epoch of the ORIGIN at callback time (a delivery that runs after a later toggle/replacement must not take the newer epoch)
                 def _put(k=k, v=v, _e=_e):
-                    if g != gen[0] or _e != vs["n"]: click_events.append({"gate": "late_callback_rejected", "kind": k}); return  # delivery-time checks BEFORE any side effect (arrival number, ingress STOP latch, buffers): a replaced session's or an earlier epoch's callback that executes after a toggle/replacement is rejected. The origin epoch is the one captured at callback time
+                    if ing.get("shutdown") or g != gen[0] or _e != vs["n"]: click_events.append({"gate": "late_callback_rejected", "kind": k}); return  # delivery-time checks BEFORE any side effect (arrival number, ingress STOP latch, buffers): a replaced session's or an earlier epoch's callback that executes after a toggle/replacement is rejected. The origin epoch is the one captured at callback time
                     arr["n"] += 1
                     if k != "audio": dlog("evt", k, arr["n"], str(v)[:20] if k == "inputTranscript" else "")
                     if k == "inputTranscript" and hl.get("readonly_worker"): hl["readonly_worker"].cancel_current()
@@ -346,6 +353,7 @@ def main():
             pipe["task"] = asyncio.ensure_future(_writer(cl, _pq, _tok, own[0])); return _n
         def _chunk(b):  # mic thread -> the gate: buffered IN ORDER while not ready, else the current session's ordered queue
             with vg["lock"]:  # queue selection AND scheduling happen under the SAME lock the sentinel swap uses, so a chunk is scheduled strictly before (and ordered ahead of) a later sentinel; a chunk after the swap goes to buf
+                if ing.get("shutdown"): return
                 if not vg["ready"] or vg["pq"] is None: vg["buf"].append(b); return
                 loop.call_soon_threadsafe(vg["pq"].put_nowait, b)
         async def _hydrate(cl, seed):  # restore the conversation on a FRESH connection through the provider's documented route (clientContent turns with explicit roles, turnComplete false); a failure is LOUD and aborts, never a silently reduced context
@@ -402,8 +410,25 @@ def main():
         stream_task = asyncio.create_task(stream_frames()) if os.environ.get('TIPTOUR_STREAM', '1') == '1' else None
         await asyncio.sleep(2.0 if stream_task else 0)
         serve_q = asyncio.Queue()
-        cmd_ep = {}; cmd_gen = {}; edge = {"n": 0}
+        cmd_ep = {}; cmd_gen = {}; edge = {"n": 0}; shutdown = {"requested": False}
         def _enq(t):
+            if shutdown['requested']: return
+            if t == '@quit':
+                shutdown['requested'] = True; ing['shutdown'] = True
+                if ptt_monitor: ptt_monitor.stop()
+                if ing.get('ready'): _stop_work('shutdown-ingress')
+                if hl.get('readonly_worker'): hl['readonly_worker'].cancel_current()
+                _off_edge()
+                try: mic and mic.stop()
+                except Exception: pass
+                # Wake both typed and voice bodies, not only the FIFO reader.
+                q.put_nowait(('closed', 'local shutdown'))
+                while not serve_q.empty(): serve_q.get_nowait()
+                arr['n'] += 1; serve_q.put_nowait((arr['n'], '@quit'))
+                click_events.append({'gate': 'shutdown_at_ingress'})
+                if stream_task: stream_task.cancel()
+                run_task.cancel()  # owned active body: capture/connect/highlight/send waits unwind
+                return
             if hl.get("readonly_worker"): hl["readonly_worker"].cancel_current()
             if ing.get("ready") and not t.startswith("@") and _norm_resp(t) in _STOP and (_goal_live() or prop["state"] in ("pending", "approved")):  # typed/UI STOP at INGRESS: stops at receipt, ahead of any queued/long voice turn; not enqueued (a late consumer must not stop NEWER work)
                 _stop_work("typed-ingress"); click_events.append({"gate": "typed_stop_at_ingress"}); return
@@ -452,7 +477,7 @@ def main():
                 _orig = hl['mon'].on_commit
                 def _both(pts, chord): loop.call_soon_threadsafe(_enq, "@highlight"); _orig(pts, chord)  # queue the highlight turn FIRST (FIFO) so a following utterance cannot overtake the still-building context
                 hl['mon'].on_commit = _both
-        player = mic = None
+        player = mic = ptt_monitor = None
         if os.environ.get('TIPTOUR_TEST_MODE') == '1' and os.environ.get('TIPTOUR_TEST_FAKE_MIC') == '1':  # TEST SEAM (needs TIPTOUR_TEST_MODE=1): a stub mic so a voice turn (@voice) runs with a fake model and NO audio capture/STT
             import types as _ty; mic = _ty.SimpleNamespace(active=True); mic.start = lambda: setattr(mic, "active", True); mic.stop = lambda: setattr(mic, "active", False)  # stateful like the real Mic: start/stop toggle .active
         if a.voice:
@@ -460,13 +485,24 @@ def main():
             player = _v.Player(); _w = _v.echo_risk()
             if _w: log('voice warning: ' + _w)
             else: log('voice: source/sink names do not form a loopback; speaker-to-mic acoustic echo is NOT checked (use headphones or echo-cancel)')
-            mic = _v.Mic(_chunk)
-            def _ptt():  # Mac: the Control+Option press edge TOGGLES the live voice session
+            def _mic_error(why, generation):
+                if ing.get('shutdown'): return
+                if generation != mic.generation:
+                    click_events.append({'gate': 'old_mic_error_rejected'}); return
+                # Provider reconnects can change voice owner without replacing capture.
+                # A failure of this native capture still aborts its current session.
+                _abort_voice(why)
+            mic = _v.Mic(_chunk, on_error=lambda why, generation: loop.call_soon_threadsafe(_mic_error, why, generation))
+            def _ptt():  # Runs on the owned loop, atomically with shutdown ingress.
+                if ing.get("shutdown"): return
                 if mic.active: mic.stop(); loop.call_soon_threadsafe(_off_edge); log("voice: off")
                 else:
                     with vg["lock"]: vg["ready"] = False; vg["buf"] = []
-                    mic.start(); loop.call_soon_threadsafe(_enq, "@voice"); log("voice: on")
-            _v.PttMonitor(_ptt).start()
+                    _enq("@voice")  # establish owner before starting the native capture
+                    try: mic.start()
+                    except OSError: _abort_voice('microphone could not start', own[0]); return
+                    log("voice: on")
+            ptt_monitor = _v.PttMonitor(lambda: loop.call_soon_threadsafe(_ptt)); ptt_monitor.start()
         async def _asks():
             if not a.serve:
                 for t in a.ask: yield t
@@ -477,8 +513,6 @@ def main():
                     # NEW UTTERANCE IS NOT A TRANSITION (Mac CompanionManager/WorkflowRunner 6e97782): nothing is cancelled here and an in-flight replay/advance is not awaited. The old plan keeps running until a toolCall supersedes it (the accept path above stops it: cancel + disarm + plan_tok bump) or a control (skip/stop/retry/resume) replaces it; stale results are refused by plan_tok / generation checks.
                     gate['turn'] = True
                     if t == "@quit":
-                        if mic: mic.stop()
-                        if player: player.close()
                         return
                     yield t
         def _own_rec(r, oc, yolo_, ocr_, mp, pc=None): return {"pin": oc["seq"], "perc": mp, "pair": oc["pair"], "size": r[2], "yolo": yolo_, "ocr": ocr_, "cache": pc}  # cache = this perception pass's PRIVATE LocalPerceptionTargetCache (same class/TTL/update as the global one); never replaced by a later pass
@@ -1081,287 +1115,303 @@ def main():
         i = -1; pend_store = []; cur_vs = [0]; hist = []
         def _note(t): hist.append(("user", "[TipTour app record, not spoken by the user] " + t))  # app-side events the model must not forget across a fresh connection: proposal held/approved/declined/stopped (text only)
           # prior conversation text (role, text), rehydrated into a fresh per-PTT provider connection so model context is not lost  # events a voice turn dequeued but did not consume (e.g. transcript chunks after the turnComplete that ended it) belong to the NEXT utterance of the same voice session: kept here so they are never discarded between turns
-        async for text in _asks():
-            i += 1; pause_rs['r'] = None; PREV_STEP_POINT['p'] = None; stream_state['suppressed'] = False  # Mac: user speech / PTT clears the post-tool-call suppression
-            _arrv0 = gate.get("arrival", 0); voice_turn = text in ("@voice", "@voice-next"); in_tr = []; seg_pos = [None]; _h0 = len(hist)
-            if text == "@voice": pend_store.clear(); cur_vs[0] = cmd_ep.pop(_arrv0, vs["n"])
-            def _stale(_k, _v): return voice_turn and _k in ("inputTranscript", "turnComplete") and getattr(_v, "sess", cur_vs[0]) != cur_vs[0]  # a NEW voice session starts clean. A typed/other ask must NOT clear it: the voice stream keeps its chunk chronology (a typed control cannot erase a pre-display prefix while its suffix is still queued)
-            pending = pend_store if voice_turn else []
-            if not voice_turn: ing["parts"] = []
-            _arrv = gate.get("arrival", 0); _m = _re2.fullmatch(r"@(confirm|cancel) (\d+)", text)
-            if text.startswith("@confirm") or text.startswith("@cancel"):  # EXACT "@confirm <rev>" / "@cancel <rev>" only
-                if not _m: log("confirmation: malformed control %r ignored" % text[:40]); click_events.append({"gate": "confirm_malformed"}); results.append({"ask": text, "confirmation": "malformed control ignored"}); continue
-                _kind, _rv = _m.group(1), int(_m.group(2))
-                if prop["state"] not in ("pending", "approved") or _rv != prop["rev"] or _arrv <= (prop.get("shown") or 0) or (prop["state"] == "pending" and not prop.get("displayed")):
-                    log("confirmation: %s refused: stale/unbound (pending rev %s, state %s)" % (text, prop["rev"], prop["state"])); click_events.append({"gate": "confirm_refused_stale", "given": str(_rv), "pending": prop["rev"]}); results.append({"ask": text, "confirmation": "refused stale"}); continue
-                if _kind == "confirm" and prop["state"] == "pending": _approve_pending("control", i); results.append({"ask": text, "confirmation": "approved rev %d" % prop["rev"]})
-                elif _kind == "cancel" and prop["state"] == "pending": _prop_clear("user declined"); results.append({"ask": text, "confirmation": "declined, nothing executed"})
-                elif _kind == "cancel" and prop["state"] == "approved": _stop_work("control"); results.append({"ask": text, "confirmation": "approved plan revoked"})
-                else: results.append({"ask": text, "confirmation": "no change"})
-                continue
-            if not voice_turn and not text.startswith("@") and _norm_resp(text) in _STOP and prop["state"] not in ("pending", "approved") and _goal_live(): _stop_work("text"); results.append({"ask": text, "confirmation": "stopped running work"}); continue  # no record but work is live: STOP still stops it
-            if not voice_turn and not text.startswith("@") and prop["state"] in ("pending", "approved"):
-                _r = _norm_resp(text)
-                if _r in _STOP: _stop_work("text"); results.append({"ask": text, "confirmation": "stopped: pending cleared, approved/running work stopped"}); continue
-                if prop["state"] == "approved": pass
-                elif _r in _YES or _r in _NO:
-                    if _arrv <= (prop.get("shown") or 0) or not prop.get("displayed"): log("confirmation: %r arrived BEFORE the proposal was displayed; ignored, plan stays pending" % _r); click_events.append({"gate": "answer_before_display_ignored", "rev": prop["rev"]}); results.append({"ask": text, "confirmation": "ignored: arrived before the proposal was displayed"}); continue
-                    if _r in _YES: _approve_pending("text", i); results.append({"ask": text, "confirmation": "approved rev %d" % prop["rev"]})
-                    else: _prop_clear("user declined"); results.append({"ask": text, "confirmation": "declined, nothing executed"})
+        try:
+            async for text in _asks():
+                i += 1; pause_rs['r'] = None; PREV_STEP_POINT['p'] = None; stream_state['suppressed'] = False  # Mac: user speech / PTT clears the post-tool-call suppression
+                _arrv0 = gate.get("arrival", 0); voice_turn = text in ("@voice", "@voice-next"); in_tr = []; seg_pos = [None]; _h0 = len(hist)
+                if text == "@voice": pend_store.clear(); cur_vs[0] = cmd_ep.pop(_arrv0, vs["n"])
+                def _stale(_k, _v): return voice_turn and _k in ("inputTranscript", "turnComplete") and getattr(_v, "sess", cur_vs[0]) != cur_vs[0]  # a NEW voice session starts clean. A typed/other ask must NOT clear it: the voice stream keeps its chunk chronology (a typed control cannot erase a pre-display prefix while its suffix is still queued)
+                pending = pend_store if voice_turn else []
+                if not voice_turn: ing["parts"] = []
+                _arrv = gate.get("arrival", 0); _m = _re2.fullmatch(r"@(confirm|cancel) (\d+)", text)
+                if text.startswith("@confirm") or text.startswith("@cancel"):  # EXACT "@confirm <rev>" / "@cancel <rev>" only
+                    if not _m: log("confirmation: malformed control %r ignored" % text[:40]); click_events.append({"gate": "confirm_malformed"}); results.append({"ask": text, "confirmation": "malformed control ignored"}); continue
+                    _kind, _rv = _m.group(1), int(_m.group(2))
+                    if prop["state"] not in ("pending", "approved") or _rv != prop["rev"] or _arrv <= (prop.get("shown") or 0) or (prop["state"] == "pending" and not prop.get("displayed")):
+                        log("confirmation: %s refused: stale/unbound (pending rev %s, state %s)" % (text, prop["rev"], prop["state"])); click_events.append({"gate": "confirm_refused_stale", "given": str(_rv), "pending": prop["rev"]}); results.append({"ask": text, "confirmation": "refused stale"}); continue
+                    if _kind == "confirm" and prop["state"] == "pending": _approve_pending("control", i); results.append({"ask": text, "confirmation": "approved rev %d" % prop["rev"]})
+                    elif _kind == "cancel" and prop["state"] == "pending": _prop_clear("user declined"); results.append({"ask": text, "confirmation": "declined, nothing executed"})
+                    elif _kind == "cancel" and prop["state"] == "approved": _stop_work("control"); results.append({"ask": text, "confirmation": "approved plan revoked"})
+                    else: results.append({"ask": text, "confirmation": "no change"})
                     continue
-                else: _prop_clear("new unrelated request")  # any other user request invalidates the pending plan; it then goes to the model as usual
-            _had_state = prop["state"] if (voice_turn and prop["state"] in ("pending", "approved") and prop["turn"] < i) else None; _had_rev = prop["rev"]  # the record this voice turn may answer
-            if voice_turn:
-                if not (mic and mic.active): continue  # toggled off before this turn started
-                _keep = []
-                while not q.empty(): _keep.append(q.get_nowait())
-                for _it in _keep:
-                    if _it[0] != "voice_stop": q.put_nowait(_it)  # a stop signal from an earlier session must not end this one
-                if text == "@voice":  # PER-PTT-SESSION FRESH PROVIDER CONNECTION. OWNERSHIP: this attempt owns the voice gate/mic/buffer only while own[0] is unchanged (any newer PTT edge, OFF edge or abort bumps it); cleanup of a failed/superseded attempt NEVER touches a newer owner's state
-                    _tc0 = time.time(); _g0 = cmd_gen.pop(_arrv0, edge["n"])
-                    if edge["n"] != _g0: click_events.append({"gate": "voice_command_superseded", "at": "dequeue"}); log("voice: this PTT-on was superseded by a newer edge before it started; skipped"); continue
-                    _o = own[0]; _pre = gen[0]
-                    await _retire(client)  # end the old writer (queued audio is flushed, in-flight send awaited within 3 s, else cancelled and logged) THEN close the old client
-                    if own[0] != _o: click_events.append({"gate": "voice_command_superseded", "at": "close"}); continue
-                    _pre = gen[0]; _nc = None
+                if not voice_turn and not text.startswith("@") and _norm_resp(text) in _STOP and prop["state"] not in ("pending", "approved") and _goal_live(): _stop_work("text"); results.append({"ask": text, "confirmation": "stopped running work"}); continue  # no record but work is live: STOP still stops it
+                if not voice_turn and not text.startswith("@") and prop["state"] in ("pending", "approved"):
+                    _r = _norm_resp(text)
+                    if _r in _STOP: _stop_work("text"); results.append({"ask": text, "confirmation": "stopped: pending cleared, approved/running work stopped"}); continue
+                    if prop["state"] == "approved": pass
+                    elif _r in _YES or _r in _NO:
+                        if _arrv <= (prop.get("shown") or 0) or not prop.get("displayed"): log("confirmation: %r arrived BEFORE the proposal was displayed; ignored, plan stays pending" % _r); click_events.append({"gate": "answer_before_display_ignored", "rev": prop["rev"]}); results.append({"ask": text, "confirmation": "ignored: arrived before the proposal was displayed"}); continue
+                        if _r in _YES: _approve_pending("text", i); results.append({"ask": text, "confirmation": "approved rev %d" % prop["rev"]})
+                        else: _prop_clear("user declined"); results.append({"ask": text, "confirmation": "declined, nothing executed"})
+                        continue
+                    else: _prop_clear("new unrelated request")  # any other user request invalidates the pending plan; it then goes to the model as usual
+                _had_state = prop["state"] if (voice_turn and prop["state"] in ("pending", "approved") and prop["turn"] < i) else None; _had_rev = prop["rev"]  # the record this voice turn may answer
+                if voice_turn:
+                    if not (mic and mic.active): continue  # toggled off before this turn started
+                    _keep = []
+                    while not q.empty(): _keep.append(q.get_nowait())
+                    for _it in _keep:
+                        if _it[0] != "voice_stop": q.put_nowait(_it)  # a stop signal from an earlier session must not end this one
+                    if text == "@voice":  # PER-PTT-SESSION FRESH PROVIDER CONNECTION. OWNERSHIP: this attempt owns the voice gate/mic/buffer only while own[0] is unchanged (any newer PTT edge, OFF edge or abort bumps it); cleanup of a failed/superseded attempt NEVER touches a newer owner's state
+                        _tc0 = time.time(); _g0 = cmd_gen.pop(_arrv0, edge["n"])
+                        if edge["n"] != _g0: click_events.append({"gate": "voice_command_superseded", "at": "dequeue"}); log("voice: this PTT-on was superseded by a newer edge before it started; skipped"); continue
+                        _o = own[0]; _pre = gen[0]
+                        await _retire(client)  # end the old writer (queued audio is flushed, in-flight send awaited within 3 s, else cancelled and logged) THEN close the old client
+                        if own[0] != _o: click_events.append({"gate": "voice_command_superseded", "at": "close"}); continue
+                        _pre = gen[0]; _nc = None
+                        try: _nc, _nk = await new_session()
+                        except Exception as _ex:
+                            log("voice: could not open a fresh provider connection (%s); voice is OFF for this press - press PTT again" % type(_ex).__name__); click_events.append({"gate": "voice_fresh_conn_failed", "err": type(_ex).__name__})
+                            _abort_voice("fresh connection failed", _o); continue
+                        if gen[0] != _pre + 1 or own[0] != _o:
+                            click_events.append({"gate": "voice_command_superseded", "at": "connect"}); log("voice: a newer PTT edge superseded this connection; closing it")
+                            await _close_bounded(_nc); continue
+                        client, key = _nc, _nk; tainted[0] = False; pend_store.clear(); cur_vs[0] = vs["n"]
+                        if not await _hydrate(client, True):
+                            await _close_bounded(client); _abort_voice("continuity restore failed", _o); continue
+                        if gen[0] != _pre + 1 or own[0] != _o:
+                            click_events.append({"gate": "voice_command_superseded", "at": "seed"}); log("voice: a newer PTT edge superseded this connection during restore; closing it")
+                            await _close_bounded(client); tainted[0] = True; continue
+                        _n = _install_writer(client)  # no await between the last ownership check and the install
+                        _ms = int((time.time() - _tc0) * 1000); log("voice: fresh provider connection ready in %d ms (%d buffered audio chunks queued in order)" % (_ms, _n)); click_events.append({"gate": "voice_fresh_conn", "ms": _ms, "buffered": _n})
+                    text = ""
+                if tainted[0]:  # a previous turn never reached a definitive completion: late events could be misattributed, so start a FRESH session explicitly (no silent drain). The OLD generation/gate is invalidated BEFORE any await.
+                    log("previous turn did not complete definitively; replacing the session before this request")
+                    old = client; gen[0] += 1; vs["n"] += 1; ing["parts"] = []; own[0] += 1; _o = own[0]
+                    with vg["lock"]:
+                        vg["ready"] = False
+                        if vg.get("pq") is not None: _end_pq(vg["pq"])
+                        vg["pq"] = None
+                    await _retire(old)
+                    if voice_turn and own[0] != _o:  # an OFF/newer ON arrived while the old session was being retired: this stale attempt makes NO new connection and changes NO generation/epoch
+                        click_events.append({"gate": "voice_command_superseded", "at": "tainted_retire"}); log("voice/session: superseded while retiring the old session; no replacement made (the newer edge owns it)"); tainted[0] = True; continue
+                    _pre_t = gen[0]; _fail = None; _nc = None
                     try: _nc, _nk = await new_session()
-                    except Exception as _ex:
-                        log("voice: could not open a fresh provider connection (%s); voice is OFF for this press - press PTT again" % type(_ex).__name__); click_events.append({"gate": "voice_fresh_conn_failed", "err": type(_ex).__name__})
-                        _abort_voice("fresh connection failed", _o); continue
-                    if gen[0] != _pre + 1 or own[0] != _o:
-                        click_events.append({"gate": "voice_command_superseded", "at": "connect"}); log("voice: a newer PTT edge superseded this connection; closing it")
-                        await _close_bounded(_nc); continue
-                    client, key = _nc, _nk; tainted[0] = False; pend_store.clear(); cur_vs[0] = vs["n"]
-                    if not await _hydrate(client, True):
-                        await _close_bounded(client); _abort_voice("continuity restore failed", _o); continue
-                    if gen[0] != _pre + 1 or own[0] != _o:
-                        click_events.append({"gate": "voice_command_superseded", "at": "seed"}); log("voice: a newer PTT edge superseded this connection during restore; closing it")
-                        await _close_bounded(client); tainted[0] = True; continue
-                    _n = _install_writer(client)  # no await between the last ownership check and the install
-                    _ms = int((time.time() - _tc0) * 1000); log("voice: fresh provider connection ready in %d ms (%d buffered audio chunks queued in order)" % (_ms, _n)); click_events.append({"gate": "voice_fresh_conn", "ms": _ms, "buffered": _n})
-                text = ""
-            if tainted[0]:  # a previous turn never reached a definitive completion: late events could be misattributed, so start a FRESH session explicitly (no silent drain). The OLD generation/gate is invalidated BEFORE any await.
-                log("previous turn did not complete definitively; replacing the session before this request")
-                old = client; gen[0] += 1; vs["n"] += 1; ing["parts"] = []; own[0] += 1; _o = own[0]
-                with vg["lock"]:
-                    vg["ready"] = False
-                    if vg.get("pq") is not None: _end_pq(vg["pq"])
-                    vg["pq"] = None
-                await _retire(old)
-                if voice_turn and own[0] != _o:  # an OFF/newer ON arrived while the old session was being retired: this stale attempt makes NO new connection and changes NO generation/epoch
-                    click_events.append({"gate": "voice_command_superseded", "at": "tainted_retire"}); log("voice/session: superseded while retiring the old session; no replacement made (the newer edge owns it)"); tainted[0] = True; continue
-                _pre_t = gen[0]; _fail = None; _nc = None
-                try: _nc, _nk = await new_session()
-                except Exception as _ex: _fail = "could not open a replacement connection (%s)" % type(_ex).__name__
-                if _fail is None and (gen[0] != _pre_t + 1 or (voice_turn and own[0] != _o)):
-                    _fail = "a PTT/OFF edge arrived during the replacement"; click_events.append({"gate": "voice_command_superseded", "at": "tainted_replace"})
-                    await _close_bounded(_nc)
-                if _fail is None:
-                    client, key = _nc, _nk; pend_store.clear(); cur_vs[0] = vs["n"]  # the replaced session's buffered events are stale
-                    while not q.empty(): q.get_nowait()
-                    if not await _hydrate(client, voice_turn): _fail = "continuity restore failed"; await _close_bounded(client)
-                    elif gen[0] != _pre_t + 1 or (voice_turn and own[0] != _o): _fail = "a PTT/OFF edge arrived during the restore"; click_events.append({"gate": "voice_command_superseded", "at": "tainted_restore"}); await _close_bounded(client)
-                if _fail is not None:
-                    log("voice/session: %s; this request was NOT sent; the session stays marked for replacement" % _fail); click_events.append({"gate": "tainted_replace_failed", "why": _fail}); tainted[0] = True
-                    if voice_turn: _abort_voice(_fail, _o)
-                    results.append({"ask": text, "error": _fail + "; the request was NOT sent; try again"}); continue
-                tainted[0] = False
-                if mic and mic.active and voice_turn: _install_writer(client); click_events.append({"gate": "tainted_replace_writer_rebound"})
-            if a.serve and not voice_turn and not text.startswith("@") and hl.get("last_ctx"):  # Mac resends the latest highlight context at the start of each new utterance while a session is live
-                await client.send_text(_hl.prompt(hl["last_ctx"], ack=False)); log("serve: re-sent latest highlight context before utterance")
-            if text.startswith("@highlight"):
-                try: ctx, ask_chord = await asyncio.wait_for(hl['q'].get(), 40)
-                except asyncio.TimeoutError: results.append({"ask": text, "highlight": "no trail committed in 40s"}); continue
-                if ctx is None: results.append({"ask": text, "highlight": "trail too short (<2 points or <=4px); no context, nothing sent"}); log("highlight: no context"); continue
-                if ask_chord:
-                    results.append({"ask": text, "highlight": "ask-chord (Option at release): trail kept LOCAL, nothing sent to the provider", "rect": ctx["rect"]}); log("highlight: ask chord, local only"); continue
-                on_gtk(hl["trail"].hide); full, jpeg, size = await asyncio.to_thread(capture_clean, True)  # off the event loop (Skip/Retry/new-ask handling stays responsive during the ~0.3s+ grab); FRESH screenshot, pinned as this request's frame identity
-                full.save(os.path.join(a.out, "highlight-screen-%d.png" % i))
-                if _own_cap.get("token") != plan_tok["n"]:log("stale highlight capture discarded before provider delivery");continue
-                await client.send_screenshot(jpeg)
-                ptxt = _hl.prompt(ctx, ack=True); open(os.path.join(a.out, "highlight-prompt-%d.txt" % i), "w").write(ptxt)
-                await client.send_text(ptxt); out_tr.clear(); t0 = time.time()
-                while time.time() - t0 < 45:
-                    try: k, v = await asyncio.wait_for(q.get(), 5)
-                    except asyncio.TimeoutError: continue
-                    if k == "outputTranscript": out_tr.append(v)
-                    elif k == "audio": player and player.write(v)
-                    elif k == "interrupted": player and player.flush()
-                    elif k == "toolCall": await client.tool_response(v["id"], v["name"], {"ok": False, "status": "not_executed", "error": "acknowledgement only; no action yet"})
-                    elif k in ("turnComplete", "closed"): break
-                hl['last_ctx'] = ctx
-                results.append({"ask": text, "highlight": "sent (fresh screenshot + context prompt)", "rect": ctx["rect"], "window": ctx.get("window"), "reply": "".join(out_tr).strip()}); log("highlight result recorded"); dlog("highlight result", json.dumps(results[-1])[:400]); out_tr.clear()
-                continue
-            try:
-                (full, jpeg, size), _oc = await asyncio.to_thread(capture_pinned)
-            except RuntimeError as e:
-                if str(e) != "stale capture discarded":raise
-                log("stale ask capture discarded; newer transition retained");continue
-            full.save(os.path.join(a.out, "screen-%d.png" % i))
-            yolo, ocr_el, _mp, _pcn = await asyncio.to_thread(_perceive, full, True); ask_own = _own_rec((full, jpeg, size), _oc, yolo, ocr_el, _mp, _pcn)  # this ask's OWN capture/perception record: its toolCall resolves bind to it
-            if _oc.get("token") != plan_tok["n"]:
-                log("stale ask capture discarded before provider delivery");continue
-            await client.send_screenshot(jpeg)
-            from PIL import Image as _I; import io as _io; jw,jh=_I.open(_io.BytesIO(jpeg)).size; log("sent JPEG %dx%d (%d bytes) of %dx%d screen" % (jw,jh,len(jpeg), size[0], size[1])); dlog("ask:", repr(text))
-            open(os.path.join(a.out,"sent-%d.jpg"%i),"wb").write(jpeg)
-            if os.environ.get('FRAME_SETTLE'): await asyncio.sleep(float(os.environ['FRAME_SETTLE']))  # diagnostic only, off by default
-            if not voice_turn: await client.send_text(text)
-            tool_seen = None; t0 = time.time(); gate_ids = {"handled": set(), "accepted": None}  # Mac CompanionManager handledToolCallIDsThisUtterance / acceptedToolCallIDThisUtterance, reset per utterance (here: per ask/turn)
-            tr_state = {"prev": 0, "base": 0}  # base = index into in_tr where the CURRENT Mac "full input transcript" starts (a turnComplete that does not end this loop starts a new transcript; in_tr itself is kept for the turn's recorded text)
-            def _cur_tr(): return "".join(in_tr[tr_state["base"]:]).strip()  # the CURRENT full transcript (after the last turnComplete that did not end this loop); every intent/approval consumer reads this, never earlier turns
-            def _ingest_tr(_v, boundary=True):  # Mac onInputTranscriptUpdate (CompanionManager 297-314): reset the per-utterance tool-call ids iff the (trimmed) transcript is non-empty AND the previous transcript length was 0 (raw length); then prev = current raw length. turnComplete sets prev = 0 (:317). EVERY inputTranscript append path goes through here.
-                if seg_pos[0] is None and str(_v).strip(): seg_pos[0] = len(hist)  # where this utterance BEGAN in the conversation: its history entry is inserted here so app records made later keep their real place after it
-                in_tr.append(_v); _full = "".join(in_tr[tr_state["base"]:])
-                if boundary and _full.strip() and tr_state["prev"] == 0:
-                    gate_ids["handled"].clear(); gate_ids["accepted"] = None; log("utterance boundary: input transcript empty->nonempty, tool-call gate ids reset"); click_events.append({"gate": "utterance_boundary_reset", "transcript_len": len(_full)})
-                tr_state["prev"] = len(_full)
-            def _voice_utt(chunks):  # called ONLY when an utterance is FINAL (a turnComplete closed it; a model call is not finality). The WHOLE utterance must be fresh: any chunk that arrived at/before the display (pending) / approval (approved) makes the entire utterance ineligible - never a suffix of it.
-                if not chunks or not _had_state or not (prop["state"] == _had_state and prop["rev"] == _had_rev): return None
-                if _had_state == "pending" and not prop.get("displayed"): return None
-                _mark = prop["shown"] if _had_state == "pending" else prop["appr"]
-                _t = "".join(chunks).strip(); _vr = _norm_resp(_t)
-                if not _t: return None
-                if any(getattr(c, "arr", 0) <= _mark for c in chunks): click_events.append({"gate": "utterance_straddles_display_ignored", "text_len": len(_t), "rev": prop["rev"]}); log("confirmation: utterance began at/before the display/approval epoch; the whole utterance is ignored as an answer"); return None
-                dlog("voice_utt: %r state=%s rev=%s" % (_t, _had_state, prop["rev"]))
-                if _vr in _STOP: _stop_work("voice"); return "stopped"
-                if _had_state == "approved":
-                    if _vr not in (_YES | _NO):_revoke_approved("new completed voice request")
-                    return None
-                if _vr in _YES: _approve_pending("voice", i); return "approved"
-                if _vr in _NO: _prop_clear("user declined (voice)"); return "declined"
-                _prop_clear("new unrelated request (voice)"); return "cleared"
-            turn_audio = [0]; audio_mark = len(audio); answer_wait = {"need": False, "got": False, "until": 0}; saw_event = False; voice_stopped = False
-            while time.time() - t0 < 60:
-                try: k, v = pending.pop(0) if pending else await asyncio.wait_for(q.get(), 5)
-                except asyncio.TimeoutError:
-                    if voice_turn and not saw_event and not answer_wait["need"]: continue  # idle listening is not a stuck turn
-                    if answer_wait["need"] and time.time() > answer_wait["until"]: log("no answer after the suppressed tool call within the wait window"); tainted[0] = True; break
+                    except Exception as _ex: _fail = "could not open a replacement connection (%s)" % type(_ex).__name__
+                    if _fail is None and (gen[0] != _pre_t + 1 or (voice_turn and own[0] != _o)):
+                        _fail = "a PTT/OFF edge arrived during the replacement"; click_events.append({"gate": "voice_command_superseded", "at": "tainted_replace"})
+                        await _close_bounded(_nc)
+                    if _fail is None:
+                        client, key = _nc, _nk; pend_store.clear(); cur_vs[0] = vs["n"]  # the replaced session's buffered events are stale
+                        while not q.empty(): q.get_nowait()
+                        if not await _hydrate(client, voice_turn): _fail = "continuity restore failed"; await _close_bounded(client)
+                        elif gen[0] != _pre_t + 1 or (voice_turn and own[0] != _o): _fail = "a PTT/OFF edge arrived during the restore"; click_events.append({"gate": "voice_command_superseded", "at": "tainted_restore"}); await _close_bounded(client)
+                    if _fail is not None:
+                        log("voice/session: %s; this request was NOT sent; the session stays marked for replacement" % _fail); click_events.append({"gate": "tainted_replace_failed", "why": _fail}); tainted[0] = True
+                        if voice_turn: _abort_voice(_fail, _o)
+                        results.append({"ask": text, "error": _fail + "; the request was NOT sent; try again"}); continue
+                    tainted[0] = False
+                    if mic and mic.active and voice_turn: _install_writer(client); click_events.append({"gate": "tainted_replace_writer_rebound"})
+                if a.serve and not voice_turn and not text.startswith("@") and hl.get("last_ctx"):  # Mac resends the latest highlight context at the start of each new utterance while a session is live
+                    await client.send_text(_hl.prompt(hl["last_ctx"], ack=False)); log("serve: re-sent latest highlight context before utterance")
+                if text.startswith("@highlight"):
+                    try: ctx, ask_chord = await asyncio.wait_for(hl['q'].get(), 40)
+                    except asyncio.TimeoutError: results.append({"ask": text, "highlight": "no trail committed in 40s"}); continue
+                    if ctx is None: results.append({"ask": text, "highlight": "trail too short (<2 points or <=4px); no context, nothing sent"}); log("highlight: no context"); continue
+                    if ask_chord:
+                        results.append({"ask": text, "highlight": "ask-chord (Option at release): trail kept LOCAL, nothing sent to the provider", "rect": ctx["rect"]}); log("highlight: ask chord, local only"); continue
+                    on_gtk(hl["trail"].hide); full, jpeg, size = await asyncio.to_thread(capture_clean, True)  # off the event loop (Skip/Retry/new-ask handling stays responsive during the ~0.3s+ grab); FRESH screenshot, pinned as this request's frame identity
+                    full.save(os.path.join(a.out, "highlight-screen-%d.png" % i))
+                    if _own_cap.get("token") != plan_tok["n"]:log("stale highlight capture discarded before provider delivery");continue
+                    await client.send_screenshot(jpeg)
+                    ptxt = _hl.prompt(ctx, ack=True); open(os.path.join(a.out, "highlight-prompt-%d.txt" % i), "w").write(ptxt)
+                    await client.send_text(ptxt); out_tr.clear(); t0 = time.time()
+                    while time.time() - t0 < 45:
+                        try: k, v = await asyncio.wait_for(q.get(), 5)
+                        except asyncio.TimeoutError: continue
+                        if k == "outputTranscript": out_tr.append(v)
+                        elif k == "audio": (log("voice: reply playback unavailable or backlog exceeded") if player and not player.write(v) else None)
+                        elif k == "interrupted": player and player.flush()
+                        elif k == "toolCall": await client.tool_response(v["id"], v["name"], {"ok": False, "status": "not_executed", "error": "acknowledgement only; no action yet"})
+                        elif k in ("turnComplete", "closed"): break
+                    hl['last_ctx'] = ctx
+                    results.append({"ask": text, "highlight": "sent (fresh screenshot + context prompt)", "rect": ctx["rect"], "window": ctx.get("window"), "reply": "".join(out_tr).strip()}); log("highlight result recorded"); dlog("highlight result", json.dumps(results[-1])[:400]); out_tr.clear()
                     continue
-                if _stale(k, v): dlog("stale-epoch event dropped:", k, getattr(v, "sess", None), "turn epoch", cur_vs[0]); click_events.append({"gate": "stale_voice_epoch_dropped", "kind": k}); continue
-                if k in ("audio", "outputTranscript", "inputTranscript", "toolCall"): saw_event = True
-                if k == "audio": audio.extend(v); answer_wait["got"] = True; player and player.write(v)
-                elif k == "interrupted": player and player.flush()
-                elif k == "inputTranscript":
-                    _ingest_tr(v)
-                elif k == "voice_stop":
-                    if voice_turn: voice_stopped = True; break
-                elif k == "outputTranscript": out_tr.append(v); answer_wait["got"] = True
-                elif k == "toolCall":
-                    args = v.get("args", {}); log("toolCall", v.get("name")); dlog("toolCall args", json.dumps(args))
-                    _tid = v.get("id")  # Mac CompanionManager.rejectIfToolCallShouldNotRun (6e97782 lines 611-632), then the same-goal / supersede check of handleToolSubmitWorkflowPlan (674-721)
-                    if _tid in gate_ids["handled"]:
-                        log("tool: ignoring duplicate %s id=%s" % (v.get("name"), _tid)); click_events.append({"gate": "duplicate", "id": _tid})
-                        await client.tool_response(v["id"], v["name"], {"ok": True, "duplicate": True}); continue
-                    if gate_ids["accepted"] is not None:
-                        gate_ids["handled"].add(_tid); log("tool: rejecting %s id=%s - already accepted tool id=%s for this utterance" % (v.get("name"), _tid, gate_ids["accepted"])); click_events.append({"gate": "tool_already_handled_this_utterance", "id": _tid}); stream_state["hash"] = None  # Mac voiceBackend.invalidateScreenshotHashCache() on this reject (CompanionManager 6e97782:622-623)
-                        await client.tool_response(v["id"], v["name"], {"ok": False, "reason": "tool_already_handled_this_utterance", "message": "A tool call has already been accepted for this spoken request. Do not call another tool until the user speaks again."}); continue
-                    if v.get("name") != "submit_workflow_plan": log("tool: unsupported tool %r refused (fail closed)" % v.get("name")); click_events.append({"gate": "unknown_tool_refused", "name": str(v.get("name"))}); await client.tool_response(v["id"], v["name"], {"ok": False, "status": "not_executed", "error": "unsupported tool"}); continue
-                    gate_ids["handled"].add(_tid); gate_ids["accepted"] = _tid
-                    _g = str(args.get("goal") or "").strip()
-                    _live = _goal_live()
-                    if _g and hl.get("active_goal") and _live and hl["active_goal"].casefold() == _g.casefold():  # Mac: same-goal re-submit while the plan is active (goal arrives via the verbatim Mac schema; a model may paraphrase goals, so this is a heuristic, as on the Mac)
-                        log("tool: rejecting submit_workflow_plan - same-goal re-submit of %r" % hl["active_goal"]); click_events.append({"gate": "plan_already_running", "id": _tid})
-                        await client.tool_response(v["id"], v["name"], {"ok": False, "reason": "plan_already_running", "message": "This exact plan is already executing on the user's machine. The user reads at human speed; an unchanged screenshot is normal. Do not re-submit this plan. Stay silent and wait for the user to speak again."}); continue
-                    # A replacement proposal must not leave old delayed effects running behind pending UI.
-                    from . import highlight as _hlg
-                    if voice_turn:  # the user's words come from the input transcript, which can lag the toolCall: wait (bounded), buffering other events
-                        _closed = [False]  # set once a turnComplete is QUEUED during this drain: every later transcript belongs to a NEW utterance and keeps its event order (buffered, not flattened into this call's intent)
-                        _scan = [0]
-                        async def _next_drain(_to):  # ordered consumption: FIRST the events already buffered in pending (an earlier drain's leftovers), then the live queue; skipped events stay queued in their original order
-                            while _scan[0] < len(pending):
-                                _pk, _pv = pending[_scan[0]]
-                                if _stale(_pk, _pv): pending.pop(_scan[0]); click_events.append({"gate": "stale_voice_epoch_dropped", "kind": _pk, "where": "pending-scan"}); continue  # a saved stale event is discarded BEFORE it can close this drain or be skipped over
-                                if _pk == "turnComplete": _closed[0] = True
-                                if _pk == "inputTranscript" and not _closed[0]: pending.pop(_scan[0]); return _pk, _pv, False
-                                _scan[0] += 1
-                            _qk, _qv = await asyncio.wait_for(q.get(), _to); return _qk, _qv, True
-                        def _drain_ev(_k2, _v2, _fromq):
-                            if _stale(_k2, _v2): dlog("stale-epoch event dropped (drain):", _k2); click_events.append({"gate": "stale_voice_epoch_dropped", "kind": _k2, "where": "drain"}); return
-                            if _k2 == "turnComplete": _closed[0] = True
-                            if _k2 == "inputTranscript" and not _closed[0]: _ingest_tr(_v2, boundary=False)
-                            elif _fromq: pending.append((_k2, _v2)); _scan[0] = len(pending)
-                        _dl = time.time() + 3.0
-                        while not _cur_tr() and time.time() < _dl:
-                            try: _k2, _v2, _fq = await _next_drain(0.3)
-                            except asyncio.TimeoutError: continue
-                            _drain_ev(_k2, _v2, _fq)
-                        if _cur_tr():
-                            _dl = time.time() + 0.7  # let the last transcript chunks land
-                            while time.time() < _dl:
-                                try: _k2, _v2, _fq = await _next_drain(0.2)
+                try:
+                    (full, jpeg, size), _oc = await asyncio.to_thread(capture_pinned)
+                except RuntimeError as e:
+                    if str(e) != "stale capture discarded":raise
+                    log("stale ask capture discarded; newer transition retained");continue
+                full.save(os.path.join(a.out, "screen-%d.png" % i))
+                yolo, ocr_el, _mp, _pcn = await asyncio.to_thread(_perceive, full, True); ask_own = _own_rec((full, jpeg, size), _oc, yolo, ocr_el, _mp, _pcn)  # this ask's OWN capture/perception record: its toolCall resolves bind to it
+                if _oc.get("token") != plan_tok["n"]:
+                    log("stale ask capture discarded before provider delivery");continue
+                await client.send_screenshot(jpeg)
+                from PIL import Image as _I; import io as _io; jw,jh=_I.open(_io.BytesIO(jpeg)).size; log("sent JPEG %dx%d (%d bytes) of %dx%d screen" % (jw,jh,len(jpeg), size[0], size[1])); dlog("ask:", repr(text))
+                open(os.path.join(a.out,"sent-%d.jpg"%i),"wb").write(jpeg)
+                if os.environ.get('FRAME_SETTLE'): await asyncio.sleep(float(os.environ['FRAME_SETTLE']))  # diagnostic only, off by default
+                if not voice_turn: await client.send_text(text)
+                tool_seen = None; t0 = time.time(); gate_ids = {"handled": set(), "accepted": None}  # Mac CompanionManager handledToolCallIDsThisUtterance / acceptedToolCallIDThisUtterance, reset per utterance (here: per ask/turn)
+                tr_state = {"prev": 0, "base": 0}  # base = index into in_tr where the CURRENT Mac "full input transcript" starts (a turnComplete that does not end this loop starts a new transcript; in_tr itself is kept for the turn's recorded text)
+                def _cur_tr(): return "".join(in_tr[tr_state["base"]:]).strip()  # the CURRENT full transcript (after the last turnComplete that did not end this loop); every intent/approval consumer reads this, never earlier turns
+                def _ingest_tr(_v, boundary=True):  # Mac onInputTranscriptUpdate (CompanionManager 297-314): reset the per-utterance tool-call ids iff the (trimmed) transcript is non-empty AND the previous transcript length was 0 (raw length); then prev = current raw length. turnComplete sets prev = 0 (:317). EVERY inputTranscript append path goes through here.
+                    if seg_pos[0] is None and str(_v).strip(): seg_pos[0] = len(hist)  # where this utterance BEGAN in the conversation: its history entry is inserted here so app records made later keep their real place after it
+                    in_tr.append(_v); _full = "".join(in_tr[tr_state["base"]:])
+                    if boundary and _full.strip() and tr_state["prev"] == 0:
+                        gate_ids["handled"].clear(); gate_ids["accepted"] = None; log("utterance boundary: input transcript empty->nonempty, tool-call gate ids reset"); click_events.append({"gate": "utterance_boundary_reset", "transcript_len": len(_full)})
+                    tr_state["prev"] = len(_full)
+                def _voice_utt(chunks):  # called ONLY when an utterance is FINAL (a turnComplete closed it; a model call is not finality). The WHOLE utterance must be fresh: any chunk that arrived at/before the display (pending) / approval (approved) makes the entire utterance ineligible - never a suffix of it.
+                    if not chunks or not _had_state or not (prop["state"] == _had_state and prop["rev"] == _had_rev): return None
+                    if _had_state == "pending" and not prop.get("displayed"): return None
+                    _mark = prop["shown"] if _had_state == "pending" else prop["appr"]
+                    _t = "".join(chunks).strip(); _vr = _norm_resp(_t)
+                    if not _t: return None
+                    if any(getattr(c, "arr", 0) <= _mark for c in chunks): click_events.append({"gate": "utterance_straddles_display_ignored", "text_len": len(_t), "rev": prop["rev"]}); log("confirmation: utterance began at/before the display/approval epoch; the whole utterance is ignored as an answer"); return None
+                    dlog("voice_utt: %r state=%s rev=%s" % (_t, _had_state, prop["rev"]))
+                    if _vr in _STOP: _stop_work("voice"); return "stopped"
+                    if _had_state == "approved":
+                        if _vr not in (_YES | _NO):_revoke_approved("new completed voice request")
+                        return None
+                    if _vr in _YES: _approve_pending("voice", i); return "approved"
+                    if _vr in _NO: _prop_clear("user declined (voice)"); return "declined"
+                    _prop_clear("new unrelated request (voice)"); return "cleared"
+                turn_audio = [0]; audio_mark = len(audio); answer_wait = {"need": False, "got": False, "until": 0}; saw_event = False; voice_stopped = False
+                while time.time() - t0 < 60:
+                    try: k, v = pending.pop(0) if pending else await asyncio.wait_for(q.get(), 5)
+                    except asyncio.TimeoutError:
+                        if voice_turn and not saw_event and not answer_wait["need"]: continue  # idle listening is not a stuck turn
+                        if answer_wait["need"] and time.time() > answer_wait["until"]: log("no answer after the suppressed tool call within the wait window"); tainted[0] = True; break
+                        continue
+                    if shutdown['requested']: break
+                    if _stale(k, v): dlog("stale-epoch event dropped:", k, getattr(v, "sess", None), "turn epoch", cur_vs[0]); click_events.append({"gate": "stale_voice_epoch_dropped", "kind": k}); continue
+                    if k in ("audio", "outputTranscript", "inputTranscript", "toolCall"): saw_event = True
+                    if k == "audio": audio.extend(v); answer_wait["got"] = True; (log("voice: reply playback unavailable or backlog exceeded") if player and not player.write(v) else None)
+                    elif k == "interrupted": player and player.flush()
+                    elif k == "inputTranscript":
+                        _ingest_tr(v)
+                    elif k == "voice_stop":
+                        if voice_turn: voice_stopped = True; break
+                    elif k == "outputTranscript": out_tr.append(v); answer_wait["got"] = True
+                    elif k == "toolCall":
+                        args = v.get("args", {}); log("toolCall", v.get("name")); dlog("toolCall args", json.dumps(args))
+                        _tid = v.get("id")  # Mac CompanionManager.rejectIfToolCallShouldNotRun (6e97782 lines 611-632), then the same-goal / supersede check of handleToolSubmitWorkflowPlan (674-721)
+                        if _tid in gate_ids["handled"]:
+                            log("tool: ignoring duplicate %s id=%s" % (v.get("name"), _tid)); click_events.append({"gate": "duplicate", "id": _tid})
+                            await client.tool_response(v["id"], v["name"], {"ok": True, "duplicate": True}); continue
+                        if gate_ids["accepted"] is not None:
+                            gate_ids["handled"].add(_tid); log("tool: rejecting %s id=%s - already accepted tool id=%s for this utterance" % (v.get("name"), _tid, gate_ids["accepted"])); click_events.append({"gate": "tool_already_handled_this_utterance", "id": _tid}); stream_state["hash"] = None  # Mac voiceBackend.invalidateScreenshotHashCache() on this reject (CompanionManager 6e97782:622-623)
+                            await client.tool_response(v["id"], v["name"], {"ok": False, "reason": "tool_already_handled_this_utterance", "message": "A tool call has already been accepted for this spoken request. Do not call another tool until the user speaks again."}); continue
+                        if v.get("name") != "submit_workflow_plan": log("tool: unsupported tool %r refused (fail closed)" % v.get("name")); click_events.append({"gate": "unknown_tool_refused", "name": str(v.get("name"))}); await client.tool_response(v["id"], v["name"], {"ok": False, "status": "not_executed", "error": "unsupported tool"}); continue
+                        gate_ids["handled"].add(_tid); gate_ids["accepted"] = _tid
+                        _g = str(args.get("goal") or "").strip()
+                        _live = _goal_live()
+                        if _g and hl.get("active_goal") and _live and hl["active_goal"].casefold() == _g.casefold():  # Mac: same-goal re-submit while the plan is active (goal arrives via the verbatim Mac schema; a model may paraphrase goals, so this is a heuristic, as on the Mac)
+                            log("tool: rejecting submit_workflow_plan - same-goal re-submit of %r" % hl["active_goal"]); click_events.append({"gate": "plan_already_running", "id": _tid})
+                            await client.tool_response(v["id"], v["name"], {"ok": False, "reason": "plan_already_running", "message": "This exact plan is already executing on the user's machine. The user reads at human speed; an unchanged screenshot is normal. Do not re-submit this plan. Stay silent and wait for the user to speak again."}); continue
+                        # A replacement proposal must not leave old delayed effects running behind pending UI.
+                        from . import highlight as _hlg
+                        if voice_turn:  # the user's words come from the input transcript, which can lag the toolCall: wait (bounded), buffering other events
+                            _closed = [False]  # set once a turnComplete is QUEUED during this drain: every later transcript belongs to a NEW utterance and keeps its event order (buffered, not flattened into this call's intent)
+                            _scan = [0]
+                            async def _next_drain(_to):  # ordered consumption: FIRST the events already buffered in pending (an earlier drain's leftovers), then the live queue; skipped events stay queued in their original order
+                                while _scan[0] < len(pending):
+                                    _pk, _pv = pending[_scan[0]]
+                                    if _stale(_pk, _pv): pending.pop(_scan[0]); click_events.append({"gate": "stale_voice_epoch_dropped", "kind": _pk, "where": "pending-scan"}); continue  # a saved stale event is discarded BEFORE it can close this drain or be skipped over
+                                    if _pk == "turnComplete": _closed[0] = True
+                                    if _pk == "inputTranscript" and not _closed[0]: pending.pop(_scan[0]); return _pk, _pv, False
+                                    _scan[0] += 1
+                                _qk, _qv = await asyncio.wait_for(q.get(), _to); return _qk, _qv, True
+                            def _drain_ev(_k2, _v2, _fromq):
+                                if _stale(_k2, _v2): dlog("stale-epoch event dropped (drain):", _k2); click_events.append({"gate": "stale_voice_epoch_dropped", "kind": _k2, "where": "drain"}); return
+                                if _k2 == "turnComplete": _closed[0] = True
+                                if _k2 == "inputTranscript" and not _closed[0]: _ingest_tr(_v2, boundary=False)
+                                elif _fromq: pending.append((_k2, _v2)); _scan[0] = len(pending)
+                            _dl = time.time() + 3.0
+                            while not _cur_tr() and time.time() < _dl:
+                                try: _k2, _v2, _fq = await _next_drain(0.3)
                                 except asyncio.TimeoutError: continue
                                 _drain_ev(_k2, _v2, _fq)
-                        text = _cur_tr()
-                        if not text:
-                            log("voice: no transcript of the spoken request; refusing to act or point")
-                            await client.tool_response(v["id"], v["name"], {"ok": False, "status": "not_executed", "error": "The spoken request could not be transcribed; ask the user to repeat it. Do not point."}); continue
-                    if _hlg.no_action_requested(text):  # USER intent gate: answer-only request -> no cursor, click, right-click or workflow, whatever the model calls
-                        GLib.idle_add(overlay.retire); tool_seen = {"source": "NO_ACTION_REQUESTED", "refused": "user asked for an answer only"}
-                        log("tool call suppressed: the request is answer-only (no pointing or action)")
-                        _aw = float(os.environ.get('TIPTOUR_ANSWER_WAIT_S', '20')); answer_wait.update(need=True, got=False, until=time.time() + _aw)
-                        _resp = _hlg.suppressed_payload(text, hl.get("last_ctx"))
-                        await client.tool_response(v["id"], v["name"], _resp)
-                        continue
-                    # Pinned Mac semantic key normalization occurs before displaying/hashing the approval.
-                    from .app_skills import normalize_semantic_keyboard_steps
-                    args = dict(args, steps=normalize_semantic_keyboard_steps(args.get("steps", []), args.get("app", "")))
-                    # Native highlight binding is owned by the app context, never by model-supplied metadata.
-                    args = json.loads(json.dumps(args))
-                    for st in args.get("steps", []): st.pop("_native_range", None)
-                    _cxsteps = [st for st in args.get("steps", []) if st.get("targetContext") in ("currentSelection", "currentHighlight")]
-                    if _cxsteps and not any(st.get("type") in ("openApp", "openURL") for st in args.get("steps", [])):
-                        _ctx = hl.get("last_ctx") or {}; _wd = _ctx.get("window") or {}; _nr = _ctx.get("native_range")
-                        if _nr and _wd.get("title"):
-                            args["app"] = _wd["title"]
-                            # Mac stepsPreservingSelectedTextIfNeeded: preserve selection by removing a leading click.
-                            _ss = args.get("steps", [])
-                            if len(_ss) >= 2 and _ss[0].get("type") in ("click", "doubleClick") and _ss[1].get("type") in ("type", "setValue", "pressKey", "keyboardShortcut") and (_ss[1].get("targetContext") in ("currentHighlight", "currentSelection") or (bool((_ss[0].get("label") or "").strip()) and " ".join((_ss[0].get("label") or "").lower().split()) in " ".join(((_ctx.get("text_selection") or {}).get("text") or "").lower().split()))):
-                                args["steps"] = _ss[1:]
-                            for st in args.get("steps", []):
-                                _del = st.get("type") == "pressKey" and (st.get("label") or "").lower().strip(".,;: ") in ("delete", "del", "backspace")
-                                if st.get("type") in ("type", "setValue") or _del: st["_native_range"] = _nr
-                    _canon = _plan_canon(args); _ph = _hashlib.sha256(_canon.encode()).hexdigest()  # CONFIRMATION GATE (after the voice transcript wait and the answer-only gate): hold EVERY plan. Nothing resolves, arms, points or clicks before the user approves THIS record.
-                    if prop["state"] == "pending" and prop["hash"] == _ph:  # identical plan re-submitted while the user is answering: SAME record, no new revision, the displayed proposal and any valid answer stay bound to it
-                        click_events.append({"gate": "same_hash_resubmit_ignored", "id": _tid, "rev": prop["rev"]}); log("confirmation: identical plan re-submitted (call %s); same record rev %d kept pending" % (_tid, prop["rev"]))
-                        await client.tool_response(v["id"], v["name"], {"ok": False, "reason": "awaiting_user_confirmation", "status": "not_executed", "message": "This exact plan is already proposed and waiting for the user's answer. Do not call any tool again."}); continue
-                    if prop["state"] == "approved":_revoke_approved("replacement proposal before display")
-                    if prop["state"] == "pending": _prop_clear("replaced by a newer proposal")
-                    prop.update(rev=prop["rev"] + 1, hash=_ph, args=json.loads(json.dumps(args)), text=text, state="pending", turn=i, id=_tid, shown=10**12, displayed=False, appr=0)  # shown stays unreachable until the render ack
-                    _pt = _plan_text(args); _note("plan rev %d was PROPOSED and is waiting for the user's yes (nothing executed): %s" % (prop["rev"], _pt.replace("\n", " | ")[:1500])); log("confirmation: plan HELD, rev %d hash %s: %s" % (prop["rev"], _ph[:12], _pt.replace("\n", " | "))); print("PLAN PROPOSAL rev %d:\n%s\nSay yes to run it, or no to cancel." % (prop["rev"], _pt), flush=True); GLib.idle_add(lambda _r=prop["rev"], _pl=_plain_text(json.loads(json.dumps(args))), _t=_pt: pprop.show_plan(_r, _pl, _t, lambda rv: loop.call_soon_threadsafe(_shown, rv)) and False)  # rev, plain text and raw details are bound IMMUTABLY at scheduling
-                    click_events.append({"gate": "plan_held_for_confirmation", "id": _tid, "rev": prop["rev"], "hash": _ph, "steps": len(args.get("steps") or []), "text_len": len(text or "")})
-                    await client.tool_response(v["id"], v["name"], {"ok": False, "reason": "awaiting_user_confirmation", "status": "not_executed", "message": "Nothing was done. The app is holding this plan until the USER says yes to it. Tell the user the plan in plain words (what you will do, in what order) and ask them to confirm. Do not call any tool again for this request.\n" + _pt})
-                elif k == "turnComplete":
-                    if voice_turn: _voice_utt(in_tr[tr_state["base"]:])
-                    if voice_turn:
-                        _sg = "".join(str(_x) for _x in in_tr[tr_state["base"]:]).strip()
-                        if _sg: hist.insert(min(seg_pos[0] if seg_pos[0] is not None else len(hist), len(hist)), ("user", _sg))  # one entry per turnComplete-delimited utterance, at the position where it began
-                        seg_pos[0] = None
-                    tr_state["prev"] = 0; tr_state["base"] = len(in_tr)  # Mac onTurnComplete: previousInputTranscriptLength = 0; the next transcript is a NEW full transcript
-                    if answer_wait["need"] and not answer_wait["got"] and time.time() < answer_wait["until"]:  # answer-only request: a turnComplete seen before any spoken answer is not the answer; keep listening (bounded)
-                        log("turnComplete before any answer after the suppressed tool call; still waiting (bounded)"); continue
-                    break
-                elif k == "closed": log("socket closed"); dlog("socket closed", v); tainted[0] = True; break
-            else:
-                if saw_event or not voice_turn: log("turn hit the 60s ceiling without a definitive completion"); tainted[0] = True
-            if prop["state"] == "approved" and prop.get("kick"):  # voice approval: this turn body is finished, but the next listening turn would hold gate["turn"] open and the (unbounded-wait) approved replay would never start; release the gate and wait for the replay's real START (not a fixed delay)
-                prop["kick"] = False; gate["turn"] = False
-                while prop["state"] == "approved" and not prop.get("started"): await asyncio.sleep(0.05)
-            await asyncio.sleep(1.0 + 0.6)  # let glide finish
-            if tool_seen:
-                await asyncio.sleep(a.hold)
-                snap, _, _ = await asyncio.to_thread(grab); snap.save(os.path.join(a.out, "pointed-%d.png" % i))
-            if voice_turn and voice_stopped and not _cur_tr() and not saw_event and not tool_seen and not out_tr:
-                log("idle voice listening ended by toggle-off; nothing was said, not recorded as a turn"); continue  # bookkeeping only: an open @voice-next listener that never heard anything
-            if voice_turn and not text: text = _cur_tr() or "(voice turn, no transcript)"
-            _mt = "".join(out_tr).strip()
-            if voice_turn:
-                if _cur_tr(): hist.insert(min(seg_pos[0] if seg_pos[0] is not None else len(hist), len(hist)), ("user", _cur_tr()))  # words after the last turnComplete (normally none)
-            elif text and not text.startswith("@"): hist.insert(min(_h0, len(hist)), ("user", text))  # typed text arrives before this turn's app records
-            if _mt: hist.append(("model", _mt))
-            results.append({"ask": text, "tool": tool_seen, "reply": "".join(out_tr).strip(), "audio_bytes": len(audio) - audio_mark, "audio_bytes_cumulative": len(audio)})
-            out_tr.clear()
-            if voice_turn and mic and mic.active and not voice_stopped: _enq("@voice-next")  # the live voice session stays open until the next Ctrl+Alt press
-            log("result recorded (turn %d, tool source %s)" % (i, ((results[-1].get("tool") or {}).get("source", "-")))); dlog("result", json.dumps(results[-1]))
+                            if _cur_tr():
+                                _dl = time.time() + 0.7  # let the last transcript chunks land
+                                while time.time() < _dl:
+                                    try: _k2, _v2, _fq = await _next_drain(0.2)
+                                    except asyncio.TimeoutError: continue
+                                    _drain_ev(_k2, _v2, _fq)
+                            text = _cur_tr()
+                            if not text:
+                                log("voice: no transcript of the spoken request; refusing to act or point")
+                                await client.tool_response(v["id"], v["name"], {"ok": False, "status": "not_executed", "error": "The spoken request could not be transcribed; ask the user to repeat it. Do not point."}); continue
+                        if _hlg.no_action_requested(text):  # USER intent gate: answer-only request -> no cursor, click, right-click or workflow, whatever the model calls
+                            GLib.idle_add(overlay.retire); tool_seen = {"source": "NO_ACTION_REQUESTED", "refused": "user asked for an answer only"}
+                            log("tool call suppressed: the request is answer-only (no pointing or action)")
+                            _aw = float(os.environ.get('TIPTOUR_ANSWER_WAIT_S', '20')); answer_wait.update(need=True, got=False, until=time.time() + _aw)
+                            _resp = _hlg.suppressed_payload(text, hl.get("last_ctx"))
+                            await client.tool_response(v["id"], v["name"], _resp)
+                            continue
+                        # Pinned Mac semantic key normalization occurs before displaying/hashing the approval.
+                        from .app_skills import normalize_semantic_keyboard_steps
+                        args = dict(args, steps=normalize_semantic_keyboard_steps(args.get("steps", []), args.get("app", "")))
+                        # Native highlight binding is owned by the app context, never by model-supplied metadata.
+                        args = json.loads(json.dumps(args))
+                        for st in args.get("steps", []): st.pop("_native_range", None)
+                        _cxsteps = [st for st in args.get("steps", []) if st.get("targetContext") in ("currentSelection", "currentHighlight")]
+                        if _cxsteps and not any(st.get("type") in ("openApp", "openURL") for st in args.get("steps", [])):
+                            _ctx = hl.get("last_ctx") or {}; _wd = _ctx.get("window") or {}; _nr = _ctx.get("native_range")
+                            if _nr and _wd.get("title"):
+                                args["app"] = _wd["title"]
+                                # Mac stepsPreservingSelectedTextIfNeeded: preserve selection by removing a leading click.
+                                _ss = args.get("steps", [])
+                                if len(_ss) >= 2 and _ss[0].get("type") in ("click", "doubleClick") and _ss[1].get("type") in ("type", "setValue", "pressKey", "keyboardShortcut") and (_ss[1].get("targetContext") in ("currentHighlight", "currentSelection") or (bool((_ss[0].get("label") or "").strip()) and " ".join((_ss[0].get("label") or "").lower().split()) in " ".join(((_ctx.get("text_selection") or {}).get("text") or "").lower().split()))):
+                                    args["steps"] = _ss[1:]
+                                for st in args.get("steps", []):
+                                    _del = st.get("type") == "pressKey" and (st.get("label") or "").lower().strip(".,;: ") in ("delete", "del", "backspace")
+                                    if st.get("type") in ("type", "setValue") or _del: st["_native_range"] = _nr
+                        _canon = _plan_canon(args); _ph = _hashlib.sha256(_canon.encode()).hexdigest()  # CONFIRMATION GATE (after the voice transcript wait and the answer-only gate): hold EVERY plan. Nothing resolves, arms, points or clicks before the user approves THIS record.
+                        if prop["state"] == "pending" and prop["hash"] == _ph:  # identical plan re-submitted while the user is answering: SAME record, no new revision, the displayed proposal and any valid answer stay bound to it
+                            click_events.append({"gate": "same_hash_resubmit_ignored", "id": _tid, "rev": prop["rev"]}); log("confirmation: identical plan re-submitted (call %s); same record rev %d kept pending" % (_tid, prop["rev"]))
+                            await client.tool_response(v["id"], v["name"], {"ok": False, "reason": "awaiting_user_confirmation", "status": "not_executed", "message": "This exact plan is already proposed and waiting for the user's answer. Do not call any tool again."}); continue
+                        if prop["state"] == "approved":_revoke_approved("replacement proposal before display")
+                        if prop["state"] == "pending": _prop_clear("replaced by a newer proposal")
+                        prop.update(rev=prop["rev"] + 1, hash=_ph, args=json.loads(json.dumps(args)), text=text, state="pending", turn=i, id=_tid, shown=10**12, displayed=False, appr=0)  # shown stays unreachable until the render ack
+                        _pt = _plan_text(args); _note("plan rev %d was PROPOSED and is waiting for the user's yes (nothing executed): %s" % (prop["rev"], _pt.replace("\n", " | ")[:1500])); log("confirmation: plan HELD, rev %d hash %s: %s" % (prop["rev"], _ph[:12], _pt.replace("\n", " | "))); print("PLAN PROPOSAL rev %d:\n%s\nSay yes to run it, or no to cancel." % (prop["rev"], _pt), flush=True); GLib.idle_add(lambda _r=prop["rev"], _pl=_plain_text(json.loads(json.dumps(args))), _t=_pt: pprop.show_plan(_r, _pl, _t, lambda rv: loop.call_soon_threadsafe(_shown, rv)) and False)  # rev, plain text and raw details are bound IMMUTABLY at scheduling
+                        click_events.append({"gate": "plan_held_for_confirmation", "id": _tid, "rev": prop["rev"], "hash": _ph, "steps": len(args.get("steps") or []), "text_len": len(text or "")})
+                        await client.tool_response(v["id"], v["name"], {"ok": False, "reason": "awaiting_user_confirmation", "status": "not_executed", "message": "Nothing was done. The app is holding this plan until the USER says yes to it. Tell the user the plan in plain words (what you will do, in what order) and ask them to confirm. Do not call any tool again for this request.\n" + _pt})
+                    elif k == "turnComplete":
+                        if voice_turn: _voice_utt(in_tr[tr_state["base"]:])
+                        if voice_turn:
+                            _sg = "".join(str(_x) for _x in in_tr[tr_state["base"]:]).strip()
+                            if _sg: hist.insert(min(seg_pos[0] if seg_pos[0] is not None else len(hist), len(hist)), ("user", _sg))  # one entry per turnComplete-delimited utterance, at the position where it began
+                            seg_pos[0] = None
+                        tr_state["prev"] = 0; tr_state["base"] = len(in_tr)  # Mac onTurnComplete: previousInputTranscriptLength = 0; the next transcript is a NEW full transcript
+                        if answer_wait["need"] and not answer_wait["got"] and time.time() < answer_wait["until"]:  # answer-only request: a turnComplete seen before any spoken answer is not the answer; keep listening (bounded)
+                            log("turnComplete before any answer after the suppressed tool call; still waiting (bounded)"); continue
+                        break
+                    elif k == "closed": log("socket closed"); dlog("socket closed", v); tainted[0] = True; break
+                else:
+                    if saw_event or not voice_turn: log("turn hit the 60s ceiling without a definitive completion"); tainted[0] = True
+                if prop["state"] == "approved" and prop.get("kick"):  # voice approval: this turn body is finished, but the next listening turn would hold gate["turn"] open and the (unbounded-wait) approved replay would never start; release the gate and wait for the replay's real START (not a fixed delay)
+                    prop["kick"] = False; gate["turn"] = False
+                    while prop["state"] == "approved" and not prop.get("started"): await asyncio.sleep(0.05)
+                await asyncio.sleep(1.0 + 0.6)  # let glide finish
+                if tool_seen:
+                    await asyncio.sleep(a.hold)
+                    snap, _, _ = await asyncio.to_thread(grab); snap.save(os.path.join(a.out, "pointed-%d.png" % i))
+                if voice_turn and voice_stopped and not _cur_tr() and not saw_event and not tool_seen and not out_tr:
+                    log("idle voice listening ended by toggle-off; nothing was said, not recorded as a turn"); continue  # bookkeeping only: an open @voice-next listener that never heard anything
+                if voice_turn and not text: text = _cur_tr() or "(voice turn, no transcript)"
+                _mt = "".join(out_tr).strip()
+                if voice_turn:
+                    if _cur_tr(): hist.insert(min(seg_pos[0] if seg_pos[0] is not None else len(hist), len(hist)), ("user", _cur_tr()))  # words after the last turnComplete (normally none)
+                elif text and not text.startswith("@"): hist.insert(min(_h0, len(hist)), ("user", text))  # typed text arrives before this turn's app records
+                if _mt: hist.append(("model", _mt))
+                results.append({"ask": text, "tool": tool_seen, "reply": "".join(out_tr).strip(), "audio_bytes": len(audio) - audio_mark, "audio_bytes_cumulative": len(audio)})
+                out_tr.clear()
+                if not shutdown['requested'] and voice_turn and mic and mic.active and not voice_stopped: _enq("@voice-next")  # the live voice session stays open until the next Ctrl+Alt press
+                log("result recorded (turn %d, tool source %s)" % (i, ((results[-1].get("tool") or {}).get("source", "-")))); dlog("result", json.dumps(results[-1]))
+        except asyncio.CancelledError:
+            if not shutdown['requested']: raise
+            log('shutdown: active body cancelled')
+        voice_cleanup = {}
+        if ptt_monitor: voice_cleanup['monitor'] = await asyncio.to_thread(ptt_monitor.close)
+        if mic:
+            if hasattr(mic, 'close'): voice_cleanup['mic'] = await asyncio.to_thread(mic.close)
+            else: mic.stop()
+        if player: voice_cleanup['player'] = await asyncio.to_thread(player.close)
+        if voice_cleanup: click_events.append({'gate': 'voice_cleanup', **voice_cleanup})
+        from .shutdown import retire
+        cleanup_result = await retire(pipe.get('task'), client)
+        click_events.append({'gate': 'shutdown_cleanup', **cleanup_result})
+        log('shutdown cleanup:', cleanup_result)
         if text_tracking_task: text_tracking_task.cancel()
         stream_on[0] = False
         if os.environ.get("TIPTOUR_TEST_MODE") == "1":
@@ -1382,10 +1432,10 @@ def main():
         except Exception: pass
         try: json.dump({"events": click_events, "presses": clicks.presses, "errors": clicks.errors, "thread_starts": clicks.thread_starts, "backend": clicks.backend}, open(os.path.join(a.out, "click_events.json"), "w"))
         except Exception: pass
-        if mic: mic.stop()
-        if player: player.close()
+        if stream_task: stream_task.cancel()
+        if pipe.get("task"): pipe["task"].cancel()
         if readonly_harness: await asyncio.to_thread(readonly_harness.stop)
-        await client.close(); GLib.idle_add(Gtk.main_quit)
+        GLib.idle_add(Gtk.main_quit)
 
     def runner():
         try: asyncio.run(run())
@@ -1393,6 +1443,7 @@ def main():
             log("FATAL", type(e).__name__); dlog("FATAL detail", str(e)[:300]); GLib.idle_add(Gtk.main_quit)
     threading.Thread(target=runner, daemon=True).start()
     Gtk.main()
+    if status_item: status_item.close()
     if text_ui: text_ui.close()
     t = threading.Timer(3.0, lambda: (sys.stderr.write('WATCHDOG: forced exit after 3s (clean shutdown did not finish)\n'), sys.stderr.flush(), os._exit(0))); t.daemon = True; t.start()  # bounded shutdown: a stuck non-daemon thread or in-flight D-Bus call must not hang the process after @quit
 
