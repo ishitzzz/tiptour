@@ -53,7 +53,11 @@ def main():
     ap.add_argument("--voice", action="store_true", help="push-to-talk voice (Ctrl+Alt toggles a live mic session, replies are played); needs --serve FIFO path (can stay unused) and PulseAudio/pipewire-pulse tools")
     ap.add_argument("--readonly-harness", action="store_true", help="opt-in loopback read-only observe/skills/targets/screenshots; no action endpoints")
     ap.add_argument("--text-ui", action="store_true", help="opt-in GTK text command panel and Ctrl+K, same local proposal/Yes path")
-    a = ap.parse_args(); os.makedirs(a.out, exist_ok=True)
+    ap.add_argument('--radial-preview', action='store_true', help='opt-in Ctrl+Alt+Super visual preview only; no input-mode dispatch')
+    a = ap.parse_args()
+    if a.radial_preview and (a.voice or a.highlight):
+        ap.error('--radial-preview cannot run with --voice or --highlight: partial modifier chords can activate those monitors')
+    os.makedirs(a.out, exist_ok=True)
     if a.text_ui and not a.serve: a.serve = os.path.join(a.out, "control.fifo")
     from .keypool import configured_keys
     keys = configured_keys(a.keys_glob)
@@ -80,16 +84,22 @@ def main():
     from .overlay import ProposalPanel
     hl_post = {"fn": None}
     pprop = ProposalPanel(lambda k, rev: hl_post["fn"] and hl_post["fn"]("@%s %d" % (k, rev)))
-    text_ui = None; status_item = None
+    text_ui = None; status_item = None; radial_preview = None
     if a.text_ui:
         from .text_panel import TextPanel
         text_ui = TextPanel(lambda t: hl_post["fn"] and hl_post["fn"](t))
         text_status["panel"] = text_ui
         from .status_item import StatusItem
         status_item = StatusItem(text_ui.open_from_menu, text_ui.stop_work, lambda: hl_post['fn'] and hl_post['fn']('@quit'))
+    if a.radial_preview:
+        from .radial import RadialPreview
+        def radial_status(message):
+            log(message)
+            if text_ui: text_ui.activity.set_text(message)
+        radial_preview = RadialPreview(radial_status)
     def own_windows():
         menu_window = status_item.capture_window() if status_item else None
-        return tuple(w for w in (overlay, panel, pprop, text_ui, menu_window) if w is not None)
+        return tuple(w for w in (overlay, panel, pprop, text_ui, menu_window, radial_preview) if w is not None)
     hl = {"loop": None, "q": None, "mon": None, "trail": None}
     if a.highlight:
         from . import highlight as _hl
@@ -197,6 +207,7 @@ def main():
                     if _capture_token != plan_tok["n"]: return
                     for w in _was:
                         if w is overlay and ov.get('covered'): continue
+                        if w is radial_preview and (w.state.center is None or w.monitor.closed.is_set()): continue
                         if w is text_ui:
                             w.set_focus_on_map(False); w.show_all(); w.set_focus_on_map(True)
                         else: w.show_all()
@@ -416,6 +427,7 @@ def main():
             if t == '@quit':
                 shutdown['requested'] = True; ing['shutdown'] = True
                 if ptt_monitor: ptt_monitor.stop()
+                if radial_preview: radial_preview.monitor.closed.set(); GLib.idle_add(radial_preview.hide)
                 if ing.get('ready'): _stop_work('shutdown-ingress')
                 if hl.get('readonly_worker'): hl['readonly_worker'].cancel_current()
                 _off_edge()
@@ -1402,6 +1414,7 @@ def main():
             if not shutdown['requested']: raise
             log('shutdown: active body cancelled')
         voice_cleanup = {}
+        if radial_preview: voice_cleanup['radial_monitor'] = await asyncio.to_thread(radial_preview.monitor.close)
         if ptt_monitor: voice_cleanup['monitor'] = await asyncio.to_thread(ptt_monitor.close)
         if mic:
             if hasattr(mic, 'close'): voice_cleanup['mic'] = await asyncio.to_thread(mic.close)
@@ -1445,6 +1458,7 @@ def main():
     Gtk.main()
     if status_item: status_item.close()
     if text_ui: text_ui.close()
+    if radial_preview: radial_preview.close()
     t = threading.Timer(3.0, lambda: (sys.stderr.write('WATCHDOG: forced exit after 3s (clean shutdown did not finish)\n'), sys.stderr.flush(), os._exit(0))); t.daemon = True; t.start()  # bounded shutdown: a stuck non-daemon thread or in-flight D-Bus call must not hang the process after @quit
 
 if __name__ == "__main__": main()
