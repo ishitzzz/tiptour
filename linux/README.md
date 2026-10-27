@@ -1,5 +1,11 @@
 # TipTour Linux port (experimental, X11 only, NOT a full port)
-Branch feature/linux-port, base upstream 6e97782. Python/GTK3. See PARITY.md for exact evidence. R92, resumed after R93, adds native recipient binding for approved focusedElement keyboard shortcuts. A controlled replay of the failed four-step proposal now completes; an actual Gemini four-step regression also completes but omits that metadata and does not prove the repaired branch. R93 capture reconstruction remains, with unsupported backing still using hide fallback. File-menu effect validation, full port and whole-suite acceptance remain open.
+Branch feature/linux-port, base upstream 6e97782. Python/GTK3. See PARITY.md for exact evidence. R94 includes enabled native menu-bar headers, fixing the missing File target in one Mousepad teaching workflow. After an operator click, its native fingerprint changes and the engine completes the plan; this is not an automatic-click or general validator result. R92 focused-shortcut binding and R93 capture reconstruction remain. Edit/no-edit disambiguation, unsupported capture fallback, full port and whole-suite acceptance remain open.
+
+## R94 native menu-bar headers
+
+GTK menu headers can expose role menu directly under a menu bar. The native target walk now includes enabled headers with that direct parent, retaining native identity and coordinate checks. Popup containers, orphan menus and disabled headers are not added.
+
+The actual Gemini Mousepad File example now resolves natively, gets a ready baseline, and completes after the operator clicks: two stable reads see the status bar change to File menu, and pixels show the choices. This is one operator-click teaching workflow, not semantic proof of every menu effect or automatic action. The Edit/no-edit guard is unchanged and still refuses that ambiguous request. See PARITY.md for source binding, the unsnapshotted hover diagnostic, 42 selected tests and retained limits.
 
 ## R92 focusedElement shortcut recipient binding
 
