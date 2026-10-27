@@ -26,19 +26,21 @@ def save(k, v):
 def apply_env():
     for k, v in load().items():
         if k in ENV and ENV[k] not in os.environ: os.environ[ENV[k]] = "1" if v else "0"
-def gtk_window(on_close=None, standalone=True, on_neko_changed=None):
+def gtk_window(on_close=None, standalone=True, on_neko_changed=None, on_screenshots_changed=None):
     """Supported toggles. In-app Neko may be live; standalone changes are saved only."""
     import gi; gi.require_version("Gtk", "3.0"); from gi.repository import Gtk
     w = Gtk.Window(title="TipTour Linux settings"); w.set_wmclass("tiptour-settings", "TipTourSettings"); w.set_keep_above(True); b = Gtk.VBox(spacing=6, margin=10); w.add(b); cur = load()
-    for k, label in (("isNekoModeEnabled", "Neko cursor (original pixel-art cat)"), ("isScreenshotStreamingEnabled", "Stream screenshots to the model (~1 fps)"), ("useAtspi", "Use AT-SPI element lookup"), ("useCdp", "Use Chrome DevTools DOM stage")):
+    for k, label in (("isNekoModeEnabled", "Neko cursor (original pixel-art cat)"), ("isScreenshotStreamingEnabled", "Remote screenshots (off blocks new image sends)"), ("useAtspi", "Use AT-SPI element lookup"), ("useCdp", "Use Chrome DevTools DOM stage")):
         c = Gtk.CheckButton(label=label); c.set_active(cur[k]); 
         def changed(x,k=k):
             save(k,x.get_active())
             if k == 'isNekoModeEnabled' and on_neko_changed:on_neko_changed(x.get_active())
+            if k == 'isScreenshotStreamingEnabled' and on_screenshots_changed:on_screenshots_changed(x.get_active())
         c.connect("toggled", changed); b.pack_start(c, False, False, 0)
     b.pack_start(Gtk.Label(label="Actions (--act) are command-line only. Bounded X11 tests pass; full-platform validation is incomplete."), False, False, 0)
     b.pack_start(Gtk.Label(label="Ask insert target: choose in the Ask preview (stored: %s)" % (cur["askTargetWmClass"] or "window focused at press")), False, False, 0)
-    b.pack_start(Gtk.Label(label=("Neko changes this session. Other settings apply to new app/Ask launches.\nExplicit environment settings override saved values." if on_neko_changed else "Changes apply to new app/Ask launches, not this running session.\nExplicit environment settings override saved values.")), False, False, 0)
+    b.pack_start(Gtk.Label(label=("Neko and remote screenshots can change this session. AT-SPI/CDP apply to new launches.\nExplicit environment settings override saved values." if on_neko_changed or on_screenshots_changed else "Changes apply to new app/Ask launches, not this running session.\nExplicit environment settings override saved values.")), False, False, 0)
+    b.pack_start(Gtk.Label(label="Off cannot recall images already sent or accepted by an in-flight write."), False, False, 0)
     for label in b.get_children():
         if isinstance(label, Gtk.Label):
             label.set_line_wrap(True); label.set_max_width_chars(62); label.set_xalign(0)

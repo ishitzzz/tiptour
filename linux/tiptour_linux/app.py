@@ -41,8 +41,12 @@ except Exception as _e:
 def main():
     if os.environ.get('TIPTOUR_HANG_DUMP'):  # diagnostic: dump all thread stacks to stderr after N seconds if still running
         import faulthandler; faulthandler.dump_traceback_later(int(os.environ['TIPTOUR_HANG_DUMP']), repeat=False, file=sys.stderr)
+    _screenshot_env_override = 'TIPTOUR_STREAM' in os.environ
     _neko_env_override = 'TIPTOUR_NEKO' in os.environ
     from . import settings as _st; _st.apply_env()  # settings.json -> env (explicit env wins); never enables --act
+    from .screenshot_policy import ScreenshotPolicy, PRIVACY_START, PRIVACY_OFF
+    screenshot_policy=ScreenshotPolicy(os.environ.get('TIPTOUR_STREAM','1')=='1')
+    screenshot_change={'fn':None}
     ap = argparse.ArgumentParser()
     ap.add_argument("--ask", action="append", default=[])
     ap.add_argument("--serve", default="", help="keep ONE Gemini session open; text lines appended to this FIFO/file path are user utterances, painted highlights arrive from the live Ctrl+Shift monitor; @quit ends")
@@ -112,7 +116,13 @@ def main():
                     finally:_cap_lk.release()
                     return False
                 GLib.timeout_add(16,apply)
-            w = _st.gtk_window(closed, standalone=False, on_neko_changed=None if _neko_env_override else live_neko)
+            def live_screenshots(enabled):
+                if screenshot_policy.set_enabled(enabled):
+                    os.environ['TIPTOUR_STREAM']='1' if enabled else '0'
+                    if screenshot_change['fn']:screenshot_change['fn'](enabled)
+            w = _st.gtk_window(closed, standalone=False,
+                on_neko_changed=None if _neko_env_override else live_neko,
+                on_screenshots_changed=None if _screenshot_env_override else live_screenshots)
             shell_windows['settings'] = w; shell_windows['busy'].set()
             w.connect('map', lambda *_: shell_windows['busy'].set())
             w.connect('unmap', lambda *_: shell_windows['busy'].clear())
@@ -558,8 +568,12 @@ def main():
                 if os.environ.get("TIPTOUR_FAKE_CONNECT_FAIL", "") == str(_conn[0]): raise RuntimeError("test seam: connection %d refused" % _conn[0])  # a replaced session also starts a new voice epoch
             if os.environ.get("TIPTOUR_CLIENT_FACTORY") and os.environ.get("TIPTOUR_TEST_MODE") == "1":  # TEST SEAM (needs TIPTOUR_TEST_MODE=1 too): "module:callable(on_event, loop, log)" returns a stand-in client (see tests/fake_client.py); never set in normal use
                 import importlib; _m, _f = os.environ["TIPTOUR_CLIENT_FACTORY"].split(":")
-                return getattr(importlib.import_module(_m), _f)(oe, loop, log), 0
-            return await connect_with_pool(pool, lambda: LiveClient(oe), log)
+                fresh=getattr(importlib.import_module(_m), _f)(oe, loop, log)
+                if not screenshot_policy.enabled:await fresh.send_context(PRIVACY_START)
+                return fresh,0
+            fresh,k = await connect_with_pool(pool, lambda: LiveClient(oe), log)
+            if not screenshot_policy.enabled:await fresh.send_context(PRIVACY_START)
+            return fresh,k
         client, key = await new_session()
         full, jpeg, size = await asyncio.to_thread(lambda: grab())
         # grab on GTK thread-safe? PIL uses its own X connection, fine.
@@ -577,22 +591,45 @@ def main():
         def _goal_live():  # a plan is LIVE (Mac WorkflowRunner.activePlan != nil) only while a target is armed/paused, a resolve is running, or an observe/advance/replay task is pending. NOT gate['turn']/gate['replay'] (those are true for every ask) - a completed plan is not live, so its goal may be submitted again
             _ob = hl.get("obs_task"); _tk = hl.get("task")
             return bool(cur.get("armed") or cur.get("paused") or resolving["n"] > 0 or (_ob is not None and not _ob.done()) or (_tk is not None and not _tk.done()))
+        stream_changed=asyncio.Event()
         async def stream_frames():  # Mac GeminiLiveSession.captureAndProcessFrameForGemini: 3.0s timer; skip while suppressed-until-user-speaks or a plan is active; perceptual-hash dedup; else send
             while stream_on[0]:
                 try:
-                    if stream_state["suppressed"]: stream_state["skipped"]["suppressed"] += 1
+                    if not screenshot_policy.enabled: pass
+                    elif stream_state["suppressed"]: stream_state["skipped"]["suppressed"] += 1
                     elif shell_busy(): pass  # do not hide an interactive tray/settings for idle streaming
                     elif _plan_active(): stream_state["skipped"]["plan_active"] += 1
                     else:
-                        _stream_tok=plan_tok["n"]
+                        _stream_tok=plan_tok["n"];_image_ticket=screenshot_policy.ticket()
                         _, j, _ = await asyncio.to_thread(lambda: capture_clean(fast=True))
                         if _stream_tok != plan_tok["n"] or _plan_active() or shell_busy():continue
                         h = _dhash(j); lh = stream_state["hash"]
                         if lh is not None and bin(lh ^ h).count("1") <= 5: stream_state["skipped"]["same_scene"] += 1
-                        else: stream_state["hash"] = h; stream_state["sent"] += 1; await client.send_screenshot(j); log("stream frame sent (idle context)", stream_state["sent"], "bytes", len(j)); (open(os.path.join(a.out, "stream-%d.jpg" % stream_state["sent"]), "wb").write(j) if getattr(a, "out", None) else None)
+                        else:
+                            if await screenshot_policy.send(client,j,_image_ticket):
+                                stream_state["hash"] = h; stream_state["sent"] += 1
+                                log("stream frame sent (idle context)", stream_state["sent"], "bytes", len(j))
+                                if getattr(a,"out",None):open(os.path.join(a.out,"stream-%d.jpg" % stream_state["sent"]),"wb").write(j)
                 except Exception as e: log('stream error', type(e).__name__)
-                await asyncio.sleep(float(os.environ.get("TIPTOUR_STREAM_INTERVAL", "3.0")))
-        stream_task = asyncio.create_task(stream_frames()) if os.environ.get('TIPTOUR_STREAM', '1') == '1' else None
+                try:await asyncio.wait_for(stream_changed.wait(),float(os.environ.get('TIPTOUR_STREAM_INTERVAL','3.0')))
+                except asyncio.TimeoutError:pass
+                stream_changed.clear()
+        stream_task = asyncio.create_task(stream_frames())
+        screenshot_notice_tasks=set();screenshot_notice={'revision':0}
+        def screenshot_changed(enabled):
+            screenshot_notice['revision']+=1;revision=screenshot_notice['revision']
+            def apply():
+                if revision!=screenshot_notice['revision'] or ing.get('shutdown'):return
+                stream_state['hash']=None;stream_changed.set()
+                if not enabled:
+                    task=asyncio.create_task(client.send_context(PRIVACY_OFF))
+                    screenshot_notice_tasks.add(task)
+                    def finished(t):
+                        screenshot_notice_tasks.discard(t)
+                        if not t.cancelled() and t.exception():log('screenshot privacy notice delivery failed; image policy remains off')
+                    task.add_done_callback(finished)
+            loop.call_soon_threadsafe(apply)
+        screenshot_change['fn']=screenshot_changed
         await asyncio.sleep(2.0 if stream_task else 0)
         serve_q = asyncio.Queue()
         typed_reply = {"active": False, "rev": None, "hash": None, "boundary": None, "generation": None}
@@ -628,6 +665,7 @@ def main():
                     if highlight_owner.valid(token):
                         highlight_owner.visible = False; hl['trail'].hide()
                 on_gtk(hide_current)
+                _image_ticket=screenshot_policy.ticket()
                 full, jpeg, size = await asyncio.to_thread(capture_clean, True, False, live)
                 if not live(): return
                 async def send(awaitable):
@@ -652,11 +690,16 @@ def main():
                         cancelled.cancel()
                         if 'session_cancelled' in locals(): session_cancelled.cancel()
                         if not task.done(): task.cancel()
-                if not await send(session_client.send_screenshot(jpeg)): return
-                accepted_bytes = True
-                if not await send(session_client.send_text(_hl.prompt(ctx, ack=True))): return
+                image_result=[]
+                async def image_send():
+                    image_result.append(await screenshot_policy.send(session_client,jpeg,_image_ticket))
+                if not await send(image_send()): return
+                accepted_bytes = bool(image_result and image_result[0])
+                _context_prompt=_hl.prompt(ctx, ack=True)
+                if not accepted_bytes:_context_prompt+='\nNo screenshot was sent for this context. Use the supplied text only; do not claim to see the screen.'
+                if not await send(session_client.send_text(_context_prompt)): return
                 if not live(): return
-                results.append({'ask': '@highlight %d' % token, 'highlight': 'sent alongside voice (fresh screenshot + context prompt); acknowledgement requested, not independently correlated', 'rect': ctx['rect'], 'window': ctx.get('window')})
+                results.append({'ask': '@highlight %d' % token, 'highlight': ('sent alongside voice (fresh screenshot + context prompt); acknowledgement requested, not independently correlated' if accepted_bytes else 'sent alongside voice (text context only, screenshot disabled or retired); acknowledgement requested, not independently correlated'), 'rect': ctx['rect'], 'window': ctx.get('window')})
                 log('highlight context sent alongside voice; acknowledgement stays on voice event stream')
             except Exception as exc:
                 if 'accepted_bytes' in locals() and accepted_bytes and owns_session(): tainted[0] = True
@@ -701,6 +744,8 @@ def main():
                 while not serve_q.empty(): serve_q.get_nowait()
                 arr['n'] += 1; serve_q.put_nowait((arr['n'], '@quit'))
                 click_events.append({'gate': 'shutdown_at_ingress'})
+                screenshot_change['fn']=None
+                for task in list(screenshot_notice_tasks):task.cancel()
                 if stream_task: stream_task.cancel()
                 for task in tuple(shared_context_tasks): task.cancel()
                 run_task.cancel()  # owned active body: capture/connect/highlight/send waits unwind
@@ -1498,7 +1543,7 @@ def main():
                 _read_worker.publish(_publish_private)
             _engine = ReadOnlyEngine(_active_app,
                 lambda: dict(autopilot=a.act, action_driver=a.act,
-                             screenshots=os.environ.get('TIPTOUR_STREAM','1')=='1', accurate_grounding=detector is not None),
+                             screenshots=screenshot_policy.enabled, screenshot_epoch=screenshot_policy.ticket(), accurate_grounding=detector is not None),
                 lambda: hl.get('active_goal'), _readonly_cache, _refresh_targets, capture_clean, detection_count=TARGET_CACHE.fresh_target_count)
             def _invoke_readonly(method):
                 def eligible():
@@ -1877,6 +1922,7 @@ def main():
                         if highlight_owner.valid(token):
                             highlight_owner.visible = False; hl['trail'].hide()
                     on_gtk(hide_current)
+                    _image_ticket=screenshot_policy.ticket()
                     try: full, jpeg, size = await asyncio.to_thread(capture_clean, True, False, lambda: highlight_owner.valid(token))
                     except RuntimeError as exc:
                         if str(exc) != 'stale capture discarded': raise
@@ -1903,9 +1949,11 @@ def main():
                         finally:
                             cancelled.cancel()
                             if not task.done(): task.cancel()
-                    ok, _ = await owned(client.send_screenshot(jpeg))
+                    ok, _highlight_image_sent = await owned(screenshot_policy.send(client,jpeg,_image_ticket))
                     if not ok: continue
-                    ptxt = _hl.prompt(ctx, ack=True); open(os.path.join(a.out, "highlight-prompt-%d.txt" % i), "w").write(ptxt)
+                    ptxt = _hl.prompt(ctx, ack=True)
+                    if not _highlight_image_sent:ptxt+='\nNo screenshot was sent for this context. Use the supplied text only; do not claim to see the screen.'
+                    open(os.path.join(a.out, "highlight-prompt-%d.txt" % i), "w").write(ptxt)
                     ok, _ = await owned(client.send_text(ptxt))
                     if not ok: continue
                     out_tr.clear(); t0 = time.time()
@@ -1931,8 +1979,9 @@ def main():
                     if not highlight_owner.valid(token): continue
                     if not highlight_owner.commit(token, ctx): continue
                     highlight_phase['token'] = None
-                    results.append({"ask": text, "highlight": "sent (fresh screenshot + context prompt)", "rect": ctx["rect"], "window": ctx.get("window"), "reply": "".join(out_tr).strip()}); log("highlight result recorded"); dlog("highlight result", json.dumps(results[-1])[:400]); out_tr.clear()
+                    results.append({"ask": text, "highlight": ("sent (fresh screenshot + context prompt)" if _highlight_image_sent else "sent (text context only, screenshot disabled or retired)"), "rect": ctx["rect"], "window": ctx.get("window"), "reply": "".join(out_tr).strip()}); log("highlight result recorded"); dlog("highlight result", json.dumps(results[-1])[:400]); out_tr.clear()
                     continue
+                _image_ticket=screenshot_policy.ticket()
                 try:
                     (full, jpeg, size), _oc = await asyncio.to_thread(capture_pinned)
                 except RuntimeError as e:
@@ -1968,11 +2017,11 @@ def main():
                 if voice_turn and not voice_request_live(): continue
                 if _oc.get('token') != plan_tok['n'] or ident() != _oc['pair'][0]:
                     click_events.append({'gate': 'native_context_capture_retired'}); continue
-                await client.send_screenshot(jpeg)
+                _jpeg_sent=await screenshot_policy.send(client,jpeg,_image_ticket)
                 if voice_turn and not voice_request_live():
                     click_events.append({'gate': 'voice_startup_owner_refused', 'at': 'after screenshot'}); continue
-                from PIL import Image as _I; import io as _io; jw,jh=_I.open(_io.BytesIO(jpeg)).size; log("sent JPEG %dx%d (%d bytes) of %dx%d screen" % (jw,jh,len(jpeg), size[0], size[1])); dlog("ask:", repr(text))
-                open(os.path.join(a.out,"sent-%d.jpg"%i),"wb").write(jpeg)
+                from PIL import Image as _I; import io as _io; jw,jh=_I.open(_io.BytesIO(jpeg)).size; log(("sent JPEG %dx%d (%d bytes) of %dx%d screen" % (jw,jh,len(jpeg), size[0], size[1])) if _jpeg_sent else "remote screenshot disabled; local capture retained"); dlog("ask:", repr(text))
+                if _jpeg_sent:open(os.path.join(a.out,"sent-%d.jpg"%i),"wb").write(jpeg)
                 if os.environ.get('FRAME_SETTLE'): await asyncio.sleep(float(os.environ['FRAME_SETTLE']))  # diagnostic only, off by default
                 if not voice_turn: await client.send_text(text)
                 tool_seen = None; t0 = time.time(); gate_ids = {"handled": set(), "accepted": None}  # Mac CompanionManager handledToolCallIDsThisUtterance / acceptedToolCallIDThisUtterance, reset per utterance (here: per ask/turn)
@@ -2301,6 +2350,8 @@ def main():
         except Exception: pass
         try: json.dump({"events": click_events, "presses": clicks.presses, "errors": clicks.errors, "thread_starts": clicks.thread_starts, "backend": clicks.backend}, open(os.path.join(a.out, "click_events.json"), "w"))
         except Exception: pass
+        screenshot_change['fn']=None
+        for task in list(screenshot_notice_tasks):task.cancel()
         if stream_task: stream_task.cancel()
         if pipe.get("task"): pipe["task"].cancel()
         if readonly_harness: await asyncio.to_thread(readonly_harness.stop)

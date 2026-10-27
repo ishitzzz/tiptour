@@ -60,7 +60,8 @@ class ReadOnlyEngine:
 
     def screenshots(self):
         app = self._app()
-        if not self._flags().get('screenshots'):
+        flags=self._flags();ticket=flags.get('screenshot_epoch')
+        if not flags.get('screenshots'):
             return dict(ok=False, **app, reason='screenshots_disabled',
                         message='TipTour Screenshots is off, so the harness will not expose raw screen images.',
                         screenshotCount=0, screenshots=[])
@@ -69,12 +70,18 @@ class ReadOnlyEngine:
             import io
             from PIL import Image
             pixels = Image.open(io.BytesIO(jpeg)).size
+            latest=self._flags()
+            if not latest.get('screenshots') or latest.get('screenshot_epoch')!=ticket:
+                return dict(ok=False, **app, reason='screenshots_disabled', message='Screenshot setting changed during capture; image withheld.', screenshotCount=0, screenshots=[])
             captured = datetime.now(timezone.utc).isoformat()
             image = dict(label='X11 desktop', isCursorScreen=True,
                          displayWidthInPoints=size[0], displayHeightInPoints=size[1],
                          screenshotWidthInPixels=pixels[0], screenshotHeightInPixels=pixels[1],
                          capturedAt=captured, mediaType='image/jpeg',
                          dataURL='data:image/jpeg;base64,'+base64.b64encode(jpeg).decode('ascii'))
+            latest=self._flags()
+            if not latest.get('screenshots') or latest.get('screenshot_epoch')!=ticket:
+                return dict(ok=False, **app, reason='screenshots_disabled', message='Screenshot setting changed during encoding; image withheld.', screenshotCount=0, screenshots=[])
             return dict(ok=True, **app, reason=None, message='Captured fresh TipTour screenshot.', screenshotCount=1, screenshots=[image])
         except Exception:
             # Never expose exception contents (may include private labels or paths).

@@ -22,3 +22,17 @@ assert r['screenshots'][0]['screenshotWidthInPixels']==200
 im=Image.open(io.BytesIO(base64.b64decode(r['screenshots'][0]['dataURL'].split(',',1)[1])));assert im.size==(200,100)
 assert not hasattr(engine,'act') and not hasattr(engine,'submit')
 print('read-only facade offline adapter contract: pass, not live runtime/HTTP')
+
+# Setting can change while the native capture is blocked. Never expose its bytes.
+flags['screenshot_epoch']=1
+original=engine._capture
+def changed_capture():
+ value=original();flags['screenshots']=False;return value
+engine._capture=changed_capture
+assert engine.screenshots()['reason']=='screenshots_disabled'
+flags['screenshots']=True
+def off_on_capture():
+ value=original();flags['screenshot_epoch']+=2;return value
+engine._capture=off_on_capture
+assert engine.screenshots()['reason']=='screenshots_disabled'
+print('PASS readonly capture-time off and off/on epoch withhold raw images')
