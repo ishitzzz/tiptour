@@ -51,6 +51,7 @@ def main():
     ap.add_argument("--highlight", action="store_true", help="enable the X11 Ctrl+Shift focus-highlight monitor; ask text @highlight waits for one painted trail")
     ap.add_argument("--hold", type=float, default=2.0)
     ap.add_argument("--voice", action="store_true", help="push-to-talk voice (Ctrl+Alt toggles a live mic session, replies are played); needs --serve FIFO path (can stay unused) and PulseAudio/pipewire-pulse tools")
+    ap.add_argument("--readonly-harness", action="store_true", help="opt-in loopback read-only observe/skills/targets/screenshots; no action endpoints")
     a = ap.parse_args(); os.makedirs(a.out, exist_ok=True)
     keys = [open(p).read().strip() for p in sorted(glob.glob(a.keys_glob))]
     keys += [k for k in os.environ.get("GEMINI_API_KEYS", "").split(",") if k]
@@ -256,6 +257,7 @@ def main():
                     if g != gen[0] or _e != vs["n"]: click_events.append({"gate": "late_callback_rejected", "kind": k}); return  # delivery-time checks BEFORE any side effect (arrival number, ingress STOP latch, buffers): a replaced session's or an earlier epoch's callback that executes after a toggle/replacement is rejected. The origin epoch is the one captured at callback time
                     arr["n"] += 1
                     if k != "audio": dlog("evt", k, arr["n"], str(v)[:20] if k == "inputTranscript" else "")
+                    if k == "inputTranscript" and hl.get("readonly_worker"): hl["readonly_worker"].cancel_current()
                     if k == "turnComplete": v = _TCv(v if isinstance(v, dict) else {}); v.sess = _e
                     if k in ("turnComplete", "closed", "interrupted"): ing["parts"] = []  # utterance boundary (a closed/interrupted session or turn never concatenates its partial into a later STOP)
                     if k == "inputTranscript":
@@ -376,6 +378,7 @@ def main():
         serve_q = asyncio.Queue()
         cmd_ep = {}; cmd_gen = {}; edge = {"n": 0}
         def _enq(t):
+            if hl.get("readonly_worker"): hl["readonly_worker"].cancel_current()
             if ing.get("ready") and not t.startswith("@") and _norm_resp(t) in _STOP and (_goal_live() or prop["state"] in ("pending", "approved")):  # typed/UI STOP at INGRESS: stops at receipt, ahead of any queued/long voice turn; not enqueued (a late consumer must not stop NEWER work)
                 _stop_work("typed-ingress"); click_events.append({"gate": "typed_stop_at_ingress"}); return
             if ing.get("ready") and not t.startswith("@") and prop["state"] == "approved" and bool(_norm_resp(t)) and _norm_resp(t) not in (_YES | _NO | _STOP):
@@ -835,8 +838,10 @@ def main():
             return resp, tool_seen
 
         _perc_lk = threading.Lock(); _perc_seq = {"started": 0, "applied": 0}
-        def _perceive(full, owned=False):
-            with _perc_lk: _perc_seq["started"] += 1; _my_p = _perc_seq["started"]  # newest-STARTED perception owns TARGET_CACHE (older/cancelled worker-thread results must not overwrite it)
+        def _perceive(full, owned=False, publish=True):
+            with _perc_lk:
+                if publish: _perc_seq["started"] += 1
+                _my_p = _perc_seq["started"] if publish else 0  # newest-STARTED perception owns TARGET_CACHE (older/cancelled worker-thread results must not overwrite it)
             yolo = detector.detect(full) if detector else []
             ocr_el = perception.ocr(full.resize((full.width*2, full.height*2))) if detector else []
             for e in ocr_el: e['bbox']=[v/2 for v in e['bbox']]; e['center']=[v/2 for v in e['center']]
@@ -844,10 +849,53 @@ def main():
             _els = [{'bbox': [b['bbox'][0], b['bbox'][1], b['bbox'][0] + b['bbox'][2], b['bbox'][1] + b['bbox'][3]], 'label': b.get('label') or '', 'source': 'yolo', 'conf': b.get('conf', 0)} for b in yolo] + [{'bbox': [e['bbox'][0], e['bbox'][1], e['bbox'][0] + e['bbox'][2], e['bbox'][1] + e['bbox'][3]], 'label': e.get('label') or '', 'source': 'ocr', 'conf': e.get('conf', 0)} for e in ocr_el]; _sz = tuple(full.size); _dfr = (0, 0, _sz[0], _sz[1])  # from THIS pass's own image, not the shared nonlocal size
             _pc = LocalPerceptionTargetCache(); _pc.update(_els, _sz, _dfr)  # PRIVATE snapshot owned by this pass (immutable after this line)
             with _perc_lk:
-                if _my_p >= _perc_seq['applied']:
+                if publish and _my_p >= _perc_seq['applied']:
                     _perc_seq['applied'] = _my_p
                     TARGET_CACHE.update(_els, _sz, _dfr)  # Mac: LocalPerceptionTargetCache.update after each perception pass (newest-started wins the SHARED cache)
             return (yolo, ocr_el, _my_p, _pc) if owned else (yolo, ocr_el)
+        readonly_harness = None
+        if a.readonly_harness:
+            from .engine import ReadOnlyEngine
+            from .harness import ReadOnlyHarness
+            def _active_app():
+                from Xlib import display as _xd
+                _display = _xd.Display()
+                try:
+                    _root = _display.screen().root
+                    _prop = _root.get_full_property(_display.intern_atom('_NET_ACTIVE_WINDOW'), 0)
+                    if not _prop or not len(_prop.value): return {}
+                    _window = _display.create_resource_object('window', int(_prop.value[0]))
+                    _wm = _window.get_wm_class() or ()
+                    return dict(name=_wm[-1] if _wm else None, desktop_id=None)
+                finally: _display.close()
+            _readonly_cache = LocalPerceptionTargetCache()
+            from .read_worker import ReadWorker
+            _read_worker = ReadWorker(loop.call_soon_threadsafe)
+            hl['readonly_worker'] = _read_worker
+            _read_eligible = _read_worker.check
+            def _refresh_targets(reason):
+                _read_eligible()
+                _token = plan_tok["n"]
+                _captured = capture_clean()  # NEVER overwrites the approved/utterance pin.
+                _read_eligible()
+                _, _, _, _private = _perceive(_captured[0], True, publish=False)
+                _read_eligible()
+                if _token != plan_tok["n"]: raise RuntimeError('read superseded')
+                # Read-only cache is private; no TARGET_CACHE/frame_id/own_cap publication.
+                def _publish_private():
+                    if _token != plan_tok["n"]: raise RuntimeError("read superseded")
+                    with _readonly_cache._lock: _readonly_cache._snap = _private._snap
+                _read_worker.publish(_publish_private)
+            _engine = ReadOnlyEngine(_active_app,
+                lambda: dict(autopilot=a.act, action_driver=a.act,
+                             screenshots=os.environ.get('TIPTOUR_STREAM','1')=='1', accurate_grounding=detector is not None),
+                lambda: hl.get('active_goal'), _readonly_cache, _refresh_targets, capture_clean, detection_count=TARGET_CACHE.fresh_target_count)
+            def _invoke_readonly(method):
+                def eligible():
+                    return method not in ('targets','screenshots') or not (_goal_live() or gate['turn'] or gate['replay'] or resolving['n'])
+                return _read_worker.invoke(lambda: getattr(_engine,method)(True) if method == 'targets' else getattr(_engine,method)(), eligible)
+            readonly_harness = ReadOnlyHarness(_invoke_readonly)
+            readonly_harness.start(); log('read-only harness listening on 127.0.0.1:%d (no action endpoints)' % readonly_harness.port)
         last_call = {}; hl['last_call'] = last_call
         def _cancel_task(keep_obs=False):
             """Mac cancels the in-flight resolution task BEFORE every transition (skip/advance/start/stop/resume/retry). Loop-thread only. keep_obs=True (used at ASK DEQUEUE only): a new UTTERANCE is not a transition on the Mac - the active plan (incl. a pending observe auto-advance) keeps running until a toolCall supersedes it or a control (skip/stop) cancels it."""
@@ -1302,6 +1350,7 @@ def main():
         except Exception: pass
         if mic: mic.stop()
         if player: player.close()
+        if readonly_harness: await asyncio.to_thread(readonly_harness.stop)
         await client.close(); GLib.idle_add(Gtk.main_quit)
 
     def runner():

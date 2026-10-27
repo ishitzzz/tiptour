@@ -1,4 +1,16 @@
-# R44 app-skill candidate, pending review
+# R47 read-only facade candidate
+
+R47 adds an opt-in `--readonly-harness` on loopback port 19474. It exposes read-only health, observe, skills, targets and screenshots through the existing runtime. No action, task or plan endpoint is registered; external `execute=true` is never local approval. Screenshots honor the screenshot toggle and existing own-window exclusion. Active application uses Linux WM_CLASS; bundle identifier is unavailable. This is a partial facade, not full HTTP, UI or JEV integration.
+
+Read captures do not replace approval/utterance pins. Read perception has a private cache and does not publish the shared runtime target cache or generation. Observe uses the real runtime detection count. Capture reads are refused while a plan/turn/replay/resolution is active. One owned read worker serializes queued/running/finished state: queued cancellation frees the slot; a running timeout keeps it busy until actual exit. Final cancellation check and response completion share the ownership lock. A whole native capture/perception pass already in flight can continue CPU use, including OCR after a stalled detector, until it returns. Cancellation prevents late publication and a stale successful response; it is not immediate CPU cancellation or zero interference.
+
+Current finalization source has an actual simulated-model GTK/HTTP run: observe, skills, refreshed targets and screenshot reads; POST refused 405; browser Origin and non-loopback Host refused 403; local typed Yes then actual selection 0..14, app/driver 0. A thread test cancels immediately before payload return and gets no stale result. Earlier owned-source runs tested an 18-second detector stall: HTTP timeout at 15.0017s, backpressure until worker exit, STOP processed, runtime count 14 unchanged; a delayed approved-click binding refused read captures and STOP left zero old effects after six seconds. Those runtime records retain their exact source boundaries. Earlier failed 503 and timeout runs are retained, not counted as passes.
+
+Previously pushed bounded checkpoints on feature/linux-port: R42 `313f900`, R44 app skills `983d374`, R45 offline JEV contracts `fd27bbb`, R46 pure visual-context policy `2715fbf`. JEV has no live transport, key access or provider call; its strict numeric/top-level JSON boundary is not a full typed answer decoder. Pure visual policy is not capture/crop delivery. Full product UI/onboarding/radial/tutorial/JEV flow, remaining skills input/menu behavior, HTTP action integration, physical mixed-DPI/Wayland and real voice STOP/partial-intent edges remain open. No whole-port readiness claim.
+
+## Earlier source-bound R44 report
+
+# R44 app-skill checkpoint
 
 Portable app-skill registry is copied from the pinned Mac contract: user/project/bundled roots, front matter, structured runtime hints, app matching, first-match aliases, numeric-policy queries and info records. Bundled Blender markdown is unchanged from the pinned source. Linux uses desktop id in place of a bundle id; lexical file order makes unspecified Mac enumeration deterministic. The candidate constructs a registry at each proposal rather than the Mac shared startup snapshot; this reload/performance difference is explicit and remains to be aligned. Non-JSON and nonfinite numeric hints are rejected, including JSON overflow to infinity.
 
