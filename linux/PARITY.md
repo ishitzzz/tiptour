@@ -1,3 +1,15 @@
+# R50 bounded visible follow and capture correction
+
+The optional text entry now follows the mouse on a 16ms GTK timer, using actual outer frame extents and monitor workarea in GDK coordinates. Mac constants and candidate order are preserved with explicit bottom-left to top-left Y conversion. A too-small workarea refuses movement. The actual loop-owned pending proposal, active goal, turn, replay and resolving state continuously reconciles tracking freeze; an owned focus worker independently blocks motion. Tracking resumes at idle and the timer is removed on close. Status text remains partial; this is not full Mac fade/style/results resizing or radial dispatch.
+
+A real new capture failure was found and retained: the moving/lowered text entry appeared in the provider-bound JPEG because GTK client XIDs were reparented under window-manager decoration frames. Exclusion now resolves the own client to its root-child ancestor while the server is grabbed, and excludes that whole frame from mask reconstruction. Fresh actual sent pixels for the moved/partly occluded case were inspected and contain only the target, not own text/proposal/pointer. Unsupported bare-root backing now takes the logged real hide fallback. This can flicker; no universal flicker-free claim is made. The earlier leaking JPEG is not a pass.
+
+Exact candidate `bcb350c9` has 19 scripts numeric zero and actual scripted-provider GTK runs: following changes X/Y, displayed proposal freezes X/Y, UI Yes gives native selection 0..14, completion resumes X/Y; actual GTK Stop during an approved five-second binding stall leaves zero old button effects after six seconds, app/driver zero. Current provider-bound JPEG and Stop pixels were inspected. Fast no-tool recovery is supported by continuous-state code and mocked state tests, not a separate actual no-tool run. Virtual audio sections skipped; no new physical microphone, real provider, mixed-DPI or Wayland proof. A unit-wrapper detached-child warning is retained despite numeric script zero.
+
+Radial geometry is pure policy only. Full menu/onboarding/radial UI, text fade/results/style parity, live JEV, physical voice and the wider full-port gaps remain open. Visual state pairs are screenshots, not a video or continuous recording.
+
+## Prior bounded checkpoints
+
 # R49 bounded Gemini startup surface
 
 `packaging/tiptour-linux desktop` opens an optional Gemini-only Linux startup window. JEV is explicitly unavailable. It uses the existing model and configured key files, with no key writes or new providers. Key entries are only detected, not validated for quota or authenticity. Readiness and runtime share a loader that skips unreadable files, directories and invalid encodings without printing secrets. Detected X11/tool/GTK/OCR conditions are not accessibility or microphone permission grants. AT-SPI app access and microphone capture remain unverified until use. Missing voice tools disables voice; text and point-only are default, actions/voice require explicit checkboxes.

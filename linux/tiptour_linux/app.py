@@ -70,7 +70,8 @@ def main():
             elif 'STOP (' in msg: status = 'Stopped. Pending and running work cancelled.'
             elif 'plan complete' in msg: status = 'Plan finished. Ready for another request.'
             elif 'pending plan rev ' in msg and 'cleared' in msg: status = 'Proposal cleared without running.'
-            if status: GLib.idle_add(text_status['panel'].activity.set_text, status)
+            if status:
+                GLib.idle_add(text_status['panel'].activity.set_text, status)
     def dlog(*x):  # detailed lines (window titles, element labels, utterances, replies): only with TIPTOUR_DEBUG_LOG=1; default logs carry no page/user text
         if os.environ.get("TIPTOUR_DEBUG_LOG") == "1": log(*x)
     overlay = PointerOverlay(); overlay.show_all()
@@ -1070,6 +1071,12 @@ def main():
             prop["state"] = "revoked"; hl["active_goal"] = None; plan_tok["n"] += 1; clicks.disarm(); last_call.clear(); (hl.get('cancel_task') or (lambda *_: None))(); GLib.idle_add(overlay.retire)
             click_events.append({"gate": "approved_plan_revoked", "rev": prop["rev"], "hash": prop["hash"], "via": src}); log("confirmation: approved plan rev %d revoked (%s); queued/active execution stopped" % (prop["rev"], src)); return True
         if text_ui: GLib.idle_add(text_ui.show_command)
+        async def sync_text_tracking():
+            while True:
+                frozen = bool(prop['state'] == 'pending' or _goal_live() or gate['turn'] or gate['replay'] or resolving['n'])
+                GLib.idle_add(text_ui.set_tracking_frozen, frozen)
+                await asyncio.sleep(.016)
+        text_tracking_task = asyncio.create_task(sync_text_tracking()) if text_ui else None
         ing["ready"] = True  # every name the ingress latch uses (prop, _STOP, _norm_resp, _stop_work, _goal_live) exists from here on; before this nothing can be live, pending or approved
         i = -1; pend_store = []; cur_vs = [0]; hist = []
         def _note(t): hist.append(("user", "[TipTour app record, not spoken by the user] " + t))  # app-side events the model must not forget across a fresh connection: proposal held/approved/declined/stopped (text only)
@@ -1355,6 +1362,7 @@ def main():
             out_tr.clear()
             if voice_turn and mic and mic.active and not voice_stopped: _enq("@voice-next")  # the live voice session stays open until the next Ctrl+Alt press
             log("result recorded (turn %d, tool source %s)" % (i, ((results[-1].get("tool") or {}).get("source", "-")))); dlog("result", json.dumps(results[-1]))
+        if text_tracking_task: text_tracking_task.cancel()
         stream_on[0] = False
         if os.environ.get("TIPTOUR_TEST_MODE") == "1":
             try: open(os.path.join(a.out, "overlay_events.json"), "w").write(json.dumps({"events": list(overlay.events), "final": {"mode": overlay.mode, "show_label": bool(overlay.show_label), "retired": bool(getattr(overlay, "retired", False)), "label": overlay.label}}))

@@ -49,3 +49,11 @@ assert posts==before and not activations,(posts,activations)
 mod.subprocess.Popen=real_popen
 p.destroy();p.monitor_thread.join(1);assert not p.monitor_thread.is_alive()
 print('PASS invalid unrelated transition clears target; own entry retains;20 replacements backpressured; cancelled identity cannot dispatch activation')
+# Continuous idle reconciliation wins local freezes after cancelled/backpressured handoff.
+p=TextPanel(posts.append);p.show_all();pump(.1)
+p.set_tracking_frozen(True);p.busy=True;p.worker_busy=True
+old=p.tracking_origin;p.set_tracking_frozen(False);p.follow_tick();assert p.tracking_origin is None
+p.busy=False;p.worker_busy=False;p.follow_tick();assert p.tracking_origin is not None
+p.set_tracking_frozen(True);p.stop_work();p.set_tracking_frozen(False);p.follow_tick();assert not p.tracking_frozen
+p.destroy();p.monitor_thread.join(1);assert not p.monitor_thread.is_alive() and p.follow_timer is None
+print('PASS owned pending worker blocks motion despite idle reconciliation; idle reconciles cancelled/localfreeze; follow timer cleanup')

@@ -54,6 +54,8 @@ class TextPanel(Gtk.Window):
         self.connect('key-press-event', self.key)
         self.chord = False; self.closed = threading.Event(); self.epoch = 0; self.busy = False; self.worker_lock = threading.Lock(); self.worker_busy = False
         self.connect("destroy", lambda *_: self.close())
+        self.tracking_frozen = False; self.tracking_origin = None
+        self.follow_timer = GLib.timeout_add(16, self.follow_tick)
         self.monitor_thread = threading.Thread(target=self.monitor, daemon=True, name="text-shortcut")
         self.monitor_thread.start()
 
@@ -88,7 +90,8 @@ class TextPanel(Gtk.Window):
                 if not own: self.target = current  # invalid unrelated focus MUST clear old target
             self.set_keep_above(True)
             self.activity.set_text('Review each proposal before Confirm. Target: %s' % (self.target[0] if self.target else 'unavailable'))
-            self.show_all(); self.present(); self.entry.grab_focus()
+            self.tracking_origin = None
+            self.show_all(); self.follow_tick(); self.present(); self.entry.grab_focus()
         if not self.async_call(read, done): self.target = None
         return False
 
@@ -120,10 +123,11 @@ class TextPanel(Gtk.Window):
         if text.startswith('@'):
             self.activity.set_text('Use ordinary text. Confirm or Cancel in the proposal panel.'); return
         if self.busy: return
-        self.busy = True; self.set_keep_above(False)
+        self.busy = True; self.set_tracking_frozen(True); self.set_keep_above(False)
         def done(ok):
             self.busy = False
             if not ok:
+                self.set_tracking_frozen(False)
                 self.activity.set_text('Target unavailable. Focus it, then reopen with Ctrl+K.'); return
             self.entry.set_text(''); self.activity.set_text('Request sent. Review the proposal before Confirm.')
             self.post(text)
@@ -138,8 +142,29 @@ class TextPanel(Gtk.Window):
         self.epoch += 1; self.busy = False
         self.post("stop")
 
+    def set_tracking_frozen(self, frozen):
+        if not frozen and self.tracking_frozen: self.tracking_origin = None
+        self.tracking_frozen = bool(frozen)
+
+    def follow_tick(self):
+        if self.closed.is_set(): return False
+        if self.worker_busy or self.busy or self.tracking_frozen or not self.get_visible() or not self.get_window(): return True
+        from .input_geometry import panel_origin, smoothed_origin
+        try:
+            display = Gdk.Display.get_default()
+            _, x, y = display.get_default_seat().get_pointer().get_position()
+            monitor = display.get_monitor_at_point(x, y); area = monitor.get_workarea()
+            extent = self.get_window().get_frame_extents()
+            target = panel_origin((x,y), (extent.width, extent.height), (area.x, area.y, area.width, area.height))
+            self.tracking_origin = smoothed_origin(self.tracking_origin, target)
+            self.move(*(round(v) for v in self.tracking_origin))
+        except ValueError: pass  # too small a workarea: do not move outside it
+        return True
+
     def close(self):
         self.closed.set(); self.epoch += 1
+        if self.follow_timer:
+            GLib.source_remove(self.follow_timer); self.follow_timer = None
 
     def monitor(self):
         xd = None

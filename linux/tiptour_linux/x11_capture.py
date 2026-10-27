@@ -42,6 +42,21 @@ def _capture(xids):
             rg=root.get_geometry();raw=root.get_image(0,0,rg.width,rg.height,X.ZPixmap,0xffffffff)
             full=Image.frombytes('RGB',(rg.width,rg.height),raw.data,'raw','BGRX')
             if rg.depth!=24:raise RuntimeError('unsupported root pixel format')
+            # GTK toplevel XIDs may be children of WM decoration frames.
+            # Mask/exclude the root child, not only the client id, or the frame's
+            # backing can silently redraw our own entry into the reconstructed image.
+            owned=set()
+            for xid in xids:
+                try:
+                    w=d.create_resource_object('window',xid)
+                    while True:
+                        parent=w.query_tree().parent
+                        if parent.id==root.id: break
+                        if not parent.id: raise RuntimeError('own window has no root ancestor')
+                        w=parent
+                    owned.add(w.id)
+                except error.BadWindow: continue
+            xids=owned
             mask=Image.new('L',full.size,0);md=ImageDraw.Draw(mask);wins=root.query_tree().children
             for w in wins:
                 if w.id not in xids:continue
