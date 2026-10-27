@@ -27,7 +27,7 @@ The unchanged bundled Blender skill still includes Mac planner instructions refe
 
 ## Setup
 - apt: python3-gi gir1.2-gtk-3.0 python3-cairo xdotool tesseract-ocr gir1.2-atspi-2.0 at-spi2-core; pip: see requirements.txt.
-- Detector model: `python3 tools/mil_to_onnx.py ../TipTour/UIElementDetector.mlpackage /tmp/uielement.onnx` (needs onnx + coremltools). Without it the app falls back to raw model coordinates, drawn with a "?" and reported as unconfirmed.
+- Detector model: `python3 tools/mil_to_onnx.py ../TipTour/UIElementDetector.mlpackage /tmp/uielement.onnx` (needs onnx + coremltools). Without it local OCR still runs. Native/DOM and local text-label grounding remain available; unresolved hinted targets may fall back to raw model coordinates, drawn with a "?" and reported as unconfirmed.
 - Gemini API keys: files only, never in the repo. `TIPTOUR_KEYS_GLOB='/path/keys/*/password'` (one key per file). Use a free-tier key.
 - X11 session required (no Wayland). Single display, devicePixelRatio 1.
 
