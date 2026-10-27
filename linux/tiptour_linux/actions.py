@@ -201,7 +201,41 @@ def _focus(app_hint):
     _check_bound(app_hint)
     return d
 
+def _skill_numeric_text(step, app_hint):
+    """Pinned ActionExecutor.typeText skill-directed key branch, never setValue."""
+    if step.get('type') != 'type': return None
+    from .app_skills import AppSkillRegistry
+    skill = AppSkillRegistry().skill(app_hint)
+    text = step.get('value') if step.get('value') is not None else step.get('label', '')
+    if not skill or not skill.should_type_physical_keys(text): return None
+    if step.get('_native_range'):
+        raise _XFail('skill numeric key input cannot apply a saved native range; nothing sent')
+    # The bundled numeric policy has an ASCII key mapping. Unknown policy
+    # characters refuse; no Unicode clipboard/whole-value fallback is inferred.
+    keysyms = {'.':'period','-':'minus','+':'plus','*':'asterisk','/':'slash'}
+    trimmed = text.strip()
+    if any(c not in '0123456789.-+*/' for c in trimmed):
+        raise _XFail('skill numeric character has no supported X11 key mapping; nothing sent')
+    detail = _focus(app_hint)
+    sent = 0; attempted = 0
+    try:
+        for char in trimmed:
+            _check_bound(app_hint, False)
+            _chk('skill numeric key')
+            attempted += 1  # dispatch may apply even when the subprocess reports failure
+            _x('key', '--clearmodifiers', keysyms.get(char,char))
+            sent += 1
+            _sleep(.035)
+    except _XFail as exc:
+        return {'ok':False,'status':'skill_numeric_partial' if attempted else 'skill_numeric_refused',
+                'error':('Numeric input may be partial; no further keys sent. ' if attempted else '') + str(exc),'character_commands_confirmed':sent,'character_commands_attempted':attempted,'possibly_applied':bool(attempted),'retry_safe':False,
+                'text_verified':False,'delivery':'skill-directed identity-bound X11 numeric keys'}
+    return {'ok':True,'status':'performed type','character_commands_confirmed':sent,'character_commands_attempted':attempted,'text_verified':False,
+            'delivery':'skill-directed identity-bound X11 numeric keys','detail':detail}
+
 def _native_text(step, app_hint):
+    numeric = _skill_numeric_text(step, app_hint)
+    if numeric is not None: return numeric
     import json, sys
     saved = step.get('_native_range')
     if saved:
