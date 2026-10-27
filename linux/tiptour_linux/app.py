@@ -55,8 +55,8 @@ def main():
     ap.add_argument("--text-ui", action="store_true", help="opt-in GTK text command panel and Ctrl+K, same local proposal/Yes path")
     a = ap.parse_args(); os.makedirs(a.out, exist_ok=True)
     if a.text_ui and not a.serve: a.serve = os.path.join(a.out, "control.fifo")
-    keys = [open(p).read().strip() for p in sorted(glob.glob(a.keys_glob))]
-    keys += [k for k in os.environ.get("GEMINI_API_KEYS", "").split(",") if k]
+    from .keypool import configured_keys
+    keys = configured_keys(a.keys_glob)
     keys = [k for k in os.environ.get("GEMINI_API_KEYS_FIRST", "").split(",") if k] + keys  # test hook: put (invalid) keys first to exercise real failover
     text_status = {"panel": None}
     log_f = open(os.path.join(a.out, "trace.log"), "w")
@@ -186,7 +186,14 @@ def main():
             return r
         finally:
             if _was:
-                on_gtk(lambda: [w.show_all() for w in _was if w is not overlay or not ov.get('covered')] if _capture_token == plan_tok["n"] else None)
+                def _restore_own():
+                    if _capture_token != plan_tok["n"]: return
+                    for w in _was:
+                        if w is overlay and ov.get('covered'): continue
+                        if w is text_ui:
+                            w.set_focus_on_map(False); w.show_all(); w.set_focus_on_map(True)
+                        else: w.show_all()
+                on_gtk(_restore_own)
 
     def capture_pinned():
         """Pinned capture + this capture's own ownership record (pin seq, identity/image pair). Resolves bind to THIS record, not the shared latest state (Mac: per-plan latestCaptureForActivePlan)."""

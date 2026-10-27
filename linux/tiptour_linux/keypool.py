@@ -49,3 +49,17 @@ class KeyPool:
     def status(self):
         now = self.clock()
         return [(mask(e["key"]), "parked" if e["parked"] else ("cooling %ds" % (e["until"] - now) if e["until"] > now else "ready")) for e in self.keys]
+
+
+def configured_keys(pattern='', env=None):
+    """Load existing key files; unreadable entries are skipped without path/value logging."""
+    import glob, os
+    env = os.environ if env is None else env
+    keys = []
+    for path in sorted(glob.glob(pattern)):
+        try:
+            with open(path) as f: value = f.read().strip()
+            if value: keys.append(value)
+        except (OSError, UnicodeError): pass
+    keys += [k.strip() for k in env.get('GEMINI_API_KEYS', '').split(',') if k.strip()]
+    return keys

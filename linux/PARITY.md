@@ -1,3 +1,17 @@
+# R49 bounded Gemini startup surface
+
+`packaging/tiptour-linux desktop` opens an optional Gemini-only Linux startup window. JEV is explicitly unavailable. It uses the existing model and configured key files, with no key writes or new providers. Key entries are only detected, not validated for quota or authenticity. Readiness and runtime share a loader that skips unreadable files, directories and invalid encodings without printing secrets. Detected X11/tool/GTK/OCR conditions are not accessibility or microphone permission grants. AT-SPI app access and microphone capture remain unverified until use. Missing voice tools disables voice; text and point-only are default, actions/voice require explicit checkboxes.
+
+The initial target probe has a 0.2-second deadline and freezes its result before building the UI. A late result cannot change the displayed or launched target. Timeout gives no target and disables Start. The setup window has its own TipTour WM_CLASS. The target is shown as an X11 ID; change it by closing setup, focusing the desired app and reopening. After setup closes, launch rechecks identity and restores focus, then executes the existing runtime. This post-UI restore can hang in Xlib; xdotool activation has a two-second timeout. No zero-blocking or atomic focus guarantee is claimed.
+
+Bare-root clean-capture fallback now temporarily disables focus-on-map only while restoring the text entry window, preventing the observed own-entry focus steal. This is a narrow text-window fix, not an all-own-surfaces guarantee.
+
+Exact final `0963da88` source: deadline/late-identity and key-loader negative tests numeric zero, current setup pixels inspected, actual GTK Start and text request then FIFO Yes/Stop into the original point-only proposal/pointer path, app/driver zero. The previous `51048799` head has 17 non-GUI unit scripts zero, direct app UI Yes -> native selection 0..14 and GTK Stop during an approved five-second binding stall with zero old button effects after six seconds. Those are prior-head checks, not a fresh full final-head suite. All model responses in these new UI runs were scripted; no new real provider, physical microphone or voice validation. Earlier failed startup-coordinate, typing and refused-focus fixtures are retained.
+
+This is not full Mac onboarding, menu, radial input, text mouse-follow/frozen/ticker, JEV transport or whole-port completion. Earlier checkpoint limitations remain below.
+
+## Prior bounded checkpoints
+
 # R48 bounded text adapter
 
 Opt-in `--text-ui` adds a GTK command entry and Ctrl+K listener to the same local ingress, immutable proposal and displayed local Yes path. It does not add JEV transport or a second execution route. Escape hides the entry, Stop cancels pending/running work and an unsubmitted focus handoff, and recognized local runtime events update a partial status label. Own text UI is excluded from model captures. X11 target identity is bound to window ID, PID and WM_CLASS; unrelated invalid focus or a backpressured show clears the captured target. Only reopening from the exact own entry preserves an existing captured target.

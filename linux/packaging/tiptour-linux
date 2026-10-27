@@ -3,8 +3,9 @@
 #           tiptour-linux voice -> live voice session (Ctrl+Alt toggles); keys from TIPTOUR_KEYS_GLOB
 cd "$(dirname "$(readlink -f "$0")")/.." || exit 1
 case "$1" in
+  desktop) exec python3 -u -m tiptour_linux.desktop "${@:2}";;
   ask) exec python3 -u -m tiptour_linux.ask "${@:2}";;
   voice) F=${TIPTOUR_FIFO:-/tmp/tiptour-fifo}; exec python3 -u -m tiptour_linux.app --highlight --voice --serve "$F" "${@:2}";;
   settings) exec python3 -u -m tiptour_linux.settings "${@:2}";;  # list|get|set|gui
-  *) echo "usage: tiptour-linux ask|voice|settings [gui]"; exit 2;;
+  *) echo "usage: tiptour-linux desktop|ask|voice|settings [gui]"; exit 2;;
 esac
