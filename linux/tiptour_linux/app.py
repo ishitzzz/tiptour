@@ -1221,6 +1221,9 @@ def main():
                         _resp = _hlg.suppressed_payload(text, hl.get("last_ctx"))
                         await client.tool_response(v["id"], v["name"], _resp)
                         continue
+                    # Pinned Mac semantic key normalization occurs before displaying/hashing the approval.
+                    from .app_skills import normalize_semantic_keyboard_steps
+                    args = dict(args, steps=normalize_semantic_keyboard_steps(args.get("steps", []), args.get("app", "")))
                     # Native highlight binding is owned by the app context, never by model-supplied metadata.
                     args = json.loads(json.dumps(args))
                     for st in args.get("steps", []): st.pop("_native_range", None)

@@ -31,7 +31,7 @@ def gtk_window():
     w = Gtk.Window(title="TipTour Linux settings"); b = Gtk.VBox(spacing=6, margin=10); w.add(b); cur = load()
     for k, label in (("isScreenshotStreamingEnabled", "Stream screenshots to the model (~1 fps)"), ("useAtspi", "Use AT-SPI element lookup"), ("useCdp", "Use Chrome DevTools DOM stage")):
         c = Gtk.CheckButton(label=label); c.set_active(cur[k]); c.connect("toggled", lambda x, k=k: save(k, x.get_active())); b.pack_start(c, False, False, 0)
-    b.pack_start(Gtk.Label(label="Actions (--act) are not a setting: command-line only, untested."), False, False, 0)
+    b.pack_start(Gtk.Label(label="Actions (--act) are command-line only. Bounded X11 tests pass; full-platform validation is incomplete."), False, False, 0)
     b.pack_start(Gtk.Label(label="Ask insert target: choose in the Ask preview (stored: %s)" % (cur["askTargetWmClass"] or "window focused at press")), False, False, 0)
     w.connect("destroy", Gtk.main_quit); w.show_all(); return w
 

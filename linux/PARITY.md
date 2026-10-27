@@ -1,3 +1,11 @@
+# R44 app-skill candidate, pending review
+
+Portable app-skill registry is copied from the pinned Mac contract: user/project/bundled roots, front matter, structured runtime hints, app matching, first-match aliases, numeric-policy queries and info records. Bundled Blender markdown is unchanged from the pinned source. Linux uses desktop id in place of a bundle id; lexical file order makes unspecified Mac enumeration deterministic. The candidate constructs a registry at each proposal rather than the Mac shared startup snapshot; this reload/performance difference is explicit and remains to be aligned. Non-JSON and nonfinite numeric hints are rejected, including JSON overflow to infinity.
+
+Only semantic keyboard-step normalization is wired into the live path, before proposal display/hash/approval. A `select all` semantic key in an ordinary app becomes the original Cmd+A contract (Linux dispatch maps Cmd to Ctrl); Blender's existing structured alias takes priority. No action happens on load or normalization. Numeric physical-key delivery, menu-region filtering, HTTP skills exposure and planner integration remain unported. Consecutive type coalescing is not changed in this candidate.
+
+R44 actual GTK run with a simulated model: proposed click first, then displayed Cmd+A, typed Yes, selected exactly 0..14 of `hello original`, app/driver exit 0. This is not a real-provider app-skill inference claim. Twelve offline scripts exit 0, including the new skill contract and existing action/approval tests. Current STOP-after-render and saved-range two-edit regressions exit 0. R44 does not inherit R42's whole runtime evidence without rechecking.
+
 # Current evidence ledger
 
 ## Latest candidate: R42 product, R43 documentation
@@ -26,7 +34,7 @@ These are bounded test results, not release clearance. Runtime evidence is tied 
 
 - R23 source archive SHA256: 5a6cd364a492b2865548f0dcf177deee18f2e44d94be13b43a05d0b067889336.
 - R29 candidate source archive SHA256: fa997708e9bbaeab5ebed2379ab82da67d73c36f7c356aeb8571113198dd3df8.
-- Historical pre-checkpoint Git state was local R20 aadd25029c1701ab29d5014fce0e2b571ffa5257. This ledger now accompanies the bounded R42 product checkpoint; earlier runtime claims retain their original source boundaries.
+- Historical pre-checkpoint Git state was local R20 aadd25029c1701ab29d5014fce0e2b571ffa5257. The accepted R42 product checkpoint is now pushed at 313f900662d3de522e89b6033f8b4f50347c2332 on feature/linux-port and checkpoint/linux-r42-opaque-x11. This is not whole-port acceptance.
 
 ## R23 bounded runtime
 

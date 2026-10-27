@@ -1,6 +1,6 @@
 # Linux TipTour feature inventory
 
-Latest product is R42, documentation R43. Read the latest PARITY.md section before interpreting this earlier inventory. Supported X11 backing capture avoids capture-hide flicker and excludes three own UI windows; unsupported backing uses logged hide fallback. Autopilot uses the pinned 0.28s minimum with a bounded same-step validator-baseline dependency. Whole-product parity remains open.
+Candidate R44 adds app-skill loading and pre-proposal semantic keyboard normalization; R42 remains the accepted runtime milestone. Read the latest PARITY.md section before interpreting this earlier inventory. Supported X11 backing capture avoids capture-hide flicker and excludes three own UI windows; unsupported backing uses logged hide fallback. Autopilot uses the pinned 0.28s minimum with a bounded same-step validator-baseline dependency. Whole-product parity remains open.
 
 
 This replaces the superseded status tables kept in HISTORICAL_MAC_FEATURE_INVENTORY.md. Those tables describe earlier unfinished builds, not current capabilities. This is a work-in-progress port, not a whole-product readiness claim.
@@ -16,8 +16,9 @@ Baseline: Mac commit 6e97782039b57a3f3dcd5a8bf7101438ba6b1c37. Linux-only adapta
 | Actions | Native click and editable text, key/shortcut/scroll adapters, cancellation checks | Owned-fixture effects verified in bounded cases. Native X11 dispatch is not atomic and already-dispatched input cannot be undone. |
 | Browser text | Plain input fallback bound to same DOM object/window/frame/text/selection | Setter and input event, not literal native typing, rich text or undo parity. Browser saved-highlight replacement unsupported. |
 | Saved native selection | Object/text/range bound and consumed once; next edit uses live caret | Two-step NEW then ! regression. Secret/readonly controls refused. |
-| Pointer and highlight | X11 blue companion, movement/follow/retire, focus highlight | Actual continuous R23 recording shows actions and movement, but capture-hide flicker is a confirmed unresolved visual flaw. No smooth/flicker-free or exact Mac-motion claim. |
+| Pointer and highlight | X11 blue companion, movement/follow/retire, focus highlight | Current R42 continuous simulated five-step recording has no hide/fallback; real Gemini static four-click fixture on XFCE desktop also has none. Unsupported bare-root or translucent backing still falls back to hiding. No universal flicker-free or exact Mac-motion claim. |
 | Displays | Virtual wide desktop, uniform integer 100%/200% mapping | Not physical mixed-DPI, fractional scaling, negative origins or Wayland. Unknown mapping refuses. |
+| App skills | R44 portable structured markdown registry, app matching, aliases, input-policy metadata and info; semantic keyboard aliases normalized before proposal hashing/display | Offline tests and actual simulated-model GTK select-all run pass. Numeric physical-key delivery, menu-region filtering and HTTP skills exposure are not wired. No complete app-skill parity claim. |
 | Product shell and other Mac features | Partial Linux shell only | Full onboarding/menu UI, radial/text-command UI, Neko/debug UI, tutorials/Elorian, JEV, skill integration and HTTP facade are not established as ported. See source audit before claiming equivalence. |
 
 See PARITY.md for the current evidence ledger and FIDELITY_CORRECTION.md for unresolved source differences.
