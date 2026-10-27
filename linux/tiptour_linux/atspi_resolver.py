@@ -197,8 +197,12 @@ def walk(node, depth=0, out=None):
                 role = ch.get_role_name()
                 # AT-SPI controls expose ENABLED as a state, unlike optional AXEnabled.
                 # Do not make disabled controls candidates; still recurse into descendants.
-                actionable = role in {"push button", "toggle button", "menu item", "check box", "radio button", "link", "page tab", "entry"}
-                if role in CLICKABLE and (not actionable or st.contains(Atspi.StateType.ENABLED)):
+                # GTK top-level menu headers expose role menu, not menu item.
+                # Only a direct menu-bar child is a target, never a popup container.
+                parent = ch.get_parent() if role == "menu" else None
+                menu_header = role == "menu" and parent is not None and parent.get_role_name() == "menu bar"
+                actionable = menu_header or role in {"push button", "toggle button", "menu item", "check box", "radio button", "link", "page tab", "entry"}
+                if (role in CLICKABLE or menu_header) and (not actionable or st.contains(Atspi.StateType.ENABLED)):
                     coord = _screen_rect(ch,True); ext = type("Rect",(),dict(zip(("x","y","width","height"),coord["rect"])))()
                     if ext.width <= 0 or ext.height <= 0:continue
                     out.append({"label": ch.get_name() or "", "role": role, "rect": [ext.x, ext.y, ext.width, ext.height],
