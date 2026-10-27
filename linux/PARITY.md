@@ -1,3 +1,13 @@
+# R53 documentation correction and actual tray Stop follow-up
+
+No runtime code changes from accepted R52 commit bd75442eae1dc31dc8fd6594941f947d1047ce1c. The README now removes obsolete no-actions/settings/unused-target/no-host claims, distinguishes the Ask tray from the separately tested runtime tray, and preserves physical-device and full-product limits.
+
+Fresh actual X11 tests on the R52 runtime opened the tray menu during an approved five-second native binding delay. The paired control opened the same menu, dismissed with Escape and refocused the target, then produced the actual button effect. The Stop case activated the actual menu Stop, then refocused the same target: typed_stop_at_ingress was recorded and zero old button effects occurred after six seconds. Both app/driver exits are zero. The popup/focus control matters: absence of the effect is not credited merely to focus loss. Provider responses and binding delay are scripted; OS input and GTK effects are real. This is a bounded active tray Stop case, not every action timing or an atomic OS cancellation guarantee.
+
+Inspected screenshots show the actual three-item tray menu with approved-running state, then Stopped/Pending and running work cancelled with unchanged target. The external XFCE power-plugin crash dialog remains visible and is not an app failure or a clean-host claim. No new physical audio, real provider, complete Mac UI or wider platform evidence.
+
+## Prior bounded checkpoints
+
 # R52 bounded tray controls and owned shutdown
 
 Opt-in `--text-ui` now owns a GTK3 status icon with Open text command, Stop and Quit TipTour. The host must support legacy status icons. This is a small Linux control surface, not the full Mac CompanionPanel, settings, logs, pin, radial input or onboarding parity. Tray Open intentionally clears the captured target: focus the target app and press Ctrl+K before submitting. This extra explicit handoff is a conservative Linux UX difference, not immediate Mac target capture.
