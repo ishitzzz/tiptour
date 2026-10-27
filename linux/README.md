@@ -1,6 +1,10 @@
 # TipTour Linux port (experimental, X11 only, NOT a full port)
 Branch feature/linux-port, base upstream 6e97782. Python/GTK3. See PARITY.md for exactly what is verified and what is not. The R78 checkpoint adds bounded app-skill numeric character dispatch tested with an owned GTK fixture, not real Blender. A fresh four-step real-Gemini browser workflow also passes; this is not full-port acceptance. Pointing aims at the native field/widget, not necessarily its insertion caret. Selected UI tests still have two retained prior fixture failures.
 
+## Native selection within an approved workflow
+
+A TYPE `currentSelection` step can now replace a nonempty native editable selection made during the same reviewed plan, such as Select All after typing a first draft. The field/window identity, text, range and geometry must still match before typing; Stop and changed-field/range checks remain active. Saved initial highlight ranges stay separate and once-consumed. This does not enable browser fallback or `setValue currentSelection`. See R86 in PARITY.md for the actual six-step Gemini result, controlled refusal checks and native race limits. The full port is unfinished.
+
 ## Remote Screenshots
 
 The supported Remote Screenshots setting now covers all provider image sends and raw read-only screenshots, not only idle frames. Local screenshots/grounding may still run. In-app changes apply this session unless startup TIPTOUR_STREAM explicitly overrides them; standalone settings apply to new launches. Disabling blocks new image admissions and invalidates captures from older setting epochs. Already-sent or in-flight accepted bytes cannot be recalled. Native text context, audio and tools continue under their existing permissions. See PARITY.md for race limits and controlled versus actual-provider evidence.
