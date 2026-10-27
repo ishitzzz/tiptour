@@ -52,13 +52,25 @@ def main():
     ap.add_argument("--hold", type=float, default=2.0)
     ap.add_argument("--voice", action="store_true", help="push-to-talk voice (Ctrl+Alt toggles a live mic session, replies are played); needs --serve FIFO path (can stay unused) and PulseAudio/pipewire-pulse tools")
     ap.add_argument("--readonly-harness", action="store_true", help="opt-in loopback read-only observe/skills/targets/screenshots; no action endpoints")
+    ap.add_argument("--text-ui", action="store_true", help="opt-in GTK text command panel and Ctrl+K, same local proposal/Yes path")
     a = ap.parse_args(); os.makedirs(a.out, exist_ok=True)
+    if a.text_ui and not a.serve: a.serve = os.path.join(a.out, "control.fifo")
     keys = [open(p).read().strip() for p in sorted(glob.glob(a.keys_glob))]
     keys += [k for k in os.environ.get("GEMINI_API_KEYS", "").split(",") if k]
     keys = [k for k in os.environ.get("GEMINI_API_KEYS_FIRST", "").split(",") if k] + keys  # test hook: put (invalid) keys first to exercise real failover
+    text_status = {"panel": None}
     log_f = open(os.path.join(a.out, "trace.log"), "w")
     def log(*x):
         s = (time.strftime("%H:%M:%S") + (".%03d" % int((time.time() % 1) * 1000) if _os.environ.get("TIPTOUR_LOG_MS") == "1" else "") + " ") + " ".join(map(str, x)); print(s, flush=True); log_f.write(s + "\n"); log_f.flush()
+        if text_status['panel']:
+            msg = ' '.join(map(str, x))
+            status = None
+            if 'proposal rev ' in msg and 'displayed' in msg: status = 'Plan ready. Review the proposal, then Confirm or Cancel.'
+            elif 'user approved plan rev ' in msg: status = 'Approved plan running. Stop cancels remaining work.'
+            elif 'STOP (' in msg: status = 'Stopped. Pending and running work cancelled.'
+            elif 'plan complete' in msg: status = 'Plan finished. Ready for another request.'
+            elif 'pending plan rev ' in msg and 'cleared' in msg: status = 'Proposal cleared without running.'
+            if status: GLib.idle_add(text_status['panel'].activity.set_text, status)
     def dlog(*x):  # detailed lines (window titles, element labels, utterances, replies): only with TIPTOUR_DEBUG_LOG=1; default logs carry no page/user text
         if os.environ.get("TIPTOUR_DEBUG_LOG") == "1": log(*x)
     overlay = PointerOverlay(); overlay.show_all()
@@ -67,6 +79,12 @@ def main():
     from .overlay import ProposalPanel
     hl_post = {"fn": None}
     pprop = ProposalPanel(lambda k, rev: hl_post["fn"] and hl_post["fn"]("@%s %d" % (k, rev)))
+    text_ui = None
+    if a.text_ui:
+        from .text_panel import TextPanel
+        text_ui = TextPanel(lambda t: hl_post["fn"] and hl_post["fn"](t))
+        text_status["panel"] = text_ui
+    def own_windows(): return tuple(w for w in (overlay, panel, pprop, text_ui) if w is not None)
     hl = {"loop": None, "q": None, "mon": None, "trail": None}
     if a.highlight:
         from . import highlight as _hl
@@ -139,7 +157,7 @@ def main():
         _was = [];_hidden_ack=[False]
         def _hide_own():
             if _capture_token != plan_tok["n"]:return
-            for w in (overlay,panel,pprop):
+            for w in own_windows():
                 if w.get_visible():_was.append(w);w.hide()
             _hidden_ack[0]=True
         try:
@@ -150,7 +168,7 @@ def main():
                 with _pin_lk: _pin_seq["started"] += 1; _my_seq = _pin_seq["started"]  # newest-STARTED pinned capture owns the frame identity (captures now run in worker threads, so a slow/cancelled older one can finish after a newer one)
             try:
                 _eligible()
-                r = grab(exclude_xid=[w.get_window().get_xid() for w in (overlay,panel,pprop) if w.get_window()]) if _clean else grab()
+                r = grab(exclude_xid=[w.get_window().get_xid() for w in own_windows() if w.get_window()]) if _clean else grab()
                 _eligible()
             except Exception as e:
                 _eligible()  # stale exclusion failure must never trigger a raw capture
@@ -1044,6 +1062,7 @@ def main():
             if prop["state"] != "approved": return False
             prop["state"] = "revoked"; hl["active_goal"] = None; plan_tok["n"] += 1; clicks.disarm(); last_call.clear(); (hl.get('cancel_task') or (lambda *_: None))(); GLib.idle_add(overlay.retire)
             click_events.append({"gate": "approved_plan_revoked", "rev": prop["rev"], "hash": prop["hash"], "via": src}); log("confirmation: approved plan rev %d revoked (%s); queued/active execution stopped" % (prop["rev"], src)); return True
+        if text_ui: GLib.idle_add(text_ui.show_command)
         ing["ready"] = True  # every name the ingress latch uses (prop, _STOP, _norm_resp, _stop_work, _goal_live) exists from here on; before this nothing can be live, pending or approved
         i = -1; pend_store = []; cur_vs = [0]; hist = []
         def _note(t): hist.append(("user", "[TipTour app record, not spoken by the user] " + t))  # app-side events the model must not forget across a fresh connection: proposal held/approved/declined/stopped (text only)
@@ -1359,6 +1378,7 @@ def main():
             log("FATAL", type(e).__name__); dlog("FATAL detail", str(e)[:300]); GLib.idle_add(Gtk.main_quit)
     threading.Thread(target=runner, daemon=True).start()
     Gtk.main()
+    if text_ui: text_ui.close()
     t = threading.Timer(3.0, lambda: (sys.stderr.write('WATCHDOG: forced exit after 3s (clean shutdown did not finish)\n'), sys.stderr.flush(), os._exit(0))); t.daemon = True; t.start()  # bounded shutdown: a stuck non-daemon thread or in-flight D-Bus call must not hang the process after @quit
 
 if __name__ == "__main__": main()

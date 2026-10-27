@@ -1,3 +1,15 @@
+# R48 bounded text adapter
+
+Opt-in `--text-ui` adds a GTK command entry and Ctrl+K listener to the same local ingress, immutable proposal and displayed local Yes path. It does not add JEV transport or a second execution route. Escape hides the entry, Stop cancels pending/running work and an unsubmitted focus handoff, and recognized local runtime events update a partial status label. Own text UI is excluded from model captures. X11 target identity is bound to window ID, PID and WM_CLASS; unrelated invalid focus or a backpressured show clears the captured target. Only reopening from the exact own entry preserves an existing captured target.
+
+One async focus worker is allowed at a time. Stop/show/dismiss invalidate old completions, and cancellation is checked after identity lookup and before activation. A waiting activation client is terminated on cancellation. Focus activation already delivered to the window manager cannot be recalled, and the final focus/OS dispatch check remains non-atomic. A truly hung Xlib call can leave one daemon worker busy. The normal monitor closes its XDisplay on exit; normal destroy cleanup is tested. Shortcut polling is 30Hz and may miss short presses. No immediate CPU cancellation, zero response delay or zero late focus is claimed.
+
+Evidence boundaries: final source `3a701bde` has numeric-zero extended TextPanel state/cleanup tests and actual fake-model UI request/Yes -> native selection 0..14, reserved-control refusal, own/invalid identity refusal and Escape target-focus restoration. Its prior `2a93f125` head has all 17 scripts numeric zero and actual GTK Stop during a five-second approved native binding stall with zero old button effects after six seconds. These are not fresh-final-head active Stop or full-regression claims. Virtual audio sections were skipped; no new voice/provider validation. Two earlier short-chord automation failures, a preexisting-selection assertion failure and their timeouts are retained. Combined runtime wrappers warn about detached-child cleanup despite app/driver zero, not claimed clean shell completion. Pixels inspected include displayed proposal, final selection, stopped status and provider-bound JPEG own-UI exclusion.
+
+Full Mac menu, onboarding, radial input, mouse-follow/frozen text panel, full activity ticker, shortcut settings, JEV live flow and physical voice remain open. This is a bounded opt-in Linux text adapter, not a whole-port readiness claim.
+
+## Prior bounded checkpoints
+
 # R47 read-only facade candidate
 
 R47 adds an opt-in `--readonly-harness` on loopback port 19474. It exposes read-only health, observe, skills, targets and screenshots through the existing runtime. No action, task or plan endpoint is registered; external `execute=true` is never local approval. Screenshots honor the screenshot toggle and existing own-window exclusion. Active application uses Linux WM_CLASS; bundle identifier is unavailable. This is a partial facade, not full HTTP, UI or JEV integration.
