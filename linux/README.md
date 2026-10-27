@@ -1,11 +1,17 @@
 # TipTour Linux port (experimental, X11 only, NOT a full port)
-Branch feature/linux-port, base upstream 6e97782. Python/GTK3. See PARITY.md for exact evidence. R89 is a narrow pointer/input-shape checkpoint, not integrated Linux acceptance: controlled compositor-on/off motion, exclusion and click-through pass, but no final-source actual-model integration run passes. Earlier actual-model results belong to their recorded source bytes. Selected tests are not the whole suite.
+Branch feature/linux-port, base upstream 6e97782. Python/GTK3. See PARITY.md for exact evidence. R90 binds application-launch readiness and modal checks to the launched destination process. A source-bound actual Gemini four-step pre-open Mousepad example now passes after one Yes; this is not full integrated Linux or whole-suite acceptance. File-menu OCR targeting, the Edit-menu/no-edit limit collision and closed-provider idle streaming remain open.
+
+## R90 application destination ownership
+
+An openApp step now obtains launched process IDs through the desktop launch API and waits for native active context with the requested app name and a returned PID. It no longer accepts an older same-name active window as the new launch destination. Later steps keep their exact native window/PID proof. Modal checks use the verified process identity and still inspect all its top-level windows; ambiguity, missing identity and dialogs refuse rather than become "no modal".
+
+The desktop API runs in the action worker without a hard process timeout. Cancellation checks before/after launch cannot undo an app already launched. Unknown singleton/D-Bus forwarding, service-child launches, absent PID callbacks and PID reuse are not parity-cleared and may remain partial. No live Stop-during-launch test is claimed. See R90 in PARITY.md for the actual-model example, controlled checks and retained failures.
 
 ## R89 pointer rendering and click-through
 
 Without a compositor, the pointer bounding shape is now updated before GTK paint invalidation, and arrow edges use binary rasterization to avoid black blending against transparent backing. These edges are harder than the composited glow. GTK now stores the empty input region on the widget so first mapping cannot reset it and steal clicks. Controlled X11 checks cover both compositor modes, drawn arrival, clicks to an underlying button, capture exclusion and return/follow. This does not prove physical Linux, Wayland, all-frame polish or original rendering parity.
 
-Final-source actual Gemini runs remain nonpasses: two four-step plans are refused by destination ownership after openApp, a File-menu target resolves over View without executing, and an Edit-menu teaching plan is rejected by the no-edit limit guard before proposal display. Their causes are not established as inherited. Screenshot exclusion on the actual composited desktop falls back to hiding on unsupported translucent backing. See the R89 ledger. No engine/perception/approval guard was changed by this pointer repair.
+The R89 final-source actual Gemini runs remain recorded nonpasses: two four-step plans are refused by destination ownership after openApp, a File-menu target resolves over View without executing, and an Edit-menu teaching plan is rejected by the no-edit limit guard before proposal display. These were not established as inherited when R89 closed. R90 separately addresses the destination-owner launch race; the OCR and lexical-limit issues remain open. Screenshot exclusion on the actual composited desktop falls back to hiding on unsupported translucent backing. See the R89 ledger. No engine/perception/approval guard was changed by this pointer repair.
 
 ## Accurate Grounding
 
