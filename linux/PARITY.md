@@ -207,3 +207,25 @@ The archives contain test-only seams where stated. A zero exit is not completion
 - Controlled post-approval held-action changes to text, field, X PID property and stable foreign xmessage focus refuse with no range writes. The PID case mutates an X property, not OS PID reuse. Pending cancellation, Stop, typed replacement, Quit, 2s timeout, held positive delivery expiry, password field, disabled AT-SPI, seed failure, Type/Highlight during delayed connect and blocked seed, late old seed/new owner, and stale tainted reconnect are exercised with the described external seams. None proves every native scheduling interleaving.
 - Seven normal-runtime regressions, painted native range chain, 22 offline scripts plus isolated TextPanel/settings pass on current runtime files. Earlier failed fixtures are retained: typed Yes/live voice replay wait, timing that missed the pending interval, non-atomic fixture JSON reads, assertion wording, missing marker, and own-panel focus tests that were undone by capture hiding. Stable foreign-window test replaced the latter. Initial hover probes found xfwm4 omits stacking with one client; refusal retained, no unordered fallback added.
 - Full AX routing/app activation/selection fallback, broader Mac shell/onboarding/tutorials/JEV/radial Highlight, physical devices/Wayland/mixed DPI remain unfinished. Native hangs and non-atomic X focus/input remain limits. No new provider/key/model/paid flow or non-Linux changes.
+
+## R58 owned-highlight lifecycle (bounded Linux checkpoint under review)
+
+The X11 sampler owns its display on its worker thread. Gesture tokens pass through
+copied-point GTK updates, the single pending commit queue, context futures,
+screenshots and acknowledgement sends/waits. Stop blocks an inherited held chord
+until all modifiers release. Quit reports whether the sampler and commit worker
+actually stopped; a hung native query can remain a daemon worker and is not
+reported as joined. Query exceptions clear the local trail and report unavailable.
+
+Committed highlight context has a separate lifecycle: ordinary typed requests may
+reuse it; a new gesture, Stop, Quit or sampler failure retires it. Pending gesture
+work is never an alias for the last committed context. Seed/resend retirement is
+checked after provider awaits. Already accepted bytes cannot be recalled.
+Acknowledgement waits wake on retirement, reject stale effects, and taint the
+session so a later turn replaces it. These are local ownership checks, not a
+provider-side cancellation or atomic desktop-action guarantee.
+
+Clean screenshot capture excludes the trail window. During slow hide/grab fallback,
+GTK paint updates retain current points without mapping the trail. Restore requires
+the same still-live gesture. Ask/Alt-release trails remain local. This checkpoint
+does not integrate radial Highlight or claim new real-provider/physical-STT proof.

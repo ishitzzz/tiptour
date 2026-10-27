@@ -116,32 +116,83 @@ def main():
         return shell_windows["busy"].is_set() or bool(status_item and status_item.capture_busy.is_set())
     def own_windows():
         menu_window = status_item.capture_window() if status_item else None
-        return tuple(w for w in (overlay, panel, pprop, text_ui, menu_window, radial_preview, shell_windows["settings"]) if w is not None)
-    hl = {"loop": None, "q": None, "mon": None, "trail": None}
+        return tuple(w for w in (overlay, panel, pprop, text_ui, menu_window, radial_preview, shell_windows["settings"], hl.get("trail")) if w is not None)
+    from .highlight_owner import Owner
+    highlight_owner = Owner()
+    hl = {"loop": None, "q": None, "mon": None, "trail": None, "closed": threading.Event(), "commit_worker": None, "commit_queue": None}
+    def clear_trail_owned():
+        with highlight_owner.lock: clear_epoch = highlight_owner.epoch
+        def clear_current():
+            with highlight_owner.lock:
+                if not highlight_owner.closed and highlight_owner.epoch == clear_epoch:
+                    if hl['trail']: hl['trail'].clear()
+            return False
+        GLib.idle_add(clear_current)
     if a.highlight:
         from . import highlight as _hl
         from .trail_overlay import TrailOverlay
         _scr = Gdk.Screen.get_default(); hl["trail"] = TrailOverlay(_scr.get_width(), _scr.get_height())
-        _commit_q = queue.Queue()
+        _commit_q = queue.Queue(maxsize=1); hl["commit_queue"] = _commit_q
         def _commit_worker():  # context building (incl. the bounded AT-SPI probe) runs OFF the 60Hz sampler thread; commits stay in order
             while True:
-                pts, ask_chord = _commit_q.get()
+                item = _commit_q.get()
+                if item is None or hl["closed"].is_set(): return
+                token, pts, ask_chord = item
+                if not highlight_owner.valid(token): continue
                 _t0 = time.time()
-                ctx = _hl.build_context(pts, _hl.xdotool_window_at, _hl.atspi_probe if os.environ.get('TIPTOUR_USE_ATSPI', '1') == '1' else None, selection_probe=(__import__('tiptour_linux.cdp_resolver', fromlist=['x']).selection if os.environ.get('TIPTOUR_USE_CDP', '1') == '1' else None))
+                try:
+                    ctx = _hl.build_context(pts, _hl.xdotool_window_at, _hl.atspi_probe if os.environ.get('TIPTOUR_USE_ATSPI', '1') == '1' else None, selection_probe=(__import__('tiptour_linux.cdp_resolver', fromlist=['x']).selection if os.environ.get('TIPTOUR_USE_CDP', '1') == '1' else None))
+                except Exception:
+                    ctx = None
                 print(time.strftime('%H:%M:%S'), 'commit: context built in %.2fs; atspi=%s element=%s selection=%s src=%s dom=%s' % (time.time() - _t0, (ctx or {}).get('atspi_status'), bool(ctx and ctx.get('element')), bool(ctx and ctx.get('text_selection')), ((ctx or {}).get('text_selection') or {}).get('source', 'atspi' if ctx and ctx.get('text_selection') else '-'), (ctx or {}).get('dom_selection_status')), flush=True)
-                if hl["loop"]: hl["loop"].call_soon_threadsafe(hl["q"].put_nowait, (ctx, ask_chord))
-        threading.Thread(target=_commit_worker, daemon=True, name="commit-worker").start()
-        def _commit(pts, ask_chord): _commit_q.put((pts, ask_chord))
+                highlight_owner.publish(token, (ctx, ask_chord))
+        hl["commit_worker"] = threading.Thread(target=_commit_worker, daemon=True, name="commit-worker"); hl["commit_worker"].start()
+        gesture = {'token': None}
+        def _commit(pts, ask_chord):
+            token = gesture['token']
+            if not highlight_owner.valid(token): return
+            future = highlight_owner.job(token)
+            if not future: return
+            try: _commit_q.put_nowait((token, list(pts), ask_chord))
+            except queue.Full: highlight_owner.publish(token, (None, ask_chord))
+            if hl['loop']:
+                def enqueue():
+                    if highlight_owner.valid(token): hl_post['fn']('@highlight %d' % token)
+                hl['loop'].call_soon_threadsafe(enqueue)
         def _warm():  # Chrome builds its AT-SPI tree lazily; poll until an app tree is non-empty (max 40s), serialized with probes by the resolver lock
             from . import atspi_resolver as _ar
             t_end = time.time() + 60
-            while time.time() < t_end:  # SHORT slices (3s wall each) so a real request is never stuck behind a long warm walk; Chrome keeps its progress between slices
+            while time.time() < t_end and not hl["closed"].is_set():  # SHORT slices (3s wall each) so a real request is never stuck behind a long warm walk; Chrome keeps its progress between slices
                 try: _ar.probe((0, 0, 1, 1), timeout=3.5, max_nodes=4000, low=True)
                 except Exception: pass
                 if _ar.ready_bounded(2): break
-                time.sleep(1)
+                hl["closed"].wait(1)
         if os.environ.get('TIPTOUR_USE_ATSPI', '1') == '1' and atspi_resolver and os.environ.get('TIPTOUR_NO_WARM') != '1': threading.Thread(target=_warm, daemon=True).start()
-        hl["mon"] = _hl.HighlightMonitor(on_begin=lambda p: GLib.idle_add(hl["trail"].set_points, [p]), on_move=lambda p: GLib.idle_add(hl["trail"].set_points, hl["mon"].points), on_commit=_commit); hl["mon"].start()
+        def paint_trail(points, token):
+            frozen = list(points)
+            def apply():
+                with highlight_owner.lock:
+                    if highlight_owner.valid(token) and highlight_owner.visible:
+                        highlight_owner.points = frozen
+                        if not highlight_owner.suppressed: hl['trail'].set_points(frozen)
+                return False
+            GLib.idle_add(apply)
+        def begin_trail(point):
+            token = highlight_owner.begin(); gesture['token'] = token
+            if token is not None: paint_trail([point], token)
+        def monitor_failed(error):
+            with highlight_owner.lock:
+                highlight_owner.invalidate(); failure_epoch = highlight_owner.epoch
+            def report():
+                with highlight_owner.lock:
+                    if highlight_owner.closed or highlight_owner.epoch != failure_epoch: return False
+                    hl['trail'].clear()
+                    message = 'Highlight unavailable: X11 sampler failed (%s).' % error
+                    log(message)
+                    if text_ui: text_ui.activity.set_text(message)
+                return False
+            GLib.idle_add(report)
+        hl["mon"] = _hl.HighlightMonitor(on_begin=begin_trail, on_move=lambda p: paint_trail(hl["mon"].points, gesture['token']), on_commit=_commit, on_release=highlight_owner.released, on_error=monitor_failed); hl["mon"].start()
     results = []
     onnx_path = os.environ.get('TIPTOUR_DETECTOR_ONNX', '/tmp/uielement.onnx')
     detector = IconDetector(onnx_path) if os.path.exists(onnx_path) else None
@@ -186,7 +237,7 @@ def main():
             if _capture_token != plan_tok["n"]:raise RuntimeError("stale capture discarded")
         _eligible()
         _clean = overlay.clean_capture_ready
-        _was = [];_hidden_ack=[False]
+        _was = [];_hidden_ack=[False]; _trail_token = highlight_owner.epoch
         def _hide_own():
             if _capture_token != plan_tok["n"]:return
             if fast and shell_busy():return  # never dismiss a shell menu/settings for an idle frame
@@ -195,6 +246,7 @@ def main():
                     if status_item and w is status_item.capture_window(): status_item.dismiss_for_capture()
                     else: _was.append(w);w.hide()
             _hidden_ack[0]=True
+        with highlight_owner.lock: highlight_owner.suppressed += 1
         try:
             if not _clean:
                 on_gtk(_hide_own);time.sleep(0.05 if fast else 0.25);_eligible()
@@ -220,15 +272,21 @@ def main():
             _eligible()
             return r
         finally:
+            with highlight_owner.lock: highlight_owner.suppressed -= 1
             if _was:
                 def _restore_own():
                     if _capture_token != plan_tok["n"]: return
                     for w in _was:
                         if getattr(w, "_tiptour_destroyed", False): continue
+                        if w is hl.get("trail") and (not highlight_owner.valid(_trail_token) or not highlight_owner.visible or w.closed): continue
                         if w is overlay and ov.get('covered'): continue
                         if w is radial_preview and (w.state.center is None or w.monitor.closed.is_set()): continue
                         if w is text_ui or w is shell_windows["settings"]:
                             w.set_focus_on_map(False); w.show_all(); w.set_focus_on_map(True)
+                        elif w is hl.get("trail"):
+                            with highlight_owner.lock:
+                                if highlight_owner.valid(_trail_token) and highlight_owner.visible and not highlight_owner.suppressed:
+                                    w.set_points(list(highlight_owner.points))
                         else: w.show_all()
                 on_gtk(_restore_own)
 
@@ -373,6 +431,7 @@ def main():
             tainted[0] = True; q.put_nowait(("voice_stop", None)); click_events.append({"gate": "voice_aborted", "why": why}); _ret = True; log("voice: ABORTED (%s); mic stopped, queue discarded by an explicit abort, session will be replaced on the next turn" % why); return True
         def _off_edge():  # PTT-OFF edge (loop thread): invalidates the generation, the epoch AND the command edge, ends the audio gate (queued audio is flushed to the closing session, then the sentinel), so late old-provider callbacks and a delayed connect cannot publish after OFF
             hover.update(context=None, owner=None, defer_mic=False)
+            tainted[0] = True  # callbacks on this connection now fail its generation gate; later typed/highlight needs a fresh one
             gen[0] += 1; vs["n"] += 1; edge["n"] += 1; own[0] += 1; ing["parts"] = []
             with vg["lock"]:
                 vg["ready"] = False
@@ -394,8 +453,14 @@ def main():
             try:
                 if hist and hasattr(cl, "send_history"):
                     await cl.send_history(list(hist)); click_events.append({"gate": "voice_history_rehydrated", "turns": len(hist), "chars": sum(len(_t2) for _r2, _t2 in hist)}); log("voice: rehydrated the fresh connection with %d prior turns (text only: no audio, screenshots, or model audio without transcript)" % len(hist))
-                if seed and hl.get("last_ctx") and os.environ.get("TIPTOUR_VOICE_CTX", "seed") == "seed":
-                    await cl.send_context(_hl.prompt(hl["last_ctx"], ack=False)); log("voice: seeded latest highlight context silently (no turn)")
+                with highlight_owner.lock:
+                    committed, context_epoch = highlight_owner.context, highlight_owner.epoch
+                if seed and committed and os.environ.get("TIPTOUR_VOICE_CTX", "seed") == "seed":
+                    await cl.send_context(_hl.prompt(committed, ack=False))
+                    with highlight_owner.lock:
+                        if highlight_owner.epoch != context_epoch or highlight_owner.context is not committed:
+                            raise RuntimeError('highlight context retired during seed')
+                    log("voice: seeded latest highlight context silently (no turn)")
                 hc = hover['context']
                 if hover['defer_mic'] and hover.get('epoch') != radial_binding['epoch']: raise RuntimeError('radial intent replaced')
                 if seed and hc:
@@ -458,6 +523,9 @@ def main():
         from . import hover_context
         def _enq(t):
             if shutdown['requested']: return
+            if not t.startswith('@') or t == '@voice':
+                highlight_owner.invalidate(retire_context=False)
+                clear_trail_owned()
             if t != '@voice':
                 radial_binding['epoch'] += 1; radial_binding['pending'] = False
                 if t != '@voice-next':
@@ -465,6 +533,13 @@ def main():
                     hover.update(context=None, owner=None, defer_mic=False)
             if t == '@quit':
                 shutdown['requested'] = True; ing['shutdown'] = True; shell_windows['closed'] = True
+                highlight_owner.invalidate(close=True)
+                hl['closed'].set()
+                if hl['mon']: hl['mon'].stop()
+                if hl['commit_queue']:
+                    try: hl['commit_queue'].put_nowait(None)
+                    except queue.Full: pass
+                if hl['trail']: GLib.idle_add(hl['trail'].close)
                 if ptt_monitor: ptt_monitor.stop()
                 if radial_preview: radial_preview.monitor.closed.set(); GLib.idle_add(radial_preview.hide)
                 if ing.get('ready'): _stop_work('shutdown-ingress')
@@ -481,7 +556,7 @@ def main():
                 run_task.cancel()  # owned active body: capture/connect/highlight/send waits unwind
                 return
             if hl.get("readonly_worker"): hl["readonly_worker"].cancel_current()
-            if ing.get("ready") and not t.startswith("@") and _norm_resp(t) in _STOP and (_goal_live() or prop["state"] in ("pending", "approved")):  # typed/UI STOP at INGRESS: stops at receipt, ahead of any queued/long voice turn; not enqueued (a late consumer must not stop NEWER work)
+            if ing.get("ready") and not t.startswith("@") and _norm_resp(t) in _STOP:  # typed/UI STOP at INGRESS: stops at receipt, ahead of any queued/long voice turn; not enqueued (a late consumer must not stop NEWER work)
                 _stop_work("typed-ingress"); click_events.append({"gate": "typed_stop_at_ingress"}); return
             if ing.get("ready") and not t.startswith("@") and prop["state"] == "approved" and bool(_norm_resp(t)) and _norm_resp(t) not in (_YES | _NO | _STOP):
                 _revoke_approved("new typed request at ingress")
@@ -524,10 +599,6 @@ def main():
                                 (mic and mic.stop()); loop.call_soon_threadsafe(_off_edge); continue
                             if line: loop.call_soon_threadsafe(_enq, line)
             threading.Thread(target=_reader, daemon=True).start()
-            if hl['mon']:
-                _orig = hl['mon'].on_commit
-                def _both(pts, chord): loop.call_soon_threadsafe(_enq, "@highlight"); _orig(pts, chord)  # queue the highlight turn FIRST (FIFO) so a following utterance cannot overtake the still-building context
-                hl['mon'].on_commit = _both
         player = mic = ptt_monitor = None
         if os.environ.get('TIPTOUR_TEST_MODE') == '1' and os.environ.get('TIPTOUR_TEST_FAKE_MIC') == '1':  # TEST SEAM (needs TIPTOUR_TEST_MODE=1): a stub mic so a voice turn (@voice) runs with a fake model and NO audio capture/STT
             import types as _ty; mic = _ty.SimpleNamespace(active=True); mic.start = lambda: setattr(mic, "active", True); mic.stop = lambda: setattr(mic, "active", False)  # stateful like the real Mic: start/stop toggle .active
@@ -843,10 +914,12 @@ def main():
                     return {"ok": False, "status": "unresolved_no_hint"}, {"source": "UNRESOLVED", "label": lab}
                 if nohint and not refuse and src == "model_box": refuse = "could not resolve \"%s\": no matching control and no spatial hint (Mac: resolve returns nothing); not pointing" % lab
                 if not refuse and not (0 <= px[0] < _size[0] and 0 <= px[1] < _size[1]): refuse = "the model's coordinate (%d,%d) is outside the %dx%d screen; not pointing" % (px[0], px[1], size[0], size[1])
-                if not refuse and src == "model_box" and hl.get("last_ctx") and any(w in lab.lower() for w in ("highlight", "this", "area", "region")):
+                with highlight_owner.lock:
+                    _committed, _context_epoch = highlight_owner.context, highlight_owner.epoch
+                if not refuse and src == "model_box" and _committed and any(w in lab.lower() for w in ("highlight", "this", "area", "region")):
                     try:
                         from . import cdp_resolver as _c
-                        rx0, ry0, rw0, rh0 = hl["last_ctx"]["rect"]
+                        rx0, ry0, rw0, rh0 = _committed["rect"]
                         inter = [t for t in _c.all_targets() if not t.get("off") and t["rect"][0] < rx0 + rw0 and t["rect"][0] + t["rect"][2] > rx0 and t["rect"][1] < ry0 + rh0 and t["rect"][1] + t["rect"][3] > ry0 and t["role"] in ("a", "button", "input", "select", "textarea", "summary")]
                         if len(inter) == 1: rr = inter[0]["rect"]; px = (round(rr[0] + rr[2] / 2), round(rr[1] + rr[3] / 2)); src = "highlight_dom(1 control in region)"
                         elif len(inter) > 1: refuse = "the highlighted region contains %d controls (%s); say which one" % (len(inter), ", ".join(sorted({t["label"][:20] for t in inter})[:5]))
@@ -854,13 +927,16 @@ def main():
                 # Generic scope guard (all sources): if the USER's request refers to the highlight ("highlighted", "this area", "here"...),
                 # the final point must lie inside that region. A specific label does not widen the scope. Unrelated requests are unaffected.
                 from . import highlight as _hlm
-                if not refuse and hl.get("last_ctx") and _hlm.outside_scope(text, hl["last_ctx"]["rect"], px) and src.startswith("cdp_dom(1 match") and bound_rect and _hlm.point_authorized(text):
-                    _ip = _hlm.inside_intersection_point(hl["last_ctx"]["rect"], bound_rect)  # ONE uniquely bound element overlaps the user's region and the user asked to be shown: point INSIDE the overlap, never at an outside centre
+                if not refuse and _committed and _hlm.outside_scope(text, _committed["rect"], px) and src.startswith("cdp_dom(1 match") and bound_rect and _hlm.point_authorized(text):
+                    _ip = _hlm.inside_intersection_point(_committed["rect"], bound_rect)  # ONE uniquely bound element overlaps the user's region and the user asked to be shown: point INSIDE the overlap, never at an outside centre
                     if _ip: px = _ip; src += "+inside_highlight_overlap"; log("moved point inside highlight overlap")
-                if not refuse and hl.get("last_ctx") and _hlm.outside_scope(text, hl["last_ctx"]["rect"], px):
+                if not refuse and _committed and _hlm.outside_scope(text, _committed["rect"], px):
                     refuse = "the request refers to the highlighted region, but the resolved target (%s, via %s) is outside it; not pointing" % (step.get("label", "")[:40], src)
-                if not refuse and hl.get("last_ctx") and _hlm.outside_window(text, hl["last_ctx"], px):
-                    refuse = "the request refers to the highlighted region in window %r, but the resolved target is outside that window; not pointing" % ((hl["last_ctx"].get("window") or {}).get("title", "")[:50],)
+                if not refuse and _committed and _hlm.outside_window(text, _committed, px):
+                    refuse = "the request refers to the highlighted region in window %r, but the resolved target is outside that window; not pointing" % ((_committed.get("window") or {}).get("title", "")[:50],)
+                with highlight_owner.lock:
+                    if highlight_owner.epoch != _context_epoch:
+                        refuse = 'highlight context changed during resolution; not pointing'
                 unconf = (not refuse) and src == "model_box"
                 if defer_missing:
                     await read(lambda: None)  # deadline check before any render/arm/OS action
@@ -1211,6 +1287,8 @@ def main():
         def _shown(rv):  # runs on the loop when the panel has ACTUALLY been drawn: only input arriving after this point can answer the proposal
             if prop["rev"] == rv and prop["state"] == "pending": prop["shown"] = arr["n"]; prop["displayed"] = True; click_events.append({"gate": "proposal_displayed", "rev": rv, "arrival_epoch": arr["n"]}); log("confirmation: proposal rev %d displayed (arrival epoch %d)" % (rv, arr["n"]))
         def _stop_work(src):
+            highlight_owner.invalidate()
+            clear_trail_owned()
             if src != 'radial-speak':
                 radial_binding['epoch'] += 1; radial_binding['pending'] = False
                 if hover['defer_mic']: _abort_voice('pending hover stopped')
@@ -1330,29 +1408,81 @@ def main():
                         results.append({"ask": text, "error": _fail + "; the request was NOT sent; try again"}); continue
                     tainted[0] = False
                     if mic and mic.active and voice_turn: _install_writer(client); click_events.append({"gate": "tainted_replace_writer_rebound"})
-                if a.serve and not voice_turn and not text.startswith("@") and hl.get("last_ctx"):  # Mac resends the latest highlight context at the start of each new utterance while a session is live
-                    await client.send_text(_hl.prompt(hl["last_ctx"], ack=False)); log("serve: re-sent latest highlight context before utterance")
+                with highlight_owner.lock:
+                    committed, context_epoch = highlight_owner.context, highlight_owner.epoch
+                if a.serve and not voice_turn and not text.startswith("@") and committed:
+                    await client.send_text(_hl.prompt(committed, ack=False))
+                    with highlight_owner.lock:
+                        if highlight_owner.epoch != context_epoch or highlight_owner.context is not committed:
+                            tainted[0] = True
+                            log('highlight context retired during typed resend; request not sent')
+                            continue
+                    log("serve: re-sent latest highlight context before utterance")
                 if text.startswith("@highlight"):
-                    try: ctx, ask_chord = await asyncio.wait_for(hl['q'].get(), 40)
-                    except asyncio.TimeoutError: results.append({"ask": text, "highlight": "no trail committed in 40s"}); continue
+                    try: token = int(text.split()[1])
+                    except (ValueError, IndexError):
+                        results.append({'ask': text, 'highlight': 'no owned gesture token; nothing sent'}); continue
+                    future = highlight_owner.take(token)
+                    if not future or not highlight_owner.valid(token): continue
+                    try: ctx, ask_chord = await asyncio.wait_for(asyncio.wrap_future(future), 40)
+                    except asyncio.TimeoutError: results.append({"ask": text, "highlight": "owned context exceeded 40s"}); continue
+                    if not highlight_owner.valid(token): continue
                     if ctx is None: results.append({"ask": text, "highlight": "trail too short (<2 points or <=4px); no context, nothing sent"}); log("highlight: no context"); continue
                     if ask_chord:
                         results.append({"ask": text, "highlight": "ask-chord (Option at release): trail kept LOCAL, nothing sent to the provider", "rect": ctx["rect"]}); log("highlight: ask chord, local only"); continue
-                    on_gtk(hl["trail"].hide); full, jpeg, size = await asyncio.to_thread(capture_clean, True)  # off the event loop (Skip/Retry/new-ask handling stays responsive during the ~0.3s+ grab); FRESH screenshot, pinned as this request's frame identity
+                    def hide_current():
+                        if highlight_owner.valid(token):
+                            highlight_owner.visible = False; hl['trail'].hide()
+                    on_gtk(hide_current); full, jpeg, size = await asyncio.to_thread(capture_clean, True)  # off the event loop (Skip/Retry/new-ask handling stays responsive during the ~0.3s+ grab); FRESH screenshot, pinned as this request's frame identity
                     full.save(os.path.join(a.out, "highlight-screen-%d.png" % i))
-                    if _own_cap.get("token") != plan_tok["n"]:log("stale highlight capture discarded before provider delivery");continue
-                    await client.send_screenshot(jpeg)
+                    if not highlight_owner.valid(token) or _own_cap.get("token") != plan_tok["n"]:log("stale highlight capture discarded before provider delivery");continue
+                    async def owned(awaitable):
+                        if not highlight_owner.valid(token):
+                            if hasattr(awaitable, 'close'): awaitable.close()
+                            tainted[0] = True
+                            return False, None
+                        task = asyncio.ensure_future(awaitable)
+                        cancelled = asyncio.shield(asyncio.wrap_future(highlight_owner.cancellation(token)))
+                        try:
+                            done, _ = await asyncio.wait((task, cancelled), return_when=asyncio.FIRST_COMPLETED)
+                            if cancelled in done or not highlight_owner.valid(token):
+                                task.cancel()
+                                await asyncio.wait((task,), timeout=.2)
+                                # Already accepted provider bytes cannot be recalled. Replace the
+                                # session before another turn; old callbacks cannot enter that turn.
+                                tainted[0] = True
+                                return False, None
+                            return True, task.result()
+                        finally:
+                            cancelled.cancel()
+                            if not task.done(): task.cancel()
+                    ok, _ = await owned(client.send_screenshot(jpeg))
+                    if not ok: continue
                     ptxt = _hl.prompt(ctx, ack=True); open(os.path.join(a.out, "highlight-prompt-%d.txt" % i), "w").write(ptxt)
-                    await client.send_text(ptxt); out_tr.clear(); t0 = time.time()
+                    ok, _ = await owned(client.send_text(ptxt))
+                    if not ok: continue
+                    out_tr.clear(); t0 = time.time()
                     while time.time() - t0 < 45:
-                        try: k, v = await asyncio.wait_for(q.get(), 5)
+                        try:
+                            ok, event = await owned(asyncio.wait_for(q.get(), 5))
+                            if not ok: break
+                            k, v = event
                         except asyncio.TimeoutError: continue
+                        if not highlight_owner.valid(token): break
                         if k == "outputTranscript": out_tr.append(v)
-                        elif k == "audio": (log("voice: reply playback unavailable or backlog exceeded") if player and not player.write(v) else None)
-                        elif k == "interrupted": player and player.flush()
-                        elif k == "toolCall": await client.tool_response(v["id"], v["name"], {"ok": False, "status": "not_executed", "error": "acknowledgement only; no action yet"})
+                        elif k == "audio":
+                            with highlight_owner.lock:
+                                if highlight_owner.valid(token):
+                                    (log("voice: reply playback unavailable or backlog exceeded") if player and not player.write(v) else None)
+                        elif k == "interrupted":
+                            with highlight_owner.lock:
+                                if highlight_owner.valid(token): player and player.flush()
+                        elif k == "toolCall":
+                            ok, _ = await owned(client.tool_response(v["id"], v["name"], {"ok": False, "status": "not_executed", "error": "acknowledgement only; no action yet"}))
+                            if not ok: break
                         elif k in ("turnComplete", "closed"): break
-                    hl['last_ctx'] = ctx
+                    if not highlight_owner.valid(token): continue
+                    if not highlight_owner.commit(token, ctx): continue
                     results.append({"ask": text, "highlight": "sent (fresh screenshot + context prompt)", "rect": ctx["rect"], "window": ctx.get("window"), "reply": "".join(out_tr).strip()}); log("highlight result recorded"); dlog("highlight result", json.dumps(results[-1])[:400]); out_tr.clear()
                     continue
                 try:
@@ -1463,7 +1593,7 @@ def main():
                             GLib.idle_add(overlay.retire); tool_seen = {"source": "NO_ACTION_REQUESTED", "refused": "user asked for an answer only"}
                             log("tool call suppressed: the request is answer-only (no pointing or action)")
                             _aw = float(os.environ.get('TIPTOUR_ANSWER_WAIT_S', '20')); answer_wait.update(need=True, got=False, until=time.time() + _aw)
-                            _resp = _hlg.suppressed_payload(text, hl.get("last_ctx"))
+                            _resp = _hlg.suppressed_payload(text, highlight_owner.committed())
                             await client.tool_response(v["id"], v["name"], _resp)
                             continue
                         # Pinned Mac semantic key normalization occurs before displaying/hashing the approval.
@@ -1471,7 +1601,7 @@ def main():
                         args = dict(args, steps=normalize_semantic_keyboard_steps(args.get("steps", []), args.get("app", "")))
                         # Native context is app-owned, deep-copied before immutable approval.
                         hc = hover['context'] if voice_turn and hover_context.alive(hover['context'], own[0]) else None
-                        args = hover_context.bind(args, hl.get('last_ctx'), hc)
+                        args = highlight_owner.bind(lambda committed: hover_context.bind(args, committed, hc))
                         _canon = _plan_canon(args); _ph = _hashlib.sha256(_canon.encode()).hexdigest()  # CONFIRMATION GATE (after the voice transcript wait and the answer-only gate): hold EVERY plan. Nothing resolves, arms, points or clicks before the user approves THIS record.
                         if prop["state"] == "pending" and prop["hash"] == _ph:  # identical plan re-submitted while the user is answering: SAME record, no new revision, the displayed proposal and any valid answer stay bound to it
                             click_events.append({"gate": "same_hash_resubmit_ignored", "id": _tid, "rev": prop["rev"]}); log("confirmation: identical plan re-submitted (call %s); same record rev %d kept pending" % (_tid, prop["rev"]))
@@ -1518,6 +1648,14 @@ def main():
             if not shutdown['requested']: raise
             log('shutdown: active body cancelled')
         voice_cleanup = {}
+        highlight_owner.invalidate(close=True); hl['closed'].set()
+        if hl['mon']: voice_cleanup['highlight_monitor'] = await asyncio.to_thread(hl['mon'].close)
+        if hl['commit_queue']:
+            try: hl['commit_queue'].put_nowait(None)
+            except queue.Full: pass
+        if hl['commit_worker']:
+            await asyncio.to_thread(hl['commit_worker'].join, .5)
+            voice_cleanup['highlight_worker'] = not hl['commit_worker'].is_alive()
         if radial_preview: voice_cleanup['radial_monitor'] = await asyncio.to_thread(radial_preview.monitor.close)
         if ptt_monitor: voice_cleanup['monitor'] = await asyncio.to_thread(ptt_monitor.close)
         if mic:
@@ -1560,6 +1698,7 @@ def main():
             log("FATAL", type(e).__name__); dlog("FATAL detail", str(e)[:300]); GLib.idle_add(Gtk.main_quit)
     threading.Thread(target=runner, daemon=True).start()
     Gtk.main()
+    if hl["trail"]: hl["trail"].close()
     if status_item: status_item.close()
     if shell_windows['settings']: shell_windows['settings'].destroy()
     if text_ui: text_ui.close()

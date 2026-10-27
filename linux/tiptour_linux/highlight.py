@@ -12,29 +12,47 @@ def held(mask): return bool(mask & CTRL) and bool(mask & SHIFT) and not (mask & 
 def ask_chord(mask): return bool(mask & CTRL) and bool(mask & SHIFT) and bool(mask & ALT)
 
 class HighlightMonitor:
-    def __init__(self, on_begin=None, on_move=None, on_commit=None, hz=60):
+    def __init__(self, on_begin=None, on_move=None, on_commit=None, hz=60, on_release=None, on_error=None):
         if os.environ.get("XDG_SESSION_TYPE") == "wayland" and not os.environ.get("DISPLAY"): raise RuntimeError("X11 required")
-        self.d = xdisplay.Display(); self.root = self.d.screen().root
         self.on_begin, self.on_move, self.on_commit, self.dt = on_begin, on_move, on_commit, 1.0 / hz
-        self.points, self.active, self.stop_flag = [], False, False
+        self.on_release = on_release; self.on_error = on_error
+        self.points, self.active = [], False
+        self.closed = threading.Event(); self.t = None
 
-    def start(self): self.t = threading.Thread(target=self._run, daemon=True); self.t.start()
-    def stop(self): self.stop_flag = True
-
+    def start(self):
+        if self.t or self.closed.is_set(): return
+        self.t = threading.Thread(target=self._run, daemon=True, name='tiptour-highlight'); self.t.start()
+    def stop(self): self.closed.set()
+    def close(self):
+        self.stop()
+        if self.t: self.t.join(.5)
+        return not self.t or not self.t.is_alive()
     def _run(self):
-        while not self.stop_flag:
-            q = self.root.query_pointer(); p = (q.root_x, q.root_y); h = held(q.mask)
-            if h and not self.active:
-                self.active, self.points = True, [p]
-                if self.on_begin: self.on_begin(p)
-            elif h and self.active:
-                if not self.points or ((p[0] - self.points[-1][0]) ** 2 + (p[1] - self.points[-1][1]) ** 2) ** 0.5 >= 3:  # >=3px spacing like Mac
-                    self.points.append(p)
-                    if self.on_move: self.on_move(p)
-            elif self.active and not h:
-                self.active = False; pts, self.points = self.points, []
-                if self.on_commit: self.on_commit(pts, ask_chord(q.mask))
-            time.sleep(self.dt)
+        d = None
+        try:
+            d = xdisplay.Display(); root = d.screen().root
+            while not self.closed.wait(self.dt):
+                q = root.query_pointer(); p = (q.root_x, q.root_y); h = held(q.mask)
+                if self.closed.is_set(): break
+                if not (q.mask & (CTRL | SHIFT | ALT | SUPER)) and self.on_release: self.on_release()
+                if h and not self.active:
+                    self.active, self.points = True, [p]
+                    if self.on_begin: self.on_begin(p)
+                elif h and self.active:
+                    if not self.points or ((p[0] - self.points[-1][0]) ** 2 + (p[1] - self.points[-1][1]) ** 2) ** 0.5 >= 3:
+                        self.points.append(p)
+                        if self.on_move: self.on_move(p)
+                elif self.active and not h:
+                    self.active = False; pts, self.points = self.points, []
+                    if self.on_commit: self.on_commit(pts, ask_chord(q.mask))
+        except Exception as e:
+            self.closed.set()
+            if self.on_error: self.on_error(type(e).__name__)
+        finally:
+            self.active = False; self.points = []
+            if d:
+                try: d.close()
+                except Exception: pass
 
 def build_context(points, window_probe=None, element_probe=None, probe_timeout=6, selection_probe=None):
     """FocusHighlightContext analog. None when <2 points or bbox <=4px."""
