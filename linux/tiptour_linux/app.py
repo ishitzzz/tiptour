@@ -42,6 +42,8 @@ def main():
     if os.environ.get('TIPTOUR_HANG_DUMP'):  # diagnostic: dump all thread stacks to stderr after N seconds if still running
         import faulthandler; faulthandler.dump_traceback_later(int(os.environ['TIPTOUR_HANG_DUMP']), repeat=False, file=sys.stderr)
     _screenshot_env_override = 'TIPTOUR_STREAM' in os.environ
+    _grounding_env_override = 'TIPTOUR_ACCURATE_GROUNDING' in os.environ
+    grounding_change={'fn':None}
     _neko_env_override = 'TIPTOUR_NEKO' in os.environ
     from . import settings as _st; _st.apply_env()  # settings.json -> env (explicit env wins); never enables --act
     from .screenshot_policy import ScreenshotPolicy, PRIVACY_START, PRIVACY_OFF
@@ -120,9 +122,13 @@ def main():
                 if screenshot_policy.set_enabled(enabled):
                     os.environ['TIPTOUR_STREAM']='1' if enabled else '0'
                     if screenshot_change['fn']:screenshot_change['fn'](enabled)
+            def live_grounding(enabled):
+                os.environ['TIPTOUR_ACCURATE_GROUNDING']='1' if enabled else '0'
+                if grounding_change['fn']:grounding_change['fn'](enabled)
             w = _st.gtk_window(closed, standalone=False,
                 on_neko_changed=None if _neko_env_override else live_neko,
-                on_screenshots_changed=None if _screenshot_env_override else live_screenshots)
+                on_screenshots_changed=None if _screenshot_env_override else live_screenshots,
+                on_grounding_changed=None if _grounding_env_override else live_grounding)
             shell_windows['settings'] = w; shell_windows['busy'].set()
             w.connect('map', lambda *_: shell_windows['busy'].set())
             w.connect('unmap', lambda *_: shell_windows['busy'].clear())
@@ -1124,6 +1130,7 @@ def main():
                         log('Approved Enter performed, navigation not verified: PARTIAL, not complete; ' + str(exc))
                         return {'ok':False,'status':'navigation_partial','error':str(exc)}, tool_seen
                 else: await _nav.close()
+            if resp.get("ok"):grounding.post_action()
             if resp.get("ok") and t == 'openApp':
                 destination_context = await _transition_ready(step.get('label'), tok0)
                 if destination_context is None:
@@ -1488,6 +1495,7 @@ def main():
                             resp = await asyncio.to_thread(actions.execute, step, px, arm_app, None, _click_cancel, lambda: plan_tok["n"] == _gen0 and _approved_step(args, idx, step) and _click_pin is not None and clicks.pin_state(px, _click_pin) == "ok")
                     except BaseException:
                         _click_cancel.set(); log("click cancelled before next OS dispatch (an already dispatched event cannot be undone)"); raise
+                    if resp.get('ok'):grounding.post_action()
                     log("action executed, ok=%s" % resp.get("ok")); dlog("action", json.dumps(resp))
                     if resp.get("ok") and step.get("type") == "rightClick":
                         # Listener currently handles left presses only. Successful owned right-button dispatch follows Mac's explicit validator bypass.
@@ -1499,8 +1507,11 @@ def main():
                 resp = {"ok": False, "error": "no coordinates"}
             return resp, tool_seen
 
+        from .grounding_refresh import GroundingRefresh
+        grounding = GroundingRefresh(os.environ.get('TIPTOUR_ACCURATE_GROUNDING','0')=='1', TARGET_CACHE.clear, lambda *a:None, log)
+        grounding_change['fn']=lambda enabled:loop.call_soon_threadsafe(grounding.set_enabled,enabled)
         _perc_lk = threading.Lock(); _perc_seq = {"started": 0, "applied": 0}
-        def _perceive(full, owned=False, publish=True):
+        def _perceive(full, owned=False, publish=True, grounding_ticket=None):
             with _perc_lk:
                 if publish: _perc_seq["started"] += 1
                 _my_p = _perc_seq["started"] if publish else 0  # newest-STARTED perception owns TARGET_CACHE (older/cancelled worker-thread results must not overwrite it)
@@ -1515,9 +1526,34 @@ def main():
             _pc = LocalPerceptionTargetCache(); _pc.update(_els, _sz, _dfr)  # PRIVATE snapshot owned by this pass (immutable after this line)
             with _perc_lk:
                 if publish and _my_p >= _perc_seq['applied']:
-                    _perc_seq['applied'] = _my_p
-                    TARGET_CACHE.update(_els, _sz, _dfr)  # Mac: LocalPerceptionTargetCache.update after each perception pass (newest-started wins the SHARED cache)
+                    def apply_perception():
+                        _perc_seq['applied'] = _my_p
+                        TARGET_CACHE.update(_els, _sz, _dfr)
+                    if grounding_ticket is None:apply_perception()
+                    else:grounding.publish(grounding_ticket,apply_perception)  # Mac: LocalPerceptionTargetCache.update after each perception pass (newest-started wins the SHARED cache)
             return (yolo, ocr_el, _my_p, _pc) if owned else (yolo, ocr_el)
+        async def _proactive_grounding(reason,ticket):
+            if not grounding.eligible(ticket) or shell_windows['busy'].is_set():return
+            captured=await asyncio.to_thread(capture_clean,False,False,lambda:grounding.eligible(ticket))
+            if not grounding.eligible(ticket):return
+            await asyncio.to_thread(_perceive,captured[0],True,True,ticket)
+            if grounding.eligible(ticket):log('proactive grounding refreshed:',reason)
+        grounding.refresh=_proactive_grounding
+        async def _grounding_scene_monitor():
+            previous=None
+            while not shutdown['requested']:
+                if grounding.ticket() is not None and not shell_windows['busy'].is_set():
+                    current=await asyncio.to_thread(ident)
+                    # Mac observes app activation plus screen geometry, not window movement or title.
+                    try:screen_geometry=await asyncio.to_thread(subprocess.run,['xdotool','getdisplaygeometry'],capture_output=True,text=True,timeout=2)
+                    except Exception:screen_geometry=None
+                    scene=(current[0],screen_geometry.stdout.strip() if screen_geometry and screen_geometry.returncode==0 else None)
+                    if scene!=previous:
+                        previous=scene;grounding.schedule('app or screen geometry changed')
+                else:previous=None
+                await asyncio.sleep(.3)
+        grounding_task=asyncio.create_task(_grounding_scene_monitor())
+        if grounding.enabled:grounding.schedule('startup',0)
         readonly_harness = None
         if a.readonly_harness:
             from .engine import ReadOnlyEngine
@@ -1553,7 +1589,7 @@ def main():
                 _read_worker.publish(_publish_private)
             _engine = ReadOnlyEngine(_active_app,
                 lambda: dict(autopilot=a.act, action_driver=a.act,
-                             screenshots=screenshot_policy.enabled, screenshot_epoch=screenshot_policy.ticket(), accurate_grounding=detector is not None),
+                             screenshots=screenshot_policy.enabled, screenshot_epoch=screenshot_policy.ticket(), accurate_grounding=grounding.enabled),
                 lambda: hl.get('active_goal'), _readonly_cache, _refresh_targets, capture_clean, detection_count=TARGET_CACHE.fresh_target_count)
             def _invoke_readonly(method):
                 def eligible():
@@ -1871,6 +1907,7 @@ def main():
                         if hover.get('ready') and not hover['ready'].done(): hover['ready'].set_result(True)
                         _n = _install_writer(client)  # no await between the last ownership check and the install
                         _ms = int((time.time() - _tc0) * 1000); log("voice: fresh provider connection ready in %d ms (%d buffered audio chunks queued in order)" % (_ms, _n)); click_events.append({"gate": "voice_fresh_conn", "ms": _ms, "buffered": _n})
+                    grounding.schedule('voice session started',0)
                     text = ""
                 if tainted[0]:  # a previous turn never reached a definitive completion: late events could be misattributed, so start a FRESH session explicitly (no silent drain). The OLD generation/gate is invalidated BEFORE any await.
                     log("previous turn did not complete definitively; replacing the session before this request")
@@ -2340,6 +2377,7 @@ def main():
         cleanup_result = await retire(pipe.get('task'), client)
         click_events.append({'gate': 'shutdown_cleanup', **cleanup_result})
         log('shutdown cleanup:', cleanup_result)
+        grounding.close();grounding_task.cancel();grounding_change['fn']=None
         if text_tracking_task: text_tracking_task.cancel()
         stream_on[0] = False
         if os.environ.get("TIPTOUR_TEST_MODE") == "1":

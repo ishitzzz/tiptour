@@ -1,15 +1,16 @@
 """Settings file for the Linux port: ~/.config/tiptour-linux/settings.json (override dir with TIPTOUR_CONFIG_DIR). CLI: python3 -m tiptour_linux.settings [list|get K|set K V].
 Keys mirror Utilities/TipTourDefaults.swift where the Linux port has the feature. Only the keys below exist; the others (autopilot/CUA driver, detection overlay,
-accurate grounding, panel pin, onboarding, permissions, JEV) have no Linux implementation or are deliberately not exposed. In particular the Mac default
+panel pin, onboarding, permissions, JEV) have no Linux implementation or are deliberately not exposed. In particular the Mac default
 isAutopilotEnabled=true is NOT mirrored: actions stay behind the explicit --act flag on the command line and are never enabled from this file.
 Settings are applied as env vars by apply_env() (explicit environment wins)."""
 import json, os, sys
-DEFAULTS = {"isNekoModeEnabled": False,
+DEFAULTS = {"isAccurateGroundingEnabled": False,
+            "isNekoModeEnabled": False,
             "isScreenshotStreamingEnabled": True,   # Mac key: 1 fps frame streaming -> TIPTOUR_STREAM
             "useAtspi": True,                        # Linux: AT-SPI resolver -> TIPTOUR_USE_ATSPI
             "useCdp": True,                          # Linux: Chrome DevTools DOM stage -> TIPTOUR_USE_CDP
             "askTargetWmClass": ""}                  # Linux analogue of the Mac askTargetWmClass: WM_CLASS of the app Ask inserts into; empty = the window focused at press
-ENV = {"isNekoModeEnabled": "TIPTOUR_NEKO", "isScreenshotStreamingEnabled": "TIPTOUR_STREAM", "useAtspi": "TIPTOUR_USE_ATSPI", "useCdp": "TIPTOUR_USE_CDP"}
+ENV = {"isAccurateGroundingEnabled": "TIPTOUR_ACCURATE_GROUNDING", "isNekoModeEnabled": "TIPTOUR_NEKO", "isScreenshotStreamingEnabled": "TIPTOUR_STREAM", "useAtspi": "TIPTOUR_USE_ATSPI", "useCdp": "TIPTOUR_USE_CDP"}
 def path(): return os.path.join(os.environ.get("TIPTOUR_CONFIG_DIR") or os.path.expanduser("~/.config/tiptour-linux"), "settings.json")
 def load():
     s = dict(DEFAULTS)
@@ -26,21 +27,22 @@ def save(k, v):
 def apply_env():
     for k, v in load().items():
         if k in ENV and ENV[k] not in os.environ: os.environ[ENV[k]] = "1" if v else "0"
-def gtk_window(on_close=None, standalone=True, on_neko_changed=None, on_screenshots_changed=None):
+def gtk_window(on_close=None, standalone=True, on_neko_changed=None, on_screenshots_changed=None, on_grounding_changed=None):
     """Supported toggles. In-app Neko may be live; standalone changes are saved only."""
     import gi; gi.require_version("Gtk", "3.0"); from gi.repository import Gtk
     w = Gtk.Window(title="TipTour Linux settings"); w.set_wmclass("tiptour-settings", "TipTourSettings"); w.set_keep_above(True); b = Gtk.VBox(spacing=6, margin=10); w.add(b); cur = load()
-    for k, label in (("isNekoModeEnabled", "Neko cursor (original pixel-art cat)"), ("isScreenshotStreamingEnabled", "Remote screenshots (off blocks new image sends)"), ("useAtspi", "Use AT-SPI element lookup"), ("useCdp", "Use Chrome DevTools DOM stage")):
+    for k, label in (("isNekoModeEnabled", "Neko cursor (original pixel-art cat)"), ("isScreenshotStreamingEnabled", "Remote screenshots (off blocks new image sends)"), ("isAccurateGroundingEnabled", "Accurate Grounding (proactive local refresh)"), ("useAtspi", "Use AT-SPI element lookup"), ("useCdp", "Use Chrome DevTools DOM stage")):
         c = Gtk.CheckButton(label=label); c.set_active(cur[k]); 
         def changed(x,k=k):
             save(k,x.get_active())
             if k == 'isNekoModeEnabled' and on_neko_changed:on_neko_changed(x.get_active())
             if k == 'isScreenshotStreamingEnabled' and on_screenshots_changed:on_screenshots_changed(x.get_active())
+            if k == 'isAccurateGroundingEnabled' and on_grounding_changed:on_grounding_changed(x.get_active())
         c.connect("toggled", changed); b.pack_start(c, False, False, 0)
     b.pack_start(Gtk.Label(label="Actions (--act) are command-line only. Bounded X11 tests pass; full-platform validation is incomplete."), False, False, 0)
     b.pack_start(Gtk.Label(label="Ask insert target: choose in the Ask preview (stored: %s)" % (cur["askTargetWmClass"] or "window focused at press")), False, False, 0)
-    b.pack_start(Gtk.Label(label=("Neko and remote screenshots can change this session. AT-SPI/CDP apply to new launches.\nExplicit environment settings override saved values." if on_neko_changed or on_screenshots_changed else "Changes apply to new app/Ask launches, not this running session.\nExplicit environment settings override saved values.")), False, False, 0)
-    b.pack_start(Gtk.Label(label="Off cannot recall images already sent or accepted by an in-flight write."), False, False, 0)
+    b.pack_start(Gtk.Label(label=("Neko, remote screenshots and Accurate Grounding can change this session. AT-SPI/CDP apply to new launches.\nExplicit environment settings override saved values." if on_neko_changed or on_screenshots_changed or on_grounding_changed else "Changes apply to new app/Ask launches, not this running session.\nExplicit environment settings override saved values.")), False, False, 0)
+    b.pack_start(Gtk.Label(label="Remote screenshots off cannot recall images already sent or accepted.\nAccurate Grounding off stops proactive refresh; request-time local grounding still runs."), False, False, 0)
     for label in b.get_children():
         if isinstance(label, Gtk.Label):
             label.set_line_wrap(True); label.set_max_width_chars(62); label.set_xalign(0)

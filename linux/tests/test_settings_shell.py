@@ -6,7 +6,11 @@ from gi.repository import Gtk
 seen=[]
 w=settings.gtk_window(lambda:seen.append('closed'),standalone=False)
 b=w.get_children()[0];cs=[x for x in b.get_children() if isinstance(x,Gtk.CheckButton)]
-assert len(cs)==4
+assert len(cs)==5
+assert settings.DEFAULTS['isAccurateGroundingEnabled'] is False
+assert 'Accurate Grounding' in cs[2].get_label()
+cs[2].set_active(True);assert settings.load()['isAccurateGroundingEnabled'] is True
+os.environ['TIPTOUR_ACCURATE_GROUNDING']='0';settings.apply_env();assert os.environ['TIPTOUR_ACCURATE_GROUNDING']=='0'
 cs[1].set_active(False);assert settings.load()['isScreenshotStreamingEnabled'] is False
 os.environ['TIPTOUR_STREAM']='1';settings.apply_env();assert os.environ['TIPTOUR_STREAM']=='1'
 w.destroy();assert seen==['closed']
