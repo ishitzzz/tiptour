@@ -1,6 +1,7 @@
 """X11 Composite capture exclusion. Never hide/unmap the visible companion.
-Only opaque depth-24 window backing pixels are accepted. Unknown background,
-translucent windows and unsupported servers refuse rather than invent content.
+Depth-24 backing and premultiplied depth-32 ARGB layers are reconstructed
+only over fully covered backing. Unknown background, global opacity and
+unsupported pixel depths refuse rather than invent content.
 Candidate automatically attempts clean backing capture when available.
 Not parity-cleared. The app uses a logged hide fallback when unsupported.
 """
@@ -77,17 +78,31 @@ def _capture(xids):
                 rect=(p.x,p.y,p.x+wg.width,p.y+wg.height)
                 clip=(max(0,box[0],rect[0]),max(0,box[1],rect[1]),min(full.width,box[2],rect[2]),min(full.height,box[3],rect[3]))
                 if clip[2]<=clip[0] or clip[3]<=clip[1]:continue
-                if wg.depth!=24:raise RuntimeError('translucent backing window unsupported')
+                if wg.depth not in (24,32):raise RuntimeError('unsupported backing pixel depth')
+                opacity=w.get_full_property(d.intern_atom('_NET_WM_WINDOW_OPACITY'),0)
+                if opacity is not None and (len(opacity.value)!=1 or int(opacity.value[0])!=0xffffffff):
+                    raise RuntimeError('global window opacity unsupported')
                 pix=None
                 try:
                     pix=w.composite_name_window_pixmap();d.sync()
                     x,y=clip[0]-p.x,clip[1]-p.y;cw,ch=clip[2]-clip[0],clip[3]-clip[1]
                     raw=pix.get_image(x,y,cw,ch,X.ZPixmap,0xffffffff)
-                    im=Image.frombytes('RGB',(cw,ch),raw.data,'raw','BGRX')
+                    im=Image.frombytes('RGBA' if wg.depth==32 else 'RGB',(cw,ch),raw.data,'raw','BGRA' if wg.depth==32 else 'BGRX')
                     wm=Image.new('L',(cw,ch),0);dr=ImageDraw.Draw(wm)
                     for q in w.shape_get_rectangles(shape.SK.Bounding).rectangles:
                         dr.rectangle((q.x-x,q.y-y,q.x+q.width-x-1,q.y+q.height-y-1),fill=255)
-                    scene.paste(im,(clip[0],clip[1]),wm);remaining.paste(0,(clip[0],clip[1],clip[2],clip[3]),wm)
+                    if wg.depth==32:
+                        # X Render ARGB pixels are premultiplied. Rebuild over known
+                        # lower backing, never blend a pointer-contaminated root sample.
+                        alpha=im.getchannel('A')
+                        inverse=ImageChops.invert(alpha).convert('RGB')
+                        lower=scene.crop(clip)
+                        blended=ImageChops.add(im.convert('RGB'),ImageChops.multiply(lower,inverse))
+                        scene.paste(blended,(clip[0],clip[1]),wm)
+                        opaque=ImageChops.multiply(alpha.point(lambda a:255 if a==255 else 0),wm)
+                        remaining.paste(0,clip,opaque)
+                    else:
+                        scene.paste(im,(clip[0],clip[1]),wm);remaining.paste(0,clip,wm)
                 finally:
                     if pix:pix.free()
             if remaining.getbbox():raise RuntimeError('own UI covers unsupported desktop background')
