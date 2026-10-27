@@ -1,5 +1,11 @@
 # TipTour Linux port (experimental, X11 only, NOT a full port)
-Branch feature/linux-port, base upstream 6e97782. Python/GTK3. See PARITY.md for exact evidence. R93 addresses the observed composited capture-hide flicker on one tested X11 desktop by reconstructing supported ARGB decoration/shadow backing. Continuous actual/control recordings show no gaps within their pointer-visible intervals, but unsupported backing still falls back to hiding. The actual File-menu example remains operator-click teaching guidance with unverified effect and incomplete workflow. R92 focused-shortcut work is not included; the affected four-step nonpass remains open. Full port and whole-suite acceptance remain open.
+Branch feature/linux-port, base upstream 6e97782. Python/GTK3. See PARITY.md for exact evidence. R92, resumed after R93, adds native recipient binding for approved focusedElement keyboard shortcuts. A controlled replay of the failed four-step proposal now completes; an actual Gemini four-step regression also completes but omits that metadata and does not prove the repaired branch. R93 capture reconstruction remains, with unsupported backing still using hide fallback. File-menu effect validation, full port and whole-suite acceptance remain open.
+
+## R92 focusedElement shortcut recipient binding
+
+An approved keyboardShortcut with focusedElement now binds the current native recipient identity and geometry instead of rejecting the context outright. Missing or changed binding refuses. The exact approved plan, --act, window/PID, secret, modal and cancellation checks remain; X11 dispatch is still not atomic with its final check.
+
+The controlled exact-proposal replay exercises the new branch through one Yes and real native Select All. The actual Gemini regression omits focusedElement on the final shortcut, so its success is not branch proof. Both show 21-character selected text in an unsaved new Mousepad document. Native field/window changes refuse; native Stop/modal attempts do not prove the inner gates. See PARITY.md for the separate actual/controlled evidence, packaging correction, 41 selected tests and remaining limits.
 
 ## R93 supported ARGB backing without capture hiding
 
