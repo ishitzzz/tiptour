@@ -85,6 +85,12 @@ class PointerOverlay(Gtk.Window):
         self.queue_draw()
         if not self.composited and self.get_window():self.apply_shape()
 
+    def queue_draw(self):
+        # Set the bare-X bounding region before GTK computes the paint clip.
+        # Updating it inside draw is too late for the newly exposed pixels.
+        if hasattr(self,'composited') and not self.composited and self.get_window():
+            self.apply_shape()
+        super().queue_draw()
     def _draw_pointer(self, widget, context):
         self.paint(context)
         if self.mode == 'point' and not self.retired and getattr(self, '_arrival_callback', None):
@@ -116,7 +122,9 @@ class PointerOverlay(Gtk.Window):
             self.paint_arrow(c)
         self.paint_label(c)
     def paint_arrow(self,c):
-        c.save(); c.translate(self.CX, self.CY); c.rotate(self.rot * math.pi / 180.0); c.scale(self.scale, self.scale); c.translate(-self.CX, -self.CY)
+        c.save()
+        if not self.composited:c.set_antialias(cairo.ANTIALIAS_NONE)
+        c.translate(self.CX, self.CY); c.rotate(self.rot * math.pi / 180.0); c.scale(self.scale, self.scale); c.translate(-self.CX, -self.CY)
         if self.composited:
             for w, a in ((14, .10), (9, .16), (5, .24)):
                 arrow_path(c, self.CX, self.CY); c.set_source_rgba(*BLUE, a); c.set_line_width(w); c.set_line_join(cairo.LINE_JOIN_ROUND); c.stroke()
