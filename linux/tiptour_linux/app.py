@@ -1026,7 +1026,7 @@ def main():
                 _ev({"action": "not_approved", "performed": False}); log("action step %s NOT performed: the current exact step is not approved" % t)
                 return {"ok": False, "status": "action_not_approved", "note": "This exact current step has no valid app-owned approval, so nothing was done."}, tool_seen
             tc = step.get("targetContext")
-            if (tc == "currentHighlight" and not step.get("_native_range")) or (tc == "currentSelection" and not step.get("_native_range") and t != "type") or (tc == "focusedElement" and t not in ("type", "setValue")):
+            if (tc == "currentHighlight" and not step.get("_native_range")) or (tc == "currentSelection" and not step.get("_native_range") and t != "type") or (tc == "focusedElement" and t not in ("type", "setValue", "keyboardShortcut")):
                 _ev({"action": "refused_target_context", "performed": False}); log("action step %s NOT performed: targetContext %s is not implemented for this step type on Linux (no native selection binding); nothing sent" % (t, tc))
                 return {"ok": False, "status": "action_target_context_unsupported", "note": "targetContext %s is not supported for this action on Linux; nothing was done." % tc}, tool_seen
             if t not in ("openApp", "openURL") and execution_app and atspi_resolver:  # Mac modal gate: a blocking dialog in the plan's app pauses the plan instead of sending keys into it
@@ -1090,6 +1090,11 @@ def main():
                 if not _approved_step(args, idx, step):
                     if _nav: await _nav.close()
                     return {'ok':False,'status':'not_approved'}, tool_seen
+            if t == 'keyboardShortcut' and tc == 'focusedElement':
+                _focus_binding = await asyncio.to_thread(_act.focused_shortcut_recipient, execution_app, _expected)
+                if (not _focus_binding or tok0 != plan_tok['n'] or not _approved_step(args,idx,step) or ident()!=_action_ident):
+                    return {'ok':False,'status':'focused_shortcut_unavailable','error':'Current native shortcut recipient unavailable or changed; no keys sent.'},tool_seen
+                _exec_step.update(_focus_binding)
             if t in ('type','setValue'):
                 _field = await asyncio.to_thread(_act.focus_info, execution_app, False)
                 _rect = _field.get('element_rect') if _field.get('ok') else None

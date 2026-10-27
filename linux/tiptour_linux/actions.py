@@ -164,9 +164,13 @@ ACTION_TYPES = ("openApp", "openURL", "keyboardShortcut", "pressKey", "type", "s
 def execute(step, px, app_hint=None, plan_app=None, cancel=None, click_guard=None, expected_window=None):
     """One step. Click types need px (pointer position from the resolver); the other types need no pointer. Returns the tool-response dict; ok True only when every OS call succeeded."""
     _TL.expected_focus = step.get('_expected_focus') or step.get('_browser_find'); _TL.document_shortcut = step.get('type') == 'keyboardShortcut' and step.get('label','').lower() in ('ctrl+f','control+f','cmd+f','command+f'); _TL.ev = cancel; _TL.bound = None; _TL.click_guard = click_guard; _TL.expected_window = expected_window
-    try: return _execute(step, px, app_hint if app_hint is not None else plan_app)
+    _TL.expected_rect = step.get('_expected_rect')
+    try:
+        if step.get('type') == 'keyboardShortcut' and step.get('targetContext') == 'focusedElement' and (not _TL.expected_focus or not _TL.expected_rect):
+            raise _XFail('focused shortcut has no native recipient binding; nothing sent')
+        return _execute(step, px, app_hint if app_hint is not None else plan_app)
     except _XFail as e: return {"ok": False, "error": str(e)}
-    finally: _TL.ev = None; _TL.bound = None; _TL.click_guard = None; _TL.expected_window = None
+    finally: _TL.ev = None; _TL.bound = None; _TL.click_guard = None; _TL.expected_window = None; _TL.expected_focus = None; _TL.expected_rect = None
 def focus_info(app_hint, editable=True):
     try:
         from . import atspi_resolver as ar
@@ -176,6 +180,19 @@ def focus_info(app_hint, editable=True):
     if f.get("password") or SECRET.search(f.get("name") or ""): return {"ok": False, "error": "secret/password field refused"}
     if editable and not f.get("editable"): return {"ok": False, "error": "not an EDITABLE native text field"}
     return dict(f, ok=True)
+
+def focused_shortcut_recipient(app_hint, expected_window=None):
+    """Read-only bind for an approved focusedElement shortcut, not approval itself."""
+    f=focus_info(app_hint, False)
+    if not f.get('ok') or not f.get('identity') or f.get('password'):
+        return None
+    r=f.get('element_rect');identity=f['identity']
+    if (not isinstance(r,(list,tuple)) or len(r)!=4 or
+            not all(isinstance(v,(int,float)) and __import__('math').isfinite(v) for v in r) or r[2]<=0 or r[3]<=0 or
+            not all(identity.get(k) for k in ('pid','window_path','element_path','window_name','window_rect'))):
+        return None
+    if expected_window and identity['pid'] != expected_window[1]:return None
+    return {'_expected_focus':identity,'_expected_rect':list(r)}
 
 def _window_state():
     w = _x("getactivewindow").stdout.strip()
@@ -194,6 +211,8 @@ def _check_bound(app_hint, editable=False):
     f = focus_info(app_hint, editable)
     if not f.get("ok"): raise _XFail(f["error"])
     if getattr(_TL,"expected_focus",None) and f.get("identity") != _TL.expected_focus: raise _XFail("original approved native focus changed; nothing sent")
+    if getattr(_TL,'expected_rect',None) and f.get('element_rect') != _TL.expected_rect:
+        raise _XFail('original focused recipient geometry changed; nothing sent')
     ws = _window_state()  # recheck AFTER potentially slow native read
     if ws[1] != f["identity"]["pid"]: raise _XFail("native app PID does not match active X11 window; nothing sent")
     if old and (ws != old[0] or f["identity"] != old[1]): raise _XFail("focused window or element identity changed; nothing further sent")
@@ -202,6 +221,8 @@ def _check_bound(app_hint, editable=False):
     if status != "ok" or title is not None: raise _XFail("modal state unavailable or blocking dialog present; nothing sent")
     f2 = focus_info(app_hint, editable)
     if not f2.get("ok") or f2.get("identity") != f["identity"]: raise _XFail("native focus changed during modal check; nothing sent")
+    if getattr(_TL,'expected_rect',None) and f2.get('element_rect') != _TL.expected_rect:
+        raise _XFail('focused recipient geometry changed during modal check; nothing sent')
     if _window_state() != ws: raise _XFail("active window changed during modal check; nothing sent")
     _chk("input dispatch")
     _TL.bound = (ws, f["identity"])
