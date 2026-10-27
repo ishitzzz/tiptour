@@ -1,6 +1,12 @@
 # TipTour Linux port (experimental, X11 only, NOT a full port)
 Branch feature/linux-port, base upstream 6e97782. Python/GTK3. See PARITY.md for exactly what is verified and what is not. The R78 checkpoint adds bounded app-skill numeric character dispatch tested with an owned GTK fixture, not real Blender. A fresh four-step real-Gemini browser workflow also passes; this is not full-port acceptance. Pointing aims at the native field/widget, not necessarily its insertion caret. Selected UI tests still have two retained prior fixture failures.
 
+## R79 read-only HTTP metadata candidate
+
+With `--readonly-harness`, GET `/v1/capabilities` and GET `/v1/agent-contract` (also `/v1/agent_contract`) describe the implemented Linux read-only subset. The listener remains opt-in on 127.0.0.1:19474. Metadata passes the same existing Host/Origin checks and does not invoke the provider or read private runtime state. Loopback filtering is not caller authentication. No HTTP action, workflow submission, task or consent endpoint is added.
+
+The unchanged bundled Blender skill still includes Mac planner instructions referring to unsupported POST workflow/visual-context routes. This contradictory inherited guidance is an open gap, not support for those routes. Consult the Linux capabilities/contract for current HTTP support.
+
 ## Setup
 - apt: python3-gi gir1.2-gtk-3.0 python3-cairo xdotool tesseract-ocr gir1.2-atspi-2.0 at-spi2-core; pip: see requirements.txt.
 - Detector model: `python3 tools/mil_to_onnx.py ../TipTour/UIElementDetector.mlpackage /tmp/uielement.onnx` (needs onnx + coremltools). Without it the app falls back to raw model coordinates, drawn with a "?" and reported as unconfirmed.

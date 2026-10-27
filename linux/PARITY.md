@@ -1,3 +1,11 @@
+# R79 bounded read-only HTTP metadata checkpoint
+
+The product delta from R78 is confined to harness.py: static GET capabilities and agent-contract metadata, with the underscore contract alias. The Mac source is pinned TipTourHarnessServer.swift routes 290/320 and TipTourAgentContract.swift. Mac capabilities list 17 tools; Linux lists only the six supported read tools, explicitly marks the surface read-only, and reports no single-action execution, local tasks or task planning. Contract baseURL reflects the actual bound port. Existing opt-in loopback binding, Host/Origin/Sec-Fetch-Site checks and refusal of mutation methods are unchanged. Metadata never invokes provider, private observations or action dispatch.
+
+Actual final frozen app startup with a controlled provider and an owned GTK fixture returns capabilities, both contract aliases, observe and active skill. Denied Host and Origin return 403; app/driver exits are zero. This is not real-provider, real-Blender or workflow/action proof. All 209 captured files match the final runtime freeze. Separate HTTP tests cover an ephemeral port, 12 denied Host/Origin/Sec-Fetch-Site cases, five refused mutation methods, missing action routes, zero runtime calls for metadata and one observe dispatch. Six selected offline scripts exit zero. A seventh settings-shell script first fails without X, then exits zero under X; its wrapper reports detached-child cleanup and is not clean-shell evidence. No full regression or complete HTTP/UI/Linux acceptance is claimed.
+
+The bundled Blender skill is unchanged and still advertises Mac-only POST workflow/visual-context guidance through active-skill plannerInstructions. Those routes remain unsupported on Linux. This inherited contradictory guidance is a known open gap. The GET metadata does not authorize external requests, new providers or a future mutation bridge.
+
 # R78 bounded app-skill numeric input checkpoint
 
 Only actions.py changes from the published R75 runtime. The pinned Mac ActionExecutor.typeText skill-directed numeric input policy is now connected to the existing approved Linux type path. It trims numeric text accepted by the active app skill and sends one character command at a time. It does not add a provider, model, plan permission, arbitrary text fallback or setValue key path.
