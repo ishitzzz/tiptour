@@ -11,18 +11,23 @@ def ocr(img: Image.Image, min_conf=40):
     with tempfile.TemporaryDirectory() as d:
         p = os.path.join(d, "s.png"); img.convert("RGB").save(p)
         tsv = subprocess.run(["tesseract", p, "-", "--psm", "11", "tsv"], capture_output=True, text=True).stdout
-    lines = {}
+    lines = {}; words = []
     for r in csv.DictReader(io.StringIO(tsv), delimiter="\t", quoting=csv.QUOTE_NONE):
         t = (r.get("text") or "").strip()
         if not t or float(r["conf"]) < min_conf: continue
         k = (r["block_num"], r["par_num"], r["line_num"]); x, y, w, h = (int(r[c]) for c in ("left", "top", "width", "height"))
+        words.append({"label": t, "bbox": [x, y, w, h], "center": [x+w/2, y+h/2],
+                      "conf": float(r["conf"])/100, "source": "ocr"})
         e = lines.setdefault(k, {"words": [], "x0": x, "y0": y, "x1": x + w, "y1": y + h, "conf": []})
         e["words"].append(t); e["x0"] = min(e["x0"], x); e["y0"] = min(e["y0"], y); e["x1"] = max(e["x1"], x + w); e["y1"] = max(e["y1"], y + h); e["conf"].append(float(r["conf"]))
     out = []
     for e in lines.values():
         b = [e["x0"], e["y0"], e["x1"] - e["x0"], e["y1"] - e["y0"]]
         out.append({"label": " ".join(e["words"]), "bbox": b, "center": [b[0] + b[2] / 2, b[1] + b[3] / 2], "conf": sum(e["conf"]) / len(e["conf"]) / 100, "source": "ocr"})
-    return out
+    # Keep phrase observations, but retain exact word geometry too. Tesseract
+    # often merges sibling menu labels into one line; its midpoint is not File.
+    seen={(e["label"],tuple(e["bbox"])) for e in out}
+    return out + [e for e in words if (e["label"],tuple(e["bbox"])) not in seen]
 
 def _norm(t):
     low = t.lower(); raw = [w for w in "".join(c if c.isalnum() else " " for c in low).split()]
