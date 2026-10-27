@@ -1,5 +1,11 @@
 # TipTour Linux port (experimental, X11 only, NOT a full port)
-Branch feature/linux-port, base upstream 6e97782. Python/GTK3. See PARITY.md for exact evidence. R91 retains OCR word boxes beside phrase lines so File does not point at a merged menu-line midpoint. Its actual Gemini example is teaching guidance with an operator click and visible menu, not an automatic click or engine-verified completed workflow. An affected four-step actual run remains a nonpass. Earlier R90 success belongs to R90 source, not this runtime. Full port and whole-suite acceptance remain open.
+Branch feature/linux-port, base upstream 6e97782. Python/GTK3. See PARITY.md for exact evidence. R93 addresses the observed composited capture-hide flicker on one tested X11 desktop by reconstructing supported ARGB decoration/shadow backing. Continuous actual/control recordings show no gaps within their pointer-visible intervals, but unsupported backing still falls back to hiding. The actual File-menu example remains operator-click teaching guidance with unverified effect and incomplete workflow. R92 focused-shortcut work is not included; the affected four-step nonpass remains open. Full port and whole-suite acceptance remain open.
+
+## R93 supported ARGB backing without capture hiding
+
+The prior capture path rejected overlapping depth-32 decoration/shadow backing and hid the pointer for fallback screenshots. Supported premultiplied BGRA layers now reconstruct over known lower backing while retaining shape and coverage checks. Unknown backing and global window opacity still refuse reconstruction and can use the unchanged hide fallback. Fixed BGRX/BGRA server visual masks and arbitrary native translucent-layer cases are not validated.
+
+All 488 final actual-video frames and 103 controlled-video frames were decoded, with no intermediate pointer absence in their visible intervals. Startup, operator-click retirement and the controlled final reference hide are explicitly outside those intervals. The controlled capture log has 15 successful visible-pointer exclusions plus one successful post-hide timer capture, not 16 while visible. Near-pointer clean/reference pixels differ by at most one RGB level. These bounded results do not prove universal flicker-free capture or a completed automatic workflow. See the R93 ledger for source bindings, tests and limits.
 
 ## R91 OCR word geometry
 
