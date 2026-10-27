@@ -1,14 +1,15 @@
 """Settings file for the Linux port: ~/.config/tiptour-linux/settings.json (override dir with TIPTOUR_CONFIG_DIR). CLI: python3 -m tiptour_linux.settings [list|get K|set K V].
 Keys mirror Utilities/TipTourDefaults.swift where the Linux port has the feature. Only the keys below exist; the others (autopilot/CUA driver, detection overlay,
-accurate grounding, neko, panel pin, onboarding, permissions, JEV) have no Linux implementation or are deliberately not exposed. In particular the Mac default
+accurate grounding, panel pin, onboarding, permissions, JEV) have no Linux implementation or are deliberately not exposed. In particular the Mac default
 isAutopilotEnabled=true is NOT mirrored: actions stay behind the explicit --act flag on the command line and are never enabled from this file.
 Settings are applied as env vars by apply_env() (explicit environment wins)."""
 import json, os, sys
-DEFAULTS = {"isScreenshotStreamingEnabled": True,   # Mac key: 1 fps frame streaming -> TIPTOUR_STREAM
+DEFAULTS = {"isNekoModeEnabled": False,
+            "isScreenshotStreamingEnabled": True,   # Mac key: 1 fps frame streaming -> TIPTOUR_STREAM
             "useAtspi": True,                        # Linux: AT-SPI resolver -> TIPTOUR_USE_ATSPI
             "useCdp": True,                          # Linux: Chrome DevTools DOM stage -> TIPTOUR_USE_CDP
             "askTargetWmClass": ""}                  # Linux analogue of the Mac askTargetWmClass: WM_CLASS of the app Ask inserts into; empty = the window focused at press
-ENV = {"isScreenshotStreamingEnabled": "TIPTOUR_STREAM", "useAtspi": "TIPTOUR_USE_ATSPI", "useCdp": "TIPTOUR_USE_CDP"}
+ENV = {"isNekoModeEnabled": "TIPTOUR_NEKO", "isScreenshotStreamingEnabled": "TIPTOUR_STREAM", "useAtspi": "TIPTOUR_USE_ATSPI", "useCdp": "TIPTOUR_USE_CDP"}
 def path(): return os.path.join(os.environ.get("TIPTOUR_CONFIG_DIR") or os.path.expanduser("~/.config/tiptour-linux"), "settings.json")
 def load():
     s = dict(DEFAULTS)
@@ -29,7 +30,7 @@ def gtk_window(on_close=None, standalone=True):
     """Small GTK settings window: toggles for the supported keys. Changes apply to NEW app/ask launches."""
     import gi; gi.require_version("Gtk", "3.0"); from gi.repository import Gtk
     w = Gtk.Window(title="TipTour Linux settings"); w.set_wmclass("tiptour-settings", "TipTourSettings"); w.set_keep_above(True); b = Gtk.VBox(spacing=6, margin=10); w.add(b); cur = load()
-    for k, label in (("isScreenshotStreamingEnabled", "Stream screenshots to the model (~1 fps)"), ("useAtspi", "Use AT-SPI element lookup"), ("useCdp", "Use Chrome DevTools DOM stage")):
+    for k, label in (("isNekoModeEnabled", "Neko cursor (original pixel-art cat)"), ("isScreenshotStreamingEnabled", "Stream screenshots to the model (~1 fps)"), ("useAtspi", "Use AT-SPI element lookup"), ("useCdp", "Use Chrome DevTools DOM stage")):
         c = Gtk.CheckButton(label=label); c.set_active(cur[k]); c.connect("toggled", lambda x, k=k: save(k, x.get_active())); b.pack_start(c, False, False, 0)
     b.pack_start(Gtk.Label(label="Actions (--act) are command-line only. Bounded X11 tests pass; full-platform validation is incomplete."), False, False, 0)
     b.pack_start(Gtk.Label(label="Ask insert target: choose in the Ask preview (stored: %s)" % (cur["askTargetWmClass"] or "window focused at press")), False, False, 0)

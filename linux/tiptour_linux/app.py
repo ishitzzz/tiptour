@@ -116,7 +116,7 @@ def main():
         return shell_windows["busy"].is_set() or bool(status_item and status_item.capture_busy.is_set())
     def own_windows():
         menu_window = status_item.capture_window() if status_item else None
-        return tuple(w for w in (overlay, panel, pprop, text_ui, menu_window, radial_preview, shell_windows["settings"], hl.get("trail")) if w is not None)
+        return tuple(w for w in (overlay, overlay.paws.window if overlay.paws else None, panel, pprop, text_ui, menu_window, radial_preview, shell_windows["settings"], hl.get("trail")) if w is not None)
     from .highlight_owner import Owner
     highlight_owner = Owner()
     hl = {"loop": None, "q": None, "mon": None, "trail": None, "closed": threading.Event(), "commit_worker": None, "commit_queue": None}

@@ -2,8 +2,7 @@
 OverlayWindow.swift (24-unit viewBox, 44x44, white fill, 4.2pt #4F8EF7 round stroke, soft blue glow)
 and the navigation bubble (11pt medium white text, #4F8EF7 rounded-rect r=6, padding 8x4).
 Click-through. Glow needs a compositing manager; without one (e.g. bare Xvfb) the window is shaped
-and the glow is omitted. Not ported yet: travel-direction rotation, breathing animation, Neko mode,
-multi-display. Wayland-native sessions cannot place windows this way (X11/XWayland only)."""
+and the glow is omitted. Original Neko mode is opt-in. Multi-display remains incomplete. Wayland-native sessions cannot place windows this way (X11/XWayland only)."""
 import gi
 gi.require_version("Gtk", "3.0")
 from gi.repository import Gtk, Gdk, GLib
@@ -61,6 +60,10 @@ class PointerOverlay(Gtk.Window):
         self.composited = bool(vis and scr.is_composited())
         if self.composited: self.set_visual(vis)
         self.connect("draw", self._draw_pointer); self.connect("realize", self.on_realize)
+        from .neko import Neko, PawTrail
+        self.neko = Neko() if os.environ.get('TIPTOUR_NEKO','0') == '1' else None
+        self.paws = PawTrail(self.neko) if self.neko else None
+        self.connect("destroy",lambda *_:self.paws.window.destroy() if self.paws else None)
         m = self._mouse(); self.cur = (m[0] + FOLLOW_OFFSET[0], m[1] + FOLLOW_OFFSET[1]); self.tip = self.cur; self.vel = (0.0, 0.0)
         self.mode = "follow"; self.rot = 0.0; self.scale = 1.0; self.flight = None; self.returning = False; self.nav_mouse = m; self.target = None; self.land_rot = 0.0; self.events = []
         GLib.timeout_add(TICK_MS, self._tick)
@@ -89,6 +92,12 @@ class PointerOverlay(Gtk.Window):
         self.get_window().input_shape_combine_region(cairo.Region(), 0, 0)  # re-assert: bounding shape would otherwise also become the input shape and steal real pointer events
     def paint(self, c):
         c.set_operator(cairo.OPERATOR_SOURCE); c.set_source_rgba(0, 0, 0, 0); c.paint(); c.set_operator(cairo.OPERATOR_OVER)
+        if self.neko:
+            self.neko.paint(c,self.CX,self.CY,scale=self.scale)
+        else:
+            self.paint_arrow(c)
+        self.paint_label(c)
+    def paint_arrow(self,c):
         c.save(); c.translate(self.CX, self.CY); c.rotate(self.rot * math.pi / 180.0); c.scale(self.scale, self.scale); c.translate(-self.CX, -self.CY)
         if self.composited:
             for w, a in ((14, .10), (9, .16), (5, .24)):
@@ -96,10 +105,11 @@ class PointerOverlay(Gtk.Window):
         arrow_path(c, self.CX, self.CY); c.set_source_rgb(1, 1, 1); c.fill_preserve()
         c.set_source_rgb(*BLUE); c.set_line_width(4.2 * SIZE / 44); c.set_line_cap(cairo.LINE_CAP_ROUND); c.set_line_join(cairo.LINE_JOIN_ROUND); c.stroke()
         c.restore()
+    def paint_label(self,c):
         if self.label and self.show_label:
             c.select_font_face("Sans", cairo.FONT_SLANT_NORMAL, cairo.FONT_WEIGHT_NORMAL); c.set_font_size(11)
             ext = c.text_extents(self.label); bw, bh = ext.x_advance + 16, 11 + 8 + 3
-            bx, by = self.CX + 10 + 12, self.CY + 18  # right/below the cursor (bubbleLeft/TopOffsetFromCursor)
+            bx, by = self.CX + (22 if self.neko else 10) + 12, self.CY + (24 if self.neko else 18)  # right/below the cursor (bubbleLeft/TopOffsetFromCursor)
             r = 6; c.new_sub_path()
             c.arc(bx + bw - r, by + r, r, -1.5708, 0); c.arc(bx + bw - r, by + bh - r, r, 0, 1.5708); c.arc(bx + r, by + bh - r, r, 1.5708, 3.1416); c.arc(bx + r, by + r, r, 3.1416, 4.7124); c.close_path()
             c.set_source_rgb(*BLUE); c.fill(); c.set_source_rgb(1, 1, 1); c.move_to(bx + 8, by + bh - 7); c.show_text(self.label)
@@ -119,11 +129,12 @@ class PointerOverlay(Gtk.Window):
     # ---- flights ----
     def _start_flight(self, dest, land_rot, follows, on_done):   # animateBezierFlightArc
         sx, sy = self.cur; dx, dy = dest[0] - sx, dest[1] - sy; dist = math.hypot(dx, dy)
-        dur = min(max(dist / 520.0, 1.05), 2.2)
+        dur = min(max(dist / 420.0, 1.5), 2.8) if self.neko else min(max(dist / 520.0, 1.05), 2.2)
         ux, uy = (dx / dist, dy / dist) if dist > 0 else (1.0, 0.0); nx, ny = -uy, ux
         arc_dir = -1 if sx <= dest[0] else 1; cd = min(max(dist * 0.38, 70), 220); ah = min(max(dist * 0.08, 18), 58) * arc_dir
         c1 = (sx + ux * cd + nx * ah, sy + uy * cd + ny * ah); c2 = (dest[0] - ux * cd - nx * ah * 0.65, dest[1] - uy * cd - ny * ah * 0.65)
         self.flight = dict(kind="bezier", t0=time.monotonic(), dur=dur, start=(sx, sy), end=dest, c1=c1, c2=c2, land=land_rot, follows=follows, done=on_done, prev=(sx, sy), smooth_rot=self.rot)
+        if self.paws:self.paws.start(self.cur)
         self._log("flight_start", dist=round(dist, 1), dur=round(dur, 3), to=(round(dest[0], 1), round(dest[1], 1)), returning=self.returning)
     def point_to(self, x, y, label="", glide_ms=None, on_arrived=None):
         """startNavigatingToElement: leave follow mode, fly a bezier arc to the landing pose, settle, then hold and point (bubble shown)."""
@@ -140,6 +151,7 @@ class PointerOverlay(Gtk.Window):
         """releaseHeldPointerAndFlyBack: the held pointer is released (target clicked / skipped / plan ended); 0.25s later it flies back to the user's cursor."""
         if self.mode not in ("point", "nav") or self.returning: return
         self._arrival_callback = None
+        if self.paws:self.paws.finish(time.monotonic())
         self.retired = True; self.show_label = False; self.queue_draw(); self._log("release", mode=self.mode)
         GLib.timeout_add(int(RELEASE_DELAY_S * 1000), lambda: (self._fly_back(), False)[1])
     def _fly_back(self):   # startFlyingBackToCursor
@@ -150,6 +162,7 @@ class PointerOverlay(Gtk.Window):
             self.flight = dict(kind="dock", t0=time.monotonic(), dur=DOCK_S, start=self.cur, end=dest, rot0=self.rot); self._log("dock", dist=round(dist, 1)); return
         self._start_flight(dest, 0.0, False, self._finish_follow)
     def _finish_follow(self):   # finishNavigationAndResumeFollowing
+        if self.paws:self.paws.clear()
         self.flight = None; self.mode = "follow"; self.returning = False; self.rot = 0.0; self.scale = 1.0; self.show_label = False; self.retired = False; self.vel = (0.0, 0.0); self.queue_draw(); self._log("follow")
     # ---- frame tick ----
     def _tick(self):
@@ -168,6 +181,7 @@ class PointerOverlay(Gtk.Window):
                 if p >= 1.0: self.cur = f["end"]; self.rot = 0.0; self._finish_follow()
             elif f["kind"] == "bezier":
                 if p >= 1.0:
+                    if self.paws:self.paws.finish(now)
                     ex, ey = f["end"]; self.cur = (ex, ey); self.scale = 1.0; done = f["done"]
                     if f["follows"]:   # settleAtDestination: 8% overshoot offset, ease back over 0.22s, onComplete 0.24s after
                         self.cur = (ex + (self.cur[0] - ex) * SETTLE_FRAC, ey + (self.cur[1] - ey) * SETTLE_FRAC)
@@ -183,10 +197,17 @@ class PointerOverlay(Gtk.Window):
                     else: target_rot = f["land"] if f["land"] is not None else f["smooth_rot"]
                     f["smooth_rot"] = lerp_angle(f["smooth_rot"], target_rot, 0.11 if f["follows"] else 0.05); self.rot = f["smooth_rot"]; f["prev"] = (bx, by); self.cur = (bx, by)
                     self.scale = 1.0 + math.sin(p * math.pi) * 0.045
+                    if self.paws:self.paws.append(self.cur)
             elif f["kind"] == "settle":
                 p2 = min(1.0, (now - f["t0"]) / SETTLE_S); t = (1 - math.cos(math.pi * p2)) / 2   # easeInOut
                 self.cur = (f["start"][0] + (f["end"][0] - f["start"][0]) * t, f["start"][1] + (f["end"][1] - f["start"][1]) * t); self.rot = lerp_angle(f["rot0"], f["rot1"], t)
                 if (now - f["t0"]) >= SETTLE_S + 0.02 and not f["fired"]: f["fired"] = True; self.cur = f["end"]; self.flight = None; f["done"]()
+        if self.paws:
+            self.paws.tick(now,self.get_visible())
+            if self.get_visible() and self.get_window():self.get_window().raise_()
+        if self.neko and self.neko.tick(self.cur,now):
+            self.queue_draw()
+            if not self.composited and self.get_window():self.apply_shape()
         if self.get_visible():
             self.move(int(self.cur[0]) - self.CX, int(self.cur[1]) - self.CY)
             if self.flight or self.mode != "follow":
