@@ -1,6 +1,12 @@
 # TipTour Linux port (experimental, X11 only, NOT a full port)
 Branch feature/linux-port, base upstream 6e97782. Python/GTK3. See PARITY.md for exactly what is verified and what is not. The R78 checkpoint adds bounded app-skill numeric character dispatch tested with an owned GTK fixture, not real Blender. A fresh four-step real-Gemini browser workflow also passes; this is not full-port acceptance. Pointing aims at the native field/widget, not necessarily its insertion caret. Selected UI tests still have two retained prior fixture failures.
 
+## R82 original Neko mode
+
+The original pixel-art cat and flight footprints are available with the Neko settings toggle or `TIPTOUR_NEKO=1`. Blue remains the default. Settings changes apply to new app launches, not a running session; explicit environment values override saved settings. Original sprite license is in `tiptour_linux/neko_sprites/LICENSE-NEKO.txt`.
+
+This is a bounded X11 visual-mode port, not whole-product acceptance. Existing local plan review, Yes, Stop and clean screenshot behavior remain required. No JEV, tutorial provider, HTTP actions or annotation feature is added.
+
 ## R80 app-skill lifetime
 
 Default app skills load once on first use and are shared by plan key normalization, numeric-key delivery and read-only skill metadata. Restart TipTour to pick up later skill-file edits. Search roots and precedence are unchanged; explicit registry instances used by tools/tests remain independent. This aligns the pinned Mac process snapshot and does not turn skill files into user approval or change the local plan/Yes boundary. Controlled-provider tests use an owned GTK fixture, not actual Blender or physical input.
