@@ -41,6 +41,7 @@ except Exception as _e:
 def main():
     if os.environ.get('TIPTOUR_HANG_DUMP'):  # diagnostic: dump all thread stacks to stderr after N seconds if still running
         import faulthandler; faulthandler.dump_traceback_later(int(os.environ['TIPTOUR_HANG_DUMP']), repeat=False, file=sys.stderr)
+    _neko_env_override = 'TIPTOUR_NEKO' in os.environ
     from . import settings as _st; _st.apply_env()  # settings.json -> env (explicit env wins); never enables --act
     ap = argparse.ArgumentParser()
     ap.add_argument("--ask", action="append", default=[])
@@ -97,7 +98,21 @@ def main():
             if shell_windows['closed']: return
             if shell_windows['settings']: shell_windows['settings'].present(); return
             def closed(): shell_windows['settings'] = None
-            w = _st.gtk_window(closed, standalone=False)
+            def live_neko(enabled):
+                # Never block GTK on a worker which may be awaiting GTK capture
+                # hide/restore. Retry after capture exits; newest toggle wins.
+                shell_windows['neko_revision'] = shell_windows.get('neko_revision',0)+1
+                revision=shell_windows['neko_revision']
+                def apply():
+                    if shell_windows['closed'] or revision != shell_windows.get('neko_revision'):return False
+                    if not _cap_lk.acquire(blocking=False):return True
+                    try:
+                        overlay.set_neko_enabled(enabled)
+                        os.environ['TIPTOUR_NEKO']='1' if enabled else '0'
+                    finally:_cap_lk.release()
+                    return False
+                GLib.timeout_add(16,apply)
+            w = _st.gtk_window(closed, standalone=False, on_neko_changed=None if _neko_env_override else live_neko)
             shell_windows['settings'] = w; shell_windows['busy'].set()
             w.connect('map', lambda *_: shell_windows['busy'].set())
             w.connect('unmap', lambda *_: shell_windows['busy'].clear())

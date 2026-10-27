@@ -67,6 +67,24 @@ class PointerOverlay(Gtk.Window):
         m = self._mouse(); self.cur = (m[0] + FOLLOW_OFFSET[0], m[1] + FOLLOW_OFFSET[1]); self.tip = self.cur; self.vel = (0.0, 0.0)
         self.mode = "follow"; self.rot = 0.0; self.scale = 1.0; self.flight = None; self.returning = False; self.nav_mouse = m; self.target = None; self.land_rot = 0.0; self.events = []
         GLib.timeout_add(TICK_MS, self._tick)
+    def set_neko_enabled(self, enabled):
+        """GTK thread, called only while the app's capture ownership lock is held.
+
+        Change art only. Never replace the flight, target or arrival callback.
+        A flight retains the duration chosen at its start, as on the Mac.
+        """
+        if bool(self.neko) == bool(enabled):return
+        if enabled:
+            from .neko import Neko, PawTrail
+            self.neko=Neko();self.paws=PawTrail(self.neko)
+        else:
+            if self.paws:
+                self.paws.window._tiptour_destroyed=True
+                self.paws.clear();self.paws.window.destroy()
+            self.paws=None;self.neko=None
+        self.queue_draw()
+        if not self.composited and self.get_window():self.apply_shape()
+
     def _draw_pointer(self, widget, context):
         self.paint(context)
         if self.mode == 'point' and not self.retired and getattr(self, '_arrival_callback', None):
