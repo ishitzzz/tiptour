@@ -87,13 +87,22 @@ def main():
     from .overlay import ProposalPanel
     hl_post = {"fn": None}
     pprop = ProposalPanel(lambda k, rev: hl_post["fn"] and hl_post["fn"]("@%s %d" % (k, rev)))
-    text_ui = None; status_item = None; radial_preview = None; radial_post = {"fn": None, "invalidate": None}
+    text_ui = None; status_item = None; radial_preview = None; radial_post = {"fn": None, "invalidate": None}; shell_windows = {"settings": None, "closed": False, "busy": threading.Event()}
     if a.text_ui:
         from .text_panel import TextPanel
         text_ui = TextPanel(lambda t: hl_post["fn"] and hl_post["fn"](t))
         text_status["panel"] = text_ui
         from .status_item import StatusItem
-        status_item = StatusItem(text_ui.open_from_menu, text_ui.stop_work, lambda: hl_post['fn'] and hl_post['fn']('@quit'))
+        def open_settings():
+            if shell_windows['closed']: return
+            if shell_windows['settings']: shell_windows['settings'].present(); return
+            def closed(): shell_windows['settings'] = None
+            w = _st.gtk_window(closed, standalone=False)
+            shell_windows['settings'] = w; shell_windows['busy'].set()
+            w.connect('map', lambda *_: shell_windows['busy'].set())
+            w.connect('unmap', lambda *_: shell_windows['busy'].clear())
+            w.connect('destroy', lambda *_: setattr(w, '_tiptour_destroyed', True))
+        status_item = StatusItem(text_ui.open_from_menu, text_ui.stop_work, lambda: hl_post['fn'] and hl_post['fn']('@quit'), open_settings)
     if a.radial_preview or a.radial_input:
         from .radial import RadialPreview
         def radial_status(message):
@@ -103,9 +112,11 @@ def main():
             if radial_post['fn']: radial_post['fn'](option, point)
             else: radial_status('Radial input unavailable: runtime is not ready.')
         radial_preview = RadialPreview(radial_status, radial_select if a.radial_input else None)
+    def shell_busy():
+        return shell_windows["busy"].is_set() or bool(status_item and status_item.capture_busy.is_set())
     def own_windows():
         menu_window = status_item.capture_window() if status_item else None
-        return tuple(w for w in (overlay, panel, pprop, text_ui, menu_window, radial_preview) if w is not None)
+        return tuple(w for w in (overlay, panel, pprop, text_ui, menu_window, radial_preview, shell_windows["settings"]) if w is not None)
     hl = {"loop": None, "q": None, "mon": None, "trail": None}
     if a.highlight:
         from . import highlight as _hl
@@ -178,6 +189,7 @@ def main():
         _was = [];_hidden_ack=[False]
         def _hide_own():
             if _capture_token != plan_tok["n"]:return
+            if fast and shell_busy():return  # never dismiss a shell menu/settings for an idle frame
             for w in own_windows():
                 if w.get_visible():
                     if status_item and w is status_item.capture_window(): status_item.dismiss_for_capture()
@@ -212,9 +224,10 @@ def main():
                 def _restore_own():
                     if _capture_token != plan_tok["n"]: return
                     for w in _was:
+                        if getattr(w, "_tiptour_destroyed", False): continue
                         if w is overlay and ov.get('covered'): continue
                         if w is radial_preview and (w.state.center is None or w.monitor.closed.is_set()): continue
-                        if w is text_ui:
+                        if w is text_ui or w is shell_windows["settings"]:
                             w.set_focus_on_map(False); w.show_all(); w.set_focus_on_map(True)
                         else: w.show_all()
                 on_gtk(_restore_own)
@@ -416,11 +429,12 @@ def main():
             while stream_on[0]:
                 try:
                     if stream_state["suppressed"]: stream_state["skipped"]["suppressed"] += 1
+                    elif shell_busy(): pass  # do not hide an interactive tray/settings for idle streaming
                     elif _plan_active(): stream_state["skipped"]["plan_active"] += 1
                     else:
                         _stream_tok=plan_tok["n"]
                         _, j, _ = await asyncio.to_thread(lambda: capture_clean(fast=True))
-                        if _stream_tok != plan_tok["n"] or _plan_active():continue
+                        if _stream_tok != plan_tok["n"] or _plan_active() or shell_busy():continue
                         h = _dhash(j); lh = stream_state["hash"]
                         if lh is not None and bin(lh ^ h).count("1") <= 5: stream_state["skipped"]["same_scene"] += 1
                         else: stream_state["hash"] = h; stream_state["sent"] += 1; await client.send_screenshot(j); log("stream frame sent (idle context)", stream_state["sent"], "bytes", len(j)); (open(os.path.join(a.out, "stream-%d.jpg" % stream_state["sent"]), "wb").write(j) if getattr(a, "out", None) else None)
@@ -435,7 +449,7 @@ def main():
             if shutdown['requested']: return
             if t != '@voice': radial_binding['epoch'] += 1
             if t == '@quit':
-                shutdown['requested'] = True; ing['shutdown'] = True
+                shutdown['requested'] = True; ing['shutdown'] = True; shell_windows['closed'] = True
                 if ptt_monitor: ptt_monitor.stop()
                 if radial_preview: radial_preview.monitor.closed.set(); GLib.idle_add(radial_preview.hide)
                 if ing.get('ready'): _stop_work('shutdown-ingress')
@@ -1503,6 +1517,7 @@ def main():
     threading.Thread(target=runner, daemon=True).start()
     Gtk.main()
     if status_item: status_item.close()
+    if shell_windows['settings']: shell_windows['settings'].destroy()
     if text_ui: text_ui.close()
     if radial_preview: radial_preview.close()
     t = threading.Timer(3.0, lambda: (sys.stderr.write('WATCHDOG: forced exit after 3s (clean shutdown did not finish)\n'), sys.stderr.flush(), os._exit(0))); t.daemon = True; t.start()  # bounded shutdown: a stuck non-daemon thread or in-flight D-Bus call must not hang the process after @quit

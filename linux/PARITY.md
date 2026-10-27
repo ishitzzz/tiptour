@@ -184,3 +184,14 @@ R29 more cancellation: 0ee3187d9f63f8455fe25b578449f3d9724bffa478d5ef0183abe5ccb
 R29 units/display: d39dbee3783b5822d44ddd007d55c390b96161d08eb4b008ef2589bef06c2d3d.
 
 The archives contain test-only seams where stated. A zero exit is not completion unless the actual effects and assertions support it.
+
+
+## R56 bounded runtime shell (not full CompanionPanel)
+
+- The runtime status icon uses the pinned MenuBarPanelManager 18px cubic pointer path. GTK does not provide NSImage template tint parity, and dark-panel/theme behavior is not verified.
+- Runtime tray Settings reuses the existing three Linux toggles, not Mac settings. A single owned window is reopened/presented; close does not end Gtk.main. Saved values apply to new launches, explicit environment wins, and action mode remains CLI-only. The window says so. It is included in own-UI capture exclusion and final destruction.
+- Idle screenshot streaming skips while the runtime menu or settings is mapped, and checks again before sending an idle frame. Its fast fallback refuses to dismiss interactive shell UI. Explicit request capture can dismiss the menu and temporarily hide settings, restoring without focus-on-map if still owned/alive. This is not an atomic native capture/visibility guarantee; existing X-server hangs remain possible.
+- Actual Xvfb/xfwm4 noncomposited runtime: default-stream menu held four seconds across the three-second idle cycle, Settings opens/closes/reopens, subsequent scripted-provider requests continue, a provider-bound image excludes settings, settings restores visible, Quit yields app/driver exit 0. Pixels were inspected. The fixture's external XFCE power-plugin dialog is visible and retained, not a TipTour dialog.
+- Isolated GTK settings test uses a temporary config: three toggles, save, explicit environment override, owned close callback, icon size and menu map/unmap busy flags pass. No real user settings changed. This test does not prove actual physical input or real provider behavior.
+- Retained first WIP failure: idle fallback dismissed the tray before the fixed-delay Settings click. Stream-off follow-up passed but the settings image was obscured; the final default-stream run and readable moved-window image replace those as decisive evidence. Two hardware-required scripts mistakenly included in an offline batch failed for missing PulseAudio and DISPLAY, respectively; neither is claimed as passing.
+- Full 320x380 Mac CompanionPanel/onboarding/pin/logs/settings, persistent hover/selection override, JEV Type, radial Highlight integration, physical audio, Wayland and mixed-DPI validation remain unfinished. No new provider, key, model, paid flow or non-Linux source is added.

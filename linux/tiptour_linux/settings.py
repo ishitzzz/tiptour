@@ -25,15 +25,21 @@ def save(k, v):
 def apply_env():
     for k, v in load().items():
         if k in ENV and ENV[k] not in os.environ: os.environ[ENV[k]] = "1" if v else "0"
-def gtk_window():
-    """Small GTK settings window: toggles for the live keys. Changes apply to NEW app/ask launches."""
+def gtk_window(on_close=None, standalone=True):
+    """Small GTK settings window: toggles for the supported keys. Changes apply to NEW app/ask launches."""
     import gi; gi.require_version("Gtk", "3.0"); from gi.repository import Gtk
-    w = Gtk.Window(title="TipTour Linux settings"); b = Gtk.VBox(spacing=6, margin=10); w.add(b); cur = load()
+    w = Gtk.Window(title="TipTour Linux settings"); w.set_wmclass("tiptour-settings", "TipTourSettings"); w.set_keep_above(True); b = Gtk.VBox(spacing=6, margin=10); w.add(b); cur = load()
     for k, label in (("isScreenshotStreamingEnabled", "Stream screenshots to the model (~1 fps)"), ("useAtspi", "Use AT-SPI element lookup"), ("useCdp", "Use Chrome DevTools DOM stage")):
         c = Gtk.CheckButton(label=label); c.set_active(cur[k]); c.connect("toggled", lambda x, k=k: save(k, x.get_active())); b.pack_start(c, False, False, 0)
     b.pack_start(Gtk.Label(label="Actions (--act) are command-line only. Bounded X11 tests pass; full-platform validation is incomplete."), False, False, 0)
     b.pack_start(Gtk.Label(label="Ask insert target: choose in the Ask preview (stored: %s)" % (cur["askTargetWmClass"] or "window focused at press")), False, False, 0)
-    w.connect("destroy", Gtk.main_quit); w.show_all(); return w
+    b.pack_start(Gtk.Label(label="Changes apply to new app/Ask launches, not this running session.\nExplicit environment settings override saved values."), False, False, 0)
+    for label in b.get_children():
+        if isinstance(label, Gtk.Label):
+            label.set_line_wrap(True); label.set_max_width_chars(62); label.set_xalign(0)
+    if standalone: w.connect("destroy", Gtk.main_quit)
+    if on_close: w.connect("destroy", lambda *_: on_close())
+    w.show_all(); return w
 
 if __name__ == "__main__":
     a = sys.argv[1:] or ["list"]
