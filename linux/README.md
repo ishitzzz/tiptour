@@ -1,5 +1,11 @@
 # TipTour Linux port (experimental, X11 only, NOT a full port)
-Branch feature/linux-port, base upstream 6e97782. Python/GTK3. See PARITY.md for exact evidence. R90 binds application-launch readiness and modal checks to the launched destination process. A source-bound actual Gemini four-step pre-open Mousepad example now passes after one Yes; this is not full integrated Linux or whole-suite acceptance. File-menu OCR targeting, the Edit-menu/no-edit limit collision and closed-provider idle streaming remain open.
+Branch feature/linux-port, base upstream 6e97782. Python/GTK3. See PARITY.md for exact evidence. R91 retains OCR word boxes beside phrase lines so File does not point at a merged menu-line midpoint. Its actual Gemini example is teaching guidance with an operator click and visible menu, not an automatic click or engine-verified completed workflow. An affected four-step actual run remains a nonpass. Earlier R90 success belongs to R90 source, not this runtime. Full port and whole-suite acceptance remain open.
+
+## R91 OCR word geometry
+
+Tesseract can merge neighboring menu labels into one line. Matching File against that line previously pointed at its midpoint, over View. The Linux OCR adapter now also retains accepted word boxes, so an exact File label resolves to its own box, while line observations remain for phrases. Cache scores and resolution order are unchanged.
+
+This adds observations and may affect label enrichment, target ordering and the 160-target limit. It is not identical Apple Vision segmentation or universal OCR accuracy. The new filter avoids a word observation only when its label and box already equal an existing line observation; it is not general repeated-TSV-word deduplication. OCR subprocess timeout/return-code handling is unchanged. See the R91 ledger for narrow evidence and open limits.
 
 ## R90 application destination ownership
 
