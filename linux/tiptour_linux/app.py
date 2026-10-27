@@ -405,6 +405,9 @@ def main():
             if cmd == "skip":
                 plan_tok["n"] += 1; clicks.disarm(); ov['hidden'] = True; ov['covered'] = False; GLib.idle_add(overlay.retire); cur['armed'] = False; cur['paused'] = None; (hl.get('last_call') or {}).clear(); PREV_STEP_POINT['p'] = None  # plan ended: a queued/late Retry/Resume must not revive it
                 click_events.append({"control": "skip", "label": cur["label"]}); GLib.idle_add(lambda: panel.hide_panel() and False); log("control skip: pointer dismissed, target skipped (%r)" % cur["label"]); return
+        if cur.get('menu_proof'):
+            click_events.append({'control':'retry_refused','reason':'bound menu requires full native proof replay'})
+            log('control retry refused: bound menu requires full native proof replay');return
         v = validators[-1].verdict if validators else None
         if ov['hidden'] and cur.get('paused') != 'app_switch':
             click_events.append({"control": "retry_refused", "reason": "target already dismissed"}); log("control retry refused: target already dismissed"); return
@@ -1257,6 +1260,13 @@ def main():
                 if own: _fv, _fi = own["pair"]  # the frame THIS request/replay actually captured (the model saw this one)
                 else:
                     with _pin_lk: _fv, _fi = frame_id.get('v'), frame_id.get('img')  # ONE consistent (identity, image) pair: the capture worker writes both under _pin_lk
+                _menu_bound = prop.get('menu_proof')
+                if _menu_bound:
+                    from .menu_guidance import revalidate as _menu_revalidate
+                    if a.act or not await read(_menu_revalidate,_menu_bound,atspi_resolver):
+                        return {'ok':False,'status':'not_pointed','error':'Native menu proof changed or unavailable; no fallback.'},{'source':'REFUSED'}
+                    _mtarget=_menu_bound['target'];arm_rect=tuple(_mtarget['rect']);arm_app=_mtarget['app']
+                    px=(arm_rect[0]+arm_rect[2]//2,arm_rect[1]+arm_rect[3]//2);src='native_bound_menu';done=True
                 now_id = ident(); dlog('identity pinned=%r now=%r' % (_fv, now_id))
                 if own and (_pin_seq["applied"] != own["pin"] or _perc_seq["applied"] != own["perc"]):  # evidence only (no refusal): this resolve proceeds on its OWN frame pair + own cache snapshot
                     click_events.append(dict({"gate": "own_generation_resolve", "identity_changed": bool(_fv and now_id != _fv)}, **_gens(own))); log("resolve on OWN generation (pin/perc %s/%s; shared latest %s/%s)" % (own["pin"], own["perc"], _pin_seq["applied"], _perc_seq["applied"]))
@@ -1289,7 +1299,7 @@ def main():
                     _lr = _local_resolve_owned(lab, own)
                     if _lr: px = (_half_up(_lr["global_point"][0]), _half_up(_lr["global_point"][1])); src = "target_cache(hint-first):" + _lr["source"]; done = True; arm_rect = tuple(_lr["global_rect"])
                 # Mac order: AX (here AT-SPI) -> local YOLO+OCR refinement -> raw Gemini coordinate
-                if atspi_resolver and os.environ.get("TIPTOUR_USE_ATSPI", "1") == "1":
+                if not _menu_bound and atspi_resolver and os.environ.get("TIPTOUR_USE_ATSPI", "1") == "1":
                     try:
                         poll_until = time.monotonic() + 0.9
                         hits = await read(atspi_resolver.resolve, lab, execution_app or now_id[1], **({"timeout": 0.9} if nohint else {}))
@@ -1367,6 +1377,7 @@ def main():
                 if defer_missing:
                     await read(lambda: None)  # deadline check before any render/arm/OS action
                 _cd_status = None
+                _menu_clicked = threading.Event()
                 def _arm_block(step, px, arm_rect, arm_app, src, refuse=None, _cd_status=None):
                     if not refuse and (step.get("type") or "click") != "observe" and os.environ.get("TIPTOUR_CLICK_DETECT", "1") == "1":  # Mac Teaching mode (a .observe step DISARMS the click detector instead: WorkflowRunner.swift:913-914): arm the listen-only click detector BEFORE the cursor lands; a click on the target completes the one-step plan (Mac WorkflowRunner.stop())
                         _tok = plan_tok["n"]
@@ -1377,6 +1388,8 @@ def main():
                             cur["click_validator"] = _val
                             validators.append(_val); _val.start_baseline(); threading.Thread(target=lambda _v=_val: (_v.ready.wait(60), log("validator baseline ready: scope_set=%s stable=%d noise=%d err=%s" % (bool(_v.scope), len(_v.stable), len(_v.noise), _v.baseline_error))), daemon=True).start()  # baseline runs in the background; arming and drawing never wait for it
                         def _valid(_src=src, _tok=_tok, _val=_val):
+                            with glock:
+                                _menu_clicked.set()  # serialized with queued retirement; validator owns post-click state
                             if _val is None:
                                 log("target click detected; pointer dismissed; validator: not run (right-click or disabled) - effect UNVERIFIED"); click_events.append({"target_clicked": True, "src": _src, "validator": "unavailable:not_run", "effect": "unverified"}); ov['hidden'] = True; ov['covered'] = False; GLib.idle_add(overlay.retire); loop.call_soon_threadsafe(lambda: hl.get("advance") and hl["advance"]("click", _tok)); return
                             _val.on_click()
@@ -1408,6 +1421,18 @@ def main():
                                     time.sleep(0.4)
                                     with glock:
                                         if not _live(): break
+                                    if _menu_bound and not _menu_clicked.is_set():
+                                        from .menu_guidance import revalidate as _menu_check
+                                        _menu_ok = _menu_check(_menu_bound,atspi_resolver)
+                                        with glock:
+                                            if not _live() or _menu_clicked.is_set(): break
+                                        if not _menu_ok:
+                                            def _retire_menu():
+                                                with glock:
+                                                    if _live() and not _menu_clicked.is_set():
+                                                        ov['hidden']=True;clicks.disarm();plan_tok['n']+=1;GLib.idle_add(overlay.retire)
+                                                        click_events.append({'pointer_guard':'native_menu_proof_revoked'})
+                                            _on_loop(_retire_menu);break
                                     st = clicks.pin_state(_pt, _pin)
                                     if st == "unknown" or st == last: continue
                                     click_events.append({"pointer_guard": st, "was": last}); log("pointer guard: target window state %s (was %s)" % (st, last))
@@ -1445,8 +1470,12 @@ def main():
                     return _cd_status
                 if plan_tok["n"] != _gen0:
                     return {"ok": False, "status": "not_pointed", "error": "superseded before arming"}, {"source": "REFUSED"}
+                if _menu_bound and (a.act or not await read(_menu_revalidate,_menu_bound,atspi_resolver)):
+                    return {'ok':False,'status':'not_pointed','error':'Native menu proof changed before arming; no fallback.'},{'source':'REFUSED'}
+                if plan_tok['n'] != _gen0 or not _approved_step(args,idx,step):
+                    return {'ok':False,'status':'not_pointed','error':'Owner or exact approval changed during final native read; no arm.'},{'source':'REFUSED'}
                 _cd_status = _arm_block(step, px, arm_rect, arm_app, src, refuse, None)
-                cur.update(label=step.get("label"), step=step, px=px, rect=arm_rect, app=arm_app, src=src, armed=not refuse, pin=clicks._pin, rearm=(lambda s=step, p=px, r=arm_rect, ap=arm_app, sc=src: _arm_block(s, p, r, ap, sc, None, None)))
+                cur.update(menu_proof=_menu_bound, label=step.get("label"), step=step, px=px, rect=arm_rect, app=arm_app, src=src, armed=not refuse, pin=clicks._pin, rearm=(lambda s=step, p=px, r=arm_rect, ap=arm_app, sc=src: _arm_block(s, p, r, ap, sc, None, None)))
                 with glock:  # atomic with the control thread/guard threads: final generation check + commit of hidden state + render post
                     if not refuse and plan_tok["n"] != _gen0:
                         refuse = "superseded by a skip, cancel or newer request while resolving"  # no disarm here: the superseding transition already disarmed, and this must never disarm a NEWER plan's detector
@@ -1724,7 +1753,7 @@ def main():
                     return False
             return (prop.get("request") is not None and
                     _plan_canon(prop.get("request")) == _plan_canon(requests.snapshot()) == _plan_canon(last_call.get("request")) and
-                    not no_action_requested(prop.get("text")) and not forbidden_plan(prop.get("text"), args) and
+                    not no_action_requested(prop.get("text")) and not forbidden_plan(prop.get("text"), args, menu_proof=prop.get("menu_proof") if not a.act else None) and
                     approved_step(prop, last_call, args, idx, step))
         def _kv(d, skip): return "".join(" %s=%s" % (k, json.dumps(v, ensure_ascii=False)) for k, v in d.items() if k not in skip and not k.startswith("_") and v not in (None, ""))
         def _plan_text(args):
@@ -1767,6 +1796,7 @@ def main():
             if prop["state"] == "pending": _note("the proposed plan rev %d was cleared without running (%s)" % (prop["rev"], why)); log("confirmation: pending plan rev %d cleared (%s)" % (prop["rev"], why)); click_events.append({"gate": "proposal_cleared", "rev": prop["rev"], "why": why})
             _watch = prop.pop('confirmation_watch', None)
             if _watch: _watch.close()
+            prop.pop("menu_proof",None)
             prop["state"] = None; GLib.idle_add(lambda: pprop.hide_panel() and False)
         def _approve_pending(src, turn_i):
             """Execute the STORED plan of the pending proposal (never a model resubmit). Returns True if started."""
@@ -2146,7 +2176,16 @@ def main():
                         await reply(_resp)
                         return
                     from .request_limits import forbidden_plan
+                    _menu_proof = None
                     _forbidden = forbidden_plan(_request_text, args)
+                    if _forbidden and not a.act and atspi_resolver:
+                        from .menu_guidance import capture as _menu_capture
+                        _menu_owner,_menu_token=ident(),plan_tok['n']
+                        try:_menu_proof=await asyncio.to_thread(_menu_capture,_request_text,args,atspi_resolver)
+                        except Exception:_menu_proof=None
+                        if (_menu_owner!=ident() or _menu_token!=plan_tok['n'] or
+                                _plan_canon(_request)!=_plan_canon(requests.snapshot())):_menu_proof=None
+                        if _menu_proof:_forbidden=forbidden_plan(_request_text,args,menu_proof=_menu_proof)
                     if _forbidden:
                         click_events.append({'gate': 'original_limit_refused', 'reason': _forbidden})
                         await reply({'ok': False, 'status': 'not_executed', 'error': _forbidden})
@@ -2172,7 +2211,7 @@ def main():
                         await reply({"ok": False, "reason": "awaiting_user_confirmation", "status": "not_executed", "message": "This exact plan is already proposed and waiting for the user's answer. Do not call any tool again."}); return
                     if prop["state"] == "approved":_revoke_approved("replacement proposal before display")
                     if prop["state"] == "pending": _prop_clear("replaced by a newer proposal")
-                    prop.update(rev=prop["rev"] + 1, hash=_ph, args=json.loads(json.dumps(args)), text=_request_text, request=_request, task_boundary=_task_boundary, relation=args.get('requestRelation') if _task_boundary else None, boundary=request_boundary["n"], state="pending", turn=i, id=v["id"], shown=10**12, displayed=False, appr=0)  # shown stays unreachable until the render ack
+                    prop.update(menu_proof=_menu_proof, rev=prop["rev"] + 1, hash=_ph, args=json.loads(json.dumps(args)), text=_request_text, request=_request, task_boundary=_task_boundary, relation=args.get('requestRelation') if _task_boundary else None, boundary=request_boundary["n"], state="pending", turn=i, id=v["id"], shown=10**12, displayed=False, appr=0)  # shown stays unreachable until the render ack
                     _change_notice = ("TASK CHANGE REQUIRES EXPLICIT REVIEW\nPrevious task and limits: " + _task_boundary['original']['text'] + "\nProposed SEPARATE task: " + _task_boundary['incoming'] + "\nPrevious task limits/scope do not carry to this separate task. Ordinary yes cannot approve this change.\n\n") if _task_boundary and args.get('requestRelation') == 'separate' else ''
                     _pt = _change_notice + "Original request #%s: %s\n" % (_request["id"], _request_text) + _plan_text(args); _note("plan rev %d was PROPOSED and is waiting for the user's yes (nothing executed): %s" % (prop["rev"], _pt.replace("\n", " | ")[:1500])); log("confirmation: plan HELD, rev %d hash %s: %s" % (prop["rev"], _ph[:12], _pt.replace("\n", " | "))); print("PLAN PROPOSAL rev %d:\n%s\n%s" % (prop["rev"], _pt, "Use Start separate task and run to approve this task change, or Cancel." if _task_boundary and args.get('requestRelation') == 'separate' else "Say yes to run it, or no to cancel."), flush=True); GLib.idle_add(lambda _r=prop["rev"], _sep=bool(_task_boundary and args.get('requestRelation') == 'separate'), _pl=_change_notice + "Original request #%s: %s\n\n" % (_request["id"], _request_text) + _plain_text(json.loads(json.dumps(args))).replace("Say yes / Confirm to run, no / Cancel to decline. Say stop to stop.", "Say start separate task and run or use that button to approve the task change and plan. Cancel declines. Stop stops all work." if _task_boundary and args.get('requestRelation') == 'separate' else "Say yes / Confirm to run, no / Cancel to decline. Say stop to stop.").replace("Action mode ON: I will perform the steps below after your yes.", "Action mode ON: I will perform these steps only after explicit separate-task approval." if _task_boundary and args.get('requestRelation') == 'separate' else "Action mode ON: I will perform the steps below after your yes."), _t=_pt: pprop.show_plan(_r, _pl, _t, lambda rv: loop.call_soon_threadsafe(_shown, rv), separate=_sep) and False)  # rev, plain text and raw details are bound IMMUTABLY at scheduling
                     click_events.append({"gate": "plan_held_for_confirmation", "id": v["id"], "rev": prop["rev"], "hash": _ph, "steps": len(args.get("steps") or []), "text_len": len(text or "")})

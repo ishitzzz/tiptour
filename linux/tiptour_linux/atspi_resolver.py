@@ -206,7 +206,7 @@ def walk(node, depth=0, out=None):
                     coord = _screen_rect(ch,True); ext = type("Rect",(),dict(zip(("x","y","width","height"),coord["rect"])))()
                     if ext.width <= 0 or ext.height <= 0:continue
                     out.append({"label": ch.get_name() or "", "role": role, "rect": [ext.x, ext.y, ext.width, ext.height],
-                                "coordinate_mapping":coord, "app": node.get_application().get_name() if depth == 0 else None, "native_identity": {"pid": ch.get_process_id(), "path": ch.path}})
+                                "coordinate_mapping":coord, "menu_header":menu_header, "app": node.get_application().get_name() if depth == 0 else None, "native_identity": {"pid": ch.get_process_id(), "path": ch.path}})
         except CoordinateError: raise
         except Exception: pass
         walk(ch, depth + 1, out)
