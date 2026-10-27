@@ -603,16 +603,21 @@ def main():
                 try:
                     if not screenshot_policy.enabled: pass
                     elif stream_state["suppressed"]: stream_state["skipped"]["suppressed"] += 1
+                    elif tainted[0]: pass  # intentionally retired/failed session awaits a real request, never idle image writes
                     elif shell_busy(): pass  # do not hide an interactive tray/settings for idle streaming
                     elif _plan_active(): stream_state["skipped"]["plan_active"] += 1
                     else:
                         _stream_tok=plan_tok["n"];_image_ticket=screenshot_policy.ticket()
+                        _stream_client,_stream_generation=client,gen[0]
+                        def _stream_live():
+                            return (not tainted[0] and client is _stream_client and gen[0]==_stream_generation and
+                                    _stream_tok==plan_tok["n"] and not _plan_active() and not shell_busy())
                         _, j, _ = await asyncio.to_thread(lambda: capture_clean(fast=True))
-                        if _stream_tok != plan_tok["n"] or _plan_active() or shell_busy():continue
+                        if not _stream_live():continue
                         h = _dhash(j); lh = stream_state["hash"]
                         if lh is not None and bin(lh ^ h).count("1") <= 5: stream_state["skipped"]["same_scene"] += 1
                         else:
-                            if await screenshot_policy.send(client,j,_image_ticket):
+                            if await screenshot_policy.send(_stream_client,j,_image_ticket,valid=_stream_live):
                                 stream_state["hash"] = h; stream_state["sent"] += 1
                                 log("stream frame sent (idle context)", stream_state["sent"], "bytes", len(j))
                                 if getattr(a,"out",None):open(os.path.join(a.out,"stream-%d.jpg" % stream_state["sent"]),"wb").write(j)

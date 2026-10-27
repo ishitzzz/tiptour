@@ -28,7 +28,7 @@ class ScreenshotPolicy:
                 if not f.done():f.set_result(None)
             loop.call_soon_threadsafe(revoke)
         return True
-    async def send(self, client, jpeg, ticket):
+    async def send(self, client, jpeg, ticket, valid=None):
         loop=asyncio.get_running_loop()
         with self._lock:
             if not self._enabled or ticket is None or ticket!=self._epoch:return False
@@ -37,6 +37,7 @@ class ScreenshotPolicy:
             # No await between the policy check and entry into the client call.
             with self._lock:
                 if not self._enabled or self._epoch!=epoch:return False
+            if valid is not None and not valid():return False
             await client.send_screenshot(jpeg)
             return True
         task=loop.create_task(dispatch());revoked=loop.create_future()
