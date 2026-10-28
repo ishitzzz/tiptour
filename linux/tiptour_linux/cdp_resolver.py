@@ -21,7 +21,7 @@ for(const e of document.querySelectorAll(sel)){
  if(!names.length) continue; const name=names[0];
  out.push({off,name,names,tag:e.tagName.toLowerCase(),x:r.left,y:r.top,w:r.width,h:r.height});
  if(out.length>600) break;}
-return {els:out,sx:window.screenX,sy:window.screenY,left:Math.max(0,(outerWidth-innerWidth)/2),top:outerHeight-innerHeight,dpr:devicePixelRatio,vis:document.visibilityState,focus:document.hasFocus(),ow:outerWidth,oh:outerHeight}})()"""
+return {els:out,sx:window.screenX,sy:window.screenY,left:Math.max(0,(outerWidth-innerWidth)/2),top:outerHeight-innerHeight,dpr:devicePixelRatio,vis:document.visibilityState,focus:document.hasFocus(),ow:outerWidth,oh:outerHeight,iw:vw,ih:vh}})()"""
 
 def _targets():
     res = []
@@ -42,6 +42,31 @@ def _run(coro):
     with concurrent.futures.ThreadPoolExecutor(1) as ex: return ex.submit(asyncio.run, coro).result()
 
 GATE = {"reason": "", "browser_rects": []}
+
+FOCUS_JS = "(()=>{if(!document.hasFocus())return null;const e=document.activeElement;if(!e||e===document.body)return 'body';const t=(e.tagName||'').toLowerCase();const ty=(e.type||'').toLowerCase();if(t==='input'&&ty==='password')return 'password';return 'other'})()"
+async def _focus_kind_snap(ws_url):
+    async with websockets.connect(ws_url, max_size=None, open_timeout=2) as ws:
+        await ws.send(json.dumps({"id": 1, "method": "Runtime.evaluate", "params": {"expression": FOCUS_JS, "returnByValue": True}}))
+        return json.loads(await asyncio.wait_for(ws.recv(), 5))["result"]["result"].get("value")
+def focused_field_kind():
+    """'password' when the document-focused browser page's active element is input[type=password]; 'other'/'body' when a focused page answers otherwise; None when no CDP page is focused or reachable (never a guess - callers treat None as unverified, not as safe)."""
+    saw = None
+    for u, title in _targets():
+        try: v = _run(_focus_kind_snap(u))
+        except Exception: continue
+        if v == 'password': return 'password'
+        if v: saw = v
+    return saw
+
+def _x11_rect(wid):
+    """Real X11 geometry of the browser's top-level window. JS outer*/screenY misreport under X11 WMs (observed: outer 1253x674 vs real 1288x804), so the DOM->screen origin must come from X11, with the surplus height being the top chrome (tabs/toolbar; Brave has no bottom bar)."""
+    try:
+        import subprocess
+        g = subprocess.run(["xwininfo", "-id", str(wid)], capture_output=True, text=True, timeout=2).stdout
+        x = int(re.search(r"Absolute upper-left X:\s+(-?\d+)", g).group(1)); y = int(re.search(r"Absolute upper-left Y:\s+(-?\d+)", g).group(1))
+        w = int(re.search(r"Width:\s+(\d+)", g).group(1)); h = int(re.search(r"Height:\s+(\d+)", g).group(1))
+        return (x, y, w, h)
+    except Exception: return None
 
 def _x_active_pid():
     import subprocess
@@ -90,12 +115,20 @@ def all_targets():
     if len(snaps) != 1:
         GATE["reason"] = "focused X11 window %s %r matches %d page targets (need exactly 1)" % (wid, xname[:40], len(snaps)); return []
     chosen = snaps
+    _xr = _x11_rect(wid)
+    if _xr: GATE["browser_rects"] = [[_xr[0], _xr[1], _xr[2], _xr[3]]]
     res = []
     for s in chosen:
         if abs(s["dpr"] - 1) > 1e-6: continue  # dpr!=1 not validated: fail closed to next stage
+        if _xr and s.get("iw") and s.get("ih"):
+            ox = _xr[0] + max(0, (_xr[2] - s["iw"]) // 2)
+            oy = _xr[1] + max(0, _xr[3] - s["ih"])  # surplus height = top chrome; bottom bar does not exist in this browser
+        else:
+            ox, oy = s["sx"] + s["left"], s["sy"] + s["top"]
+            print("[cdp_resolver] LOUD FALLBACK: X11 window geometry unavailable (xwininfo read failed) - DOM->screen origin is JS-reported screenX/screenY, which misreports under X11 WMs; resolved points may be off by the browser chrome height", file=__import__("sys").stderr, flush=True)
         for e in s["els"]:
-            res.append({"off": e["off"], "label": e["name"], "names": e["names"], "role": e["tag"], "rect": [s["sx"] + s["left"] + e["x"], s["sy"] + s["top"] + e["y"], e["w"], e["h"]],
-                        "origin": [s["sx"] + s["left"], s["sy"] + s["top"]]})
+            res.append({"off": e["off"], "label": e["name"], "names": e["names"], "role": e["tag"], "rect": [ox + e["x"], oy + e["y"], e["w"], e["h"]],
+                        "origin": [ox, oy]})
     return res
 
 def _tok(s): return [t for t in re.findall(r"[a-z0-9]+", s.lower()) if t not in STOP]

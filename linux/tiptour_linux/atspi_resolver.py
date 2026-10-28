@@ -253,6 +253,47 @@ def _target_window_nodes(hint):
             for t in nodes:t["app"]=app.get_name()
             return nodes
     raise CoordinateError("coordinate-bound app disappeared")
+def _native_at_point(hint, x, y):
+    """Deepest stable native object at a screen point in the coordinate-bound window; None when unavailable or unstable."""
+    mapping=_coordinate_status(hint);desk=Atspi.get_desktop(0)
+    for i in range(desk.get_child_count()):
+        app=desk.get_child_at_index(i)
+        if app is not None and app.get_process_id()==mapping["pid"]:
+            windows=[app.get_child_at_index(j) for j in range(app.get_child_count())]
+            matches=[w for w in windows if w is not None and w.path==mapping["window_path"]]
+            if len(matches)!=1:raise CoordinateError("bound native window disappeared")
+            node=matches[0]
+            for _depth in range(24):  # descend to the deepest accessible containing the point
+                comp=node.get_component_iface()
+                if comp is None:return None
+                ch=comp.get_accessible_at_point(int(x), int(y), Atspi.CoordType.SCREEN)
+                if ch is None or ch.path==node.path:break
+                node=ch
+            ident={"pid": node.get_process_id(), "path": node.path}
+            node2=node.get_parent()  # stability re-read: walk down again from the parent; the same point must land on the same object
+            if node2 is None:return None
+            probe=matches[0]
+            for _depth in range(24):
+                comp=probe.get_component_iface()
+                if comp is None:return None
+                ch=comp.get_accessible_at_point(int(x), int(y), Atspi.CoordType.SCREEN)
+                if ch is None or ch.path==probe.path:break
+                probe=ch
+            if probe.path!=ident["path"] or probe.get_process_id()!=ident["pid"]:return None
+            try:
+                ext=probe.get_component_iface().get_extents(Atspi.CoordType.SCREEN)
+                if not (ext.x-2 <= int(x) <= ext.x+ext.width+2 and ext.y-2 <= int(y) <= ext.y+ext.height+2):return None
+            except Exception:return None
+            return ident
+    raise CoordinateError("coordinate-bound app disappeared")
+
+def native_at_point(hint, x, y, timeout=4):
+    """Isolated child call; parent never walks. None = no stable binding (never a coordinate-only fallback)."""
+    try:
+        if ISOLATED: return _sub(["--at-point", hint or "", str(int(x)), str(int(y))], timeout).get("identity")
+        return _W.call(_native_at_point, (hint, x, y), timeout)
+    except Exception: return None
+
 def resolve(label, hint=None, timeout=6):
     l = label.strip().lower()
     ts = _sub(["--resolve-targets",hint],timeout)["targets"] if hint else all_targets()
@@ -618,13 +659,14 @@ def targets_isolated(timeout=6):
 
 
 if __name__ == "__main__":
-    if len(sys.argv) > 1 and sys.argv[1] in ("--active-context", "--probe", "--targets", "--ready", "--modal", "--fp", "--focus", "--focus-document", "--focused-write", "--coordinates", "--resolve-targets"):
+    if len(sys.argv) > 1 and sys.argv[1] in ("--active-context", "--probe", "--targets", "--ready", "--modal", "--fp", "--focus", "--focus-document", "--focused-write", "--coordinates", "--resolve-targets", "--at-point"):
         try:
             if sys.argv[1] == "--active-context": print(_json.dumps({"context": _active_context()}))
             elif sys.argv[1] == "--probe":
                 rect = _json.loads(sys.argv[2]); hp = int(sys.argv[3]) or None; wall = _time.monotonic() + float(sys.argv[4])
                 el, sel = _probe(rect, hp, 4000, wall); print(_json.dumps({"element": el, "selection": sel}))
             elif sys.argv[1] == "--resolve-targets": print(_json.dumps({"targets": _target_window_nodes(sys.argv[2])}))
+            elif sys.argv[1] == "--at-point": print(_json.dumps({"identity": _native_at_point(sys.argv[2], sys.argv[3], sys.argv[4])}))
             elif sys.argv[1] == "--coordinates": print(_json.dumps({"mapping": _coordinate_status(sys.argv[2] if len(sys.argv)>2 else "")}))
             elif sys.argv[1] == "--fp": print(_json.dumps(_fingerprint(sys.argv[2] if len(sys.argv) > 2 else "")))
             elif sys.argv[1] == "--focused-write": print(_json.dumps(_focused_write(_json.load(sys.stdin))))

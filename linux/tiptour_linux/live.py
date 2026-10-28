@@ -47,9 +47,11 @@ class ConnectError(Exception):
     def __init__(self, kind, msg, retry_after=None):
         super().__init__(msg); self.kind = kind; self.retry_after = retry_after
 
+KEEPALIVE_INTERVAL_S = 25 * 60  # Mac GeminiLiveClient.swift keepAlivePingInterval, verbatim value
+
 class LiveClient:
     def __init__(self, on_event):
-        self.ws = None; self.on_event = on_event; self.ready = asyncio.Event(); self._rx = None
+        self.ws = None; self.on_event = on_event; self.ready = asyncio.Event(); self._rx = None; self._ka = None  # _ka = Mac keepAlivePingTask
     async def connect(self, key, system_prompt=SYSTEM_PROMPT, voice="Kore"):
         try:
             self.ws = await websockets.connect(URL + key, max_size=None, open_timeout=15)
@@ -72,6 +74,21 @@ class LiveClient:
         except asyncio.TimeoutError:
             code = self.ws.close_code
             raise ConnectError(classify(close_code=code), "no setupComplete (close %s)" % code)
+        # Mac startKeepAlivePingLoop(): cancel any prior ping task (reconnects), then ping on a fixed cadence.
+        if self._ka: self._ka.cancel()
+        self._ka = asyncio.create_task(self._keepalive())
+    async def _keepalive(self):
+        # Mac: sleep interval, skip unless still setupComplete, send a no-op clientContent empty user turn (turnComplete=false), keep looping on send failure.
+        try:
+            while True:
+                await asyncio.sleep(KEEPALIVE_INTERVAL_S)
+                if not self.ready.is_set(): return
+                try:
+                    await self._send({"clientContent": {"turns": [{"role": "user", "parts": [{"text": ""}]}], "turnComplete": False}})
+                except Exception:
+                    pass
+        except asyncio.CancelledError:
+            pass
     async def _recv(self):
         try:
             async for raw in self.ws:
@@ -89,6 +106,7 @@ class LiveClient:
                     if sc.get("turnComplete"): self.on_event("turnComplete", None)
         except Exception as e:
             self.on_event("closed", repr(e)[:120])
+        if self._ka: self._ka.cancel(); self._ka = None  # Mac: the ping task cancels the moment the WebSocket goes away
         self.on_event("closed", getattr(self.ws, "close_code", None))
     async def _send(self, o): await self.ws.send(json.dumps(o))
     async def send_text(self, t): await self._send({"realtimeInput": {"text": t}})
@@ -102,6 +120,7 @@ class LiveClient:
     async def send_audio(self, pcm16): await self._send({"realtimeInput": {"audio": {"data": base64.b64encode(pcm16).decode(), "mimeType": "audio/pcm;rate=16000"}}})
     async def tool_response(self, id, name, response): await self._send({"toolResponse": {"functionResponses": [{"id": id, "name": name, "response": response}]}})
     async def close(self):
+        if self._ka: self._ka.cancel(); self._ka = None  # Mac disconnect(): keepAlivePingTask?.cancel()
         if self.ws: await self.ws.close()
 
 def pool_index(pool, k):
