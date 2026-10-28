@@ -32,6 +32,9 @@ class Fake:
             raise RuntimeError("test seam: history rejected")
     async def send_text(self, t):
         self.log("FAKE send_text %d chars" % len(t))
+        if os.environ.get("TIPTOUR_FAKE_CLOSE_CID") == str(self.cid):  # TEST-ONLY: simulate an abnormal Live session close (idle 1008 class) so the app's in-process reconnect runs
+            import websockets.exceptions as _we
+            raise _we.ConnectionClosedError(None, None)
         if os.environ.get("TIPTOUR_FAKE_TOOLCALL") == "1" and t.startswith("user focus highlight context"):
             self.ctx_seen += 1
             if self.ctx_seen > 1: return  # the per-utterance context re-send does not complete a turn (like the real model)
