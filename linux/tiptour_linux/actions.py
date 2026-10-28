@@ -3,7 +3,7 @@ Gated by the caller: --act (default OFF = point-only), the user-confirmed plan, 
 EXPLICIT DIFFERENCES: X11 keys are focus-bound rather than per-PID posted, with a non-atomic final check/dispatch gap. Type/setValue use identity-bound native EditableText and exact text/caret readback. Type reconstructs plain selected-span text in one whole-value call, not Mac AXSelectedText; rich text/events/undo and stored highlight ranges are not parity-proven. Cmd maps to Ctrl, Option to Alt; Wayland is not covered."""
 import subprocess, re, os, shutil, time, glob, threading
 _TL = threading.local()  # per-execution cancel Event (set by the caller on STOP/supersede/cancel): checked before EVERY OS side effect
-SECRET = re.compile(r"password|passcode|\bpin\b|card number|cvv|cvc|verification code|one[- ]time", re.I)
+SECRET = re.compile(r"password|passcode|\bpin\b|\botp\b|\bcard\b|cvv|cvc|verification code|one[- ]time", re.I)
 class _XFail(Exception): pass
 def _chk(what=""):
     ev = getattr(_TL, "ev", None)
@@ -44,7 +44,9 @@ def _x(*a):
 # ---- Mac normalizeShortcutToken / normalizedHotkeyTokens (port) -> X11 keysyms
 _MOD = {"cmd": "ctrl", "option": "alt", "ctrl": "ctrl", "shift": "shift"}  # Mac Cmd -> Ctrl on Linux (explicit difference)
 _SYM = {"escape": "Escape", "delete": "BackSpace", "return": "Return", "enter": "Return", "tab": "Tab", "space": "space", "up": "Up", "down": "Down", "left": "Left", "right": "Right",
-        "pageup": "Prior", "pagedown": "Next", "home": "Home", "end": "End", "forwarddelete": "Delete"}
+        "pageup": "Prior", "pagedown": "Next", "home": "Home", "end": "End", "forwarddelete": "Delete",
+        "-": "minus", "=": "equal", "+": "plus", ".": "period", ",": "comma", "/": "slash", ";": "semicolon",
+        "'": "apostrophe", "[": "bracketleft", "]": "bracketright", "\\": "backslash", "`": "grave"}  # XStringToKeysym needs names, not literal punctuation (xdotool rc=2 on bare '-')
 def normalize_token(t):
     n = (t or "").strip().strip(".,;:").lower()
     return {"cmd": "cmd", "command": "cmd", "\u2318": "cmd", "opt": "option", "option": "option", "alt": "option", "\u2325": "option", "ctrl": "ctrl", "control": "ctrl", "\u2303": "ctrl",
@@ -88,7 +90,8 @@ def activate_target(app_hint):
     one that is already the ACTIVE window wins, else exactly one candidate is activated; several distinct candidates = ambiguous = refuse. The active window is re-read after activation and must equal the chosen window."""
     if not (app_hint or "").strip(): return False, "no target app named by the plan; keys/typing are not sent to an unknown active window"
     h = app_hint.strip().lower()
-    cands = [w for w in _windows() if h in w[1] or h in w[2]]
+    hn = re.sub(r"[^a-z0-9]", "", h)  # Mac runningAppMatching-style normalized match: 'Brave Browser' must match WM_CLASS 'brave-browser'
+    cands = [w for w in _windows() if h in w[1] or h in w[2] or (hn and (hn in re.sub(r"[^a-z0-9]", "", w[1]) or hn in re.sub(r"[^a-z0-9]", "", w[2])))]
     if not cands: return False, "target app %r has no visible window; nothing was sent" % app_hint
     try: cur = _x("getactivewindow").stdout.strip()
     except _XFail: cur = ""
@@ -166,8 +169,6 @@ def execute(step, px, app_hint=None, plan_app=None, cancel=None, click_guard=Non
     _TL.expected_focus = step.get('_expected_focus') or step.get('_browser_find'); _TL.document_shortcut = step.get('type') == 'keyboardShortcut' and step.get('label','').lower() in ('ctrl+f','control+f','cmd+f','command+f'); _TL.ev = cancel; _TL.bound = None; _TL.click_guard = click_guard; _TL.expected_window = expected_window
     _TL.expected_rect = step.get('_expected_rect')
     try:
-        if step.get('type') == 'keyboardShortcut' and step.get('targetContext') == 'focusedElement' and (not _TL.expected_focus or not _TL.expected_rect):
-            raise _XFail('focused shortcut has no native recipient binding; nothing sent')
         return _execute(step, px, app_hint if app_hint is not None else plan_app)
     except _XFail as e: return {"ok": False, "error": str(e)}
     finally: _TL.ev = None; _TL.bound = None; _TL.click_guard = None; _TL.expected_window = None; _TL.expected_focus = None; _TL.expected_rect = None
@@ -237,6 +238,38 @@ def _focus(app_hint):
     _check_bound(app_hint)
     return d
 
+def _activate_only(app_hint):
+    """Mac activateTargetApplicationIfNeeded + CGEvent key post: activate the target window, then dispatch. No AT-SPI focus binding - Mac has none for key events (Ishit 1:24 / main 1:28)."""
+    if getattr(_TL, 'expected_window', None) is not None:
+        _window_state()
+    ok, d = activate_target(app_hint)
+    if not ok: raise _XFail(d)
+    _TL.bound = None
+    return d
+
+def _xdotool_type(step, detail):
+    """Platform deviation (disclosed): Mac typeText's normal path is AXSelectedText on the focused element with a clipboard-paste fallback when AX fails and no highlight range is armed (ActionExecutor.swift L517-548). Linux browsers expose no focused element to AT-SPI, so we type per character via xdotool into the activated window. ASCII-scoped; partial sends are reported, never retried."""
+    text = step.get('value') if step.get('value') is not None else step.get('label', '')
+    if not isinstance(text, str) or not text: return {"ok": False, "error": "type step has no text"}
+    try: text.encode('ascii')
+    except UnicodeEncodeError: return {"ok": False, "error": "non-ASCII text needs the clipboard-paste path (not implemented); nothing sent"}
+    # Sanctioned deviation (main 1:28 decision ii): never type into a password field. AT-SPI cannot see browser fields, so ask the page over CDP; unavailable = proceed with the labeled-unverified delivery, never a silent skip of the refusal when it CAN be checked.
+    try:
+        from . import cdp_resolver as _cdp
+        _kind = _cdp.focused_field_kind()
+    except Exception: _kind = None
+    if _kind == 'password': return {"ok": False, "status": "password_field_refused", "error": "Focused page element is input[type=password] (CDP); no text sent."}
+    sent = 0
+    try:
+        if step.get('type') == 'setValue': _x('key', '--clearmodifiers', 'ctrl+a'); _sleep(0.05)  # Mac setFocusedValue replaces the value
+        for i in range(0, len(text), 40):
+            _chk('type dispatch')
+            chunk = text[i:i+40]
+            _x('type', '--clearmodifiers', '--delay', '20', '--', chunk); sent += len(chunk)
+    except _XFail as exc:
+        return {'ok': False, 'error': str(exc), 'possibly_applied': sent > 0, 'retry_safe': False}
+    return {'ok': True, 'status': 'performed type', 'chars': sent, 'text_verified': False, 'delivery': 'xdotool keystrokes into the activated window (Mac CGEvent analogue; no AT-SPI focus identity on this app)', 'detail': detail}
+
 def _skill_numeric_text(step, app_hint):
     """Pinned ActionExecutor.typeText skill-directed key branch, never setValue."""
     if step.get('type') != 'type': return None
@@ -278,7 +311,20 @@ def _native_text(step, app_hint):
         ws = _window_state()
         if str(ws[0]) != str(saved.get('xwindow')) or ws[1] != (saved.get('identity') or {}).get('pid'):
             raise _XFail('saved selection recipient no longer focused; nothing written')
-    d = _focus(app_hint); f = _check_bound(app_hint, False)
+    try:
+        d = _focus(app_hint)
+    except _XFail as exc:
+        # Key fallback ONLY when AT-SPI reports no focused element at all (Linux browsers: window-granular tree). Mac refuses its own key fallback when a highlighted range cannot be applied (ActionExecutor.swift L536-538 highlightedTextRangeUnavailable); the same discipline: no fallback on modal present, approved focus changed, window/PID mismatch, or any other refusal.
+        if str(exc) != "focused native element identity unavailable": raise
+        if step.get('_native_range') or step.get('_live_selection') or step.get('_browser_find'):
+            raise _XFail('approved range/selection recipient unavailable on this app; no key fallback (Mac highlightedTextRangeUnavailable, ActionExecutor.swift L536-538)')
+        from . import atspi_resolver as _ar
+        _ms, _mt = _ar.modal_title(app_hint, expected_pid=_window_state()[1])
+        if _ms != "ok" or _mt is not None: raise _XFail("modal state unavailable or blocking dialog present; no key fallback, nothing sent")
+        ok, dd = activate_target(app_hint)
+        if not ok: raise _XFail(dd)
+        return _xdotool_type(step, dd)
+    f = _check_bound(app_hint, False)
     live=step.get('_live_selection')
     if live and (step.get('type')!='type' or not f.get('editable') or any(f.get(k)!=v for k,v in live.items())):
         raise _XFail('current selected field/text/range changed; nothing written')
@@ -317,7 +363,7 @@ def _native_text(step, app_hint):
     return result
 def _execute(step, px, app_hint):
     t = (step.get("type") or "click"); label = step.get("label", "") or ""
-    if SECRET.search(label) and t in ("type", "setValue"): return {"ok": False, "error": "refused: secret field"}
+    if t in ("type", "setValue") and SECRET.search(label + " " + str(step.get("hint") or "")): return {"ok": False, "status": "password_field_refused", "error": "step label/hint names a secret field (password/passcode/OTP/CVV/card); no text sent (sanctioned Linux deviation, main 1:28 decision ii)"}
     if t in ("click", "doubleClick", "rightClick"):
         if px is None: return {"ok": False, "error": "no coordinates"}
         guard = getattr(_TL, "click_guard", None)
@@ -332,9 +378,9 @@ def _execute(step, px, app_hint):
     if t == "openURL": return {"ok": True, "status": "performed openURL", "detail": open_url(label, app_hint)}
     if t == "keyboardShortcut":
         if not label.strip(): return {"ok": False, "error": "keyboardShortcut step has no label"}
-        toks = hotkey_tokens(label); d = _focus(app_hint)
+        toks = hotkey_tokens(label); d = _activate_only(app_hint)
         combo = "+".join([_MOD[m] for m in toks[:-1]] + [_keysym(toks[-1])])
-        _check_bound(app_hint); _x("key", "--clearmodifiers", combo); return {"ok": True, "status": "performed keyboardShortcut", "keys": combo, "detail": d}
+        _chk("shortcut dispatch"); _x("key", "--clearmodifiers", combo); return {"ok": True, "status": "performed keyboardShortcut", "keys": combo, "detail": d}
     if t == "pressKey" and step.get("_native_range") and normalize_token(label) == "delete":
         result = _native_text(dict(step, type="type", value=""), app_hint)
         if result.get("ok"): result["status"] = "performed pressKey"; result["effect"] = "deleted saved native selected range"
@@ -343,18 +389,15 @@ def _execute(step, px, app_hint):
         if not label.strip(): return {"ok": False, "error": "pressKey step has no key"}
         tok = normalize_token(label)
         if tok in _MOD or tok == "cmd": return {"ok": False, "error": "pressKey needs a non-modifier key, got %r" % label}
-        d = _focus(app_hint); ks = _keysym(tok)
-        _check_bound(app_hint)
-        if step.get('_navigation_guard') and not step['_navigation_guard']():raise _XFail('original approved GET form changed; nothing sent')
-        if step.get('_navigation_guard'):_check_bound(app_hint)
-        _chk('navigation dispatch'); _x("key", "--clearmodifiers", ks); return {"ok": True, "status": "performed pressKey", "keys": ks, "detail": d}
+        d = _activate_only(app_hint); ks = _keysym(tok)
+        _chk('key dispatch'); _x("key", "--clearmodifiers", ks); return {"ok": True, "status": "performed pressKey", "keys": ks, "detail": d}
     if t in ("type", "setValue"): return _native_text(step, app_hint)
     if t == "scroll":
         direction = step.get("direction") or label or "down"; amount = step.get("amount") if isinstance(step.get("amount"), int) else 3; gran = step.get("by") or "line"
         key = scroll_key(direction, gran)
         if not key: return {"ok": False, "error": "invalid scroll direction %s/%s" % (direction, gran)}
-        n = max(1, min(amount, 50)); d = _focus(app_hint)
+        n = max(1, min(amount, 50)); d = _activate_only(app_hint)
         _TL.sent = 0
-        for _i in range(n): _check_bound(app_hint); _x("key", "--clearmodifiers", key); _TL.sent += 1; _sleep(0.03)  # one key per call so a cancel stops between presses
+        for _i in range(n): _chk("scroll dispatch"); _x("key", "--clearmodifiers", key); _TL.sent += 1; _sleep(0.03)  # one key per call so a cancel stops between presses
         return {"ok": True, "status": "performed scroll", "keys": "%dx %s" % (n, key), "detail": d}
     return {"ok": False, "error": "unsupported step type " + t}

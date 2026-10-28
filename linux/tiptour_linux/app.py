@@ -1,4 +1,5 @@
 import queue
+import re, subprocess
 """TipTour Linux tracer bullet: text/voice-turn -> Gemini Live (screenshot + tool call)
 -> pointer overlay. Point-only mode. Usage: python -m tiptour_linux.app --ask "..." --keys-glob '/path/*/password'"""
 import os as _os
@@ -30,9 +31,27 @@ PREV_STEP_POINT = {"p": None}  # Mac previousStepResolvedGlobalScreenPoint (voic
 def _half_up(v):
     import math
     return int(math.floor(v + 0.5))  # Swift .rounded() half away from zero (coordinates are >= 0); Python round() is banker's
-def _local_resolve(lab, cache=None):
-    anchor = PREV_STEP_POINT["p"] or _mouse_location()
-    return (cache or TARGET_CACHE).resolve(lab, prefer_near_global_point=anchor)
+_CHROME_LAB = re.compile(r"address bar|back button|forward|reload|refresh|new tab|bookmark|browser", re.I)
+def _chrome_strip_top():
+    """Top of the page content area when the focused window is a browser (tab strip + toolbar ~137px on Brave/Chrome). Page-content labels must never resolve INTO chrome (the address bar text matched 'Amazon search box' twice and sent the query to Google)."""
+    try:
+        w = subprocess.run(["xdotool", "getwindowfocus"], capture_output=True, text=True, timeout=1).stdout.strip()
+        cls = subprocess.run(["xprop", "-id", w, "WM_CLASS"], capture_output=True, text=True, timeout=1).stdout
+        if not re.search(r"brave|chrom|firefox", cls, re.I): return None
+        g = subprocess.run(["xdotool", "getwindowgeometry", "--shell", w], capture_output=True, text=True, timeout=1).stdout
+        return int(re.search(r"Y=(-?\d+)", g).group(1)) + 140
+    except Exception as _e:
+        print("chrome-strip LOUD FALLBACK: browser chrome exclusion inactive this resolve (%s); page-content labels may resolve into browser chrome" % type(_e).__name__, flush=True)
+        return None
+def _local_resolve(lab, cache=None, anchor=None):
+    anchor = anchor or PREV_STEP_POINT["p"] or _mouse_location()  # Mac ElementResolver: local-hint tier anchors at the step's LLM hint pixel; previous-step point / cursor only when no hint
+    r = (cache or TARGET_CACHE).resolve(lab, prefer_near_global_point=anchor)
+    if r and not _CHROME_LAB.search(lab or ""):
+        _ct = _chrome_strip_top()
+        if _ct is not None and r["global_point"][1] < _ct:
+            print("chrome-strip: rejected chrome-region match for page-content label %r; falling through to the native/CDP tiers" % lab, flush=True)
+            return None  # chrome match for a page-content label: fall through to the native/CDP tiers
+    return r
 try:
     from . import atspi_resolver
 except Exception as _e:
@@ -392,6 +411,8 @@ def main():
             _paused = cur.get("paused") or pause_rs["r"] or (bool(validators) and validators[-1].verdict == "unchanged_paused")
             if cmd == "resume" and not _paused:
                 click_events.append({"control": "resume_refused", "reason": "not paused"}); log("control resume refused: not paused"); return
+            if not (hl.get('last_call') or {}).get('args'):
+                click_events.append({"control": cmd + "_refused", "reason": "no plan record"}); log("control %s refused: no plan record (plan ended or fresh session)" % cmd); return
             if radial_post.get("invalidate"): radial_post["invalidate"]()
             click_events.append({"control": cmd, "mode": "replay_full_cascade", "label": cur.get("label")}); GLib.idle_add(lambda: panel.hide_panel() and False); cur["paused"] = None
             hl["replay"](cmd, plan_tok["n"]); return
@@ -413,7 +434,9 @@ def main():
             click_events.append({"control": "retry_refused", "reason": "target already dismissed"}); log("control retry refused: target already dismissed"); return
         if v != "unchanged_paused" and cur.get("paused") != "app_switch":
             click_events.append({"control": "retry_refused", "reason": "not paused (verdict %s)" % v}); log("control retry refused: not paused (verdict %s)" % v); return
-        def _retry_tail(_app=cur.get("app"), _lab=cur["label"]):
+        def _retry_tail(_app=cur.get("app"), _lab=cur.get("label")):
+            if not _lab or cur.get("rearm") is None:
+                click_events.append({"control": "retry_refused", "reason": "plan state cleared (fresh session)"}); log("control retry refused: plan state cleared (fresh session)"); return
             _c = cur.get("rect"); _pt = (_c[0] + _c[2] / 2, _c[1] + _c[3] / 2) if _c else cur.get("px")
             if cur.get("pin") is None or clicks.pin_state(_pt, cur["pin"]) != "ok":
                 click_events.append({"control": "retry_refused", "reason": "target window not in front / focused"}); log("control retry refused: target window not in front / focused"); return
@@ -459,7 +482,7 @@ def main():
                 def _put(k=k, v=v, _e=_e):
                     if ing.get("shutdown") or g != gen[0] or _e != vs["n"]: click_events.append({"gate": "late_callback_rejected", "kind": k}); return  # delivery-time checks BEFORE any side effect (arrival number, ingress STOP latch, buffers): a replaced session's or an earlier epoch's callback that executes after a toggle/replacement is rejected. The origin epoch is the one captured at callback time
                     arr["n"] += 1
-                    if k != "audio": dlog("evt", k, arr["n"], str(v)[:20] if k == "inputTranscript" else "")
+                    if k != "audio": dlog("evt", k, arr["n"], str(v)[:20] if k == "inputTranscript" else (str(v)[:160] if k == "closed" else ""))  # close payload (code/exception) needed to diagnose the ~50s post-turnComplete close
                     if k == "inputTranscript" and hl.get("readonly_worker"): hl["readonly_worker"].cancel_current()
                     if k == "turnComplete": v = _TCv(v if isinstance(v, dict) else {}); v.sess = _e
                     if k in ("turnComplete", "closed", "interrupted"): ing["parts"] = []  # utterance boundary (a closed/interrupted session or turn never concatenates its partial into a later STOP)
@@ -972,7 +995,7 @@ def main():
                     yield t
         def _own_rec(r, oc, yolo_, ocr_, mp, pc=None): return {"pin": oc["seq"], "perc": mp, "pair": oc["pair"], "size": r[2], "yolo": yolo_, "ocr": ocr_, "cache": pc}  # cache = this perception pass's PRIVATE LocalPerceptionTargetCache (same class/TTL/update as the global one); never replaced by a later pass
         def _gens(own): return {"own_pin": own["pin"], "own_perc": own["perc"], "applied_pin": _pin_seq["applied"], "applied_perc": _perc_seq["applied"]} if own else None  # LABELS ONLY: a newer global generation does not refuse; this resolve reads ITS OWN snapshot and the real screen-stale guard decides
-        def _local_resolve_owned(lab, own): return _local_resolve(lab, own["cache"] if own else None)
+        def _local_resolve_owned(lab, own, anchor=None): return _local_resolve(lab, own["cache"] if own else None, anchor=anchor)
         _range_consumed = set()  # (approved revision, canonical saved-range): native pending range is consumed ONCE per plan
         async def _transition_ready(name, token, launched_pids, timeout=8):
             from .app_transition import context_matches
@@ -1051,9 +1074,7 @@ def main():
             if own: _action_ident = own["pair"][0]
             else:
                 with _pin_lk: _action_ident = frame_id.get("v")
-            if not _action_ident or ident() != _action_ident:
-                _ev({"action": "stale_identity", "performed": False})
-                return {"ok": False, "status": "action_stale_identity", "note": "Focused window changed since the plan frame; nothing sent."}, tool_seen
+            # Mac has no focused-window-identity refusal here (token gate only); removed per Ishit 1:24 / main 1:28.
             _exec_step = dict(step)
             _range_key = (last_call.get("rev"), json.dumps(step.get("_native_range"), sort_keys=True)) if step.get("_native_range") else None
             if _range_key in _range_consumed: _exec_step.pop("_native_range", None)
@@ -1086,43 +1107,29 @@ def main():
                     _expected = _nav.owner
                     _return_focus = await asyncio.to_thread(_act.focus_info, execution_app, False)
                     if not _return_focus.get('ok'):
-                        await _nav.close(); return {'ok':False,'status':'navigation_partial','error':'Original Enter recipient unavailable.'}, tool_seen
-                    _exec_step['_expected_focus'] = _return_focus['identity']
-                    async def _pre_dispatch(_observer=_nav):
-                        try:return bool(tok0 == plan_tok['n'] and _approved_step(args,idx,step) and await _observer.preflight())
-                        except Exception:return False
-                    def _form_guard():
-                        try:return asyncio.run_coroutine_threadsafe(_pre_dispatch(),loop).result(timeout=4)
-                        except Exception:return False
-                    _exec_step['_navigation_guard'] = _form_guard
+                        log("Enter recipient focus identity unavailable on this app (%s); sending Enter to the active window (Mac AX focus analogue unavailable; flagged deviation, main 1:28 Mac-exact direction)" % _return_focus.get('error'))
+                    else:
+                        _exec_step['_expected_focus'] = _return_focus['identity']
+                    # Mac W L976-1027: no post-Enter navigation guard; the Enter observer above is logging-only.
                 if not _approved_step(args, idx, step):
                     if _nav: await _nav.close()
                     return {'ok':False,'status':'not_approved'}, tool_seen
             if t == 'keyboardShortcut' and tc == 'focusedElement':
                 _focus_binding = await asyncio.to_thread(_act.focused_shortcut_recipient, execution_app, _expected)
-                if (not _focus_binding or tok0 != plan_tok['n'] or not _approved_step(args,idx,step) or ident()!=_action_ident):
-                    return {'ok':False,'status':'focused_shortcut_unavailable','error':'Current native shortcut recipient unavailable or changed; no keys sent.'},tool_seen
-                _exec_step.update(_focus_binding)
+                if _focus_binding: _exec_step.update(_focus_binding)  # Mac W L1085-1114: post the shortcut; no recipient binding gate (Ishit 1:24 / main 1:28)
             if t in ('type','setValue'):
+                # Mac W L1148-1208 + A L498-585: type into the CURRENT focus - no geometry verification, no re-read, no pointing (Ishit 1:24 / main 1:28). Single intentional deviation (main 1:28 decision ii): never into a password field.
                 _field = await asyncio.to_thread(_act.focus_info, execution_app, False)
-                _rect = _field.get('element_rect') if _field.get('ok') else None
-                if not _rect or _field.get('password'):
-                    return {'ok':False,'status':'pointer_recipient_unavailable','error':'Verified field geometry unavailable; no text sent.'}, tool_seen
+                if not _field.get('ok'): log("type step: AT-SPI focus info unavailable on this app; the password-field refusal cannot be verified here (flagged deviation, main 1:28 decision ii)")
+                if _field.get('ok') and _field.get('password'):
+                    return {'ok':False,'status':'password_field_refused','error':'Focused field is a password field; no text sent.'}, tool_seen
                 if tc == 'currentSelection' and not _exec_step.get('_native_range'):
                     _selection=_field.get('selection');_text=_field.get('text')
                     if (not isinstance(_text,str) or len(_text)>=20000 or not isinstance(_selection,list) or len(_selection)!=2 or
                             not all(isinstance(n,int) for n in _selection) or not 0<=_selection[0]<_selection[1]<=len(_text) or not _field.get('editable')):
                         return {'ok':False,'status':'current_selection_unavailable','error':'Verified nonempty native selection unavailable; no text sent.'},tool_seen
                     _exec_step['_live_selection']={k:_field.get(k) for k in ('identity','text','selection','caret','element_rect','document_rect')}
-                _exec_step['_expected_focus'] = _field['identity']
-                _point = (_rect[0]+_rect[2]/2, _rect[1]+_rect[3]/2)
-                if not await _pointer_arrival(_point, step.get('label') or 'Text field', tok0):
-                    return {'ok':False,'status':'pointer_arrival_revoked'}, tool_seen
-                _fresh = await asyncio.to_thread(_act.focus_info, execution_app, False)
-                if (tok0 != plan_tok['n'] or not _approved_step(args,idx,step) or ident()!=_action_ident or
-                        not _fresh.get('ok') or _fresh.get('identity')!=_field['identity'] or _fresh.get('element_rect')!=_rect or
-                        (_exec_step.get('_live_selection') and any(_fresh.get(k)!=v for k,v in _exec_step['_live_selection'].items()))):
-                    return {'ok':False,'status':'pointer_recipient_changed','error':'Field changed while pointer moved; no text sent.'}, tool_seen
+                if _field.get('ok') and _field.get('identity'): _exec_step['_expected_focus'] = _field['identity']
             try: resp = await asyncio.to_thread(_act.execute, _exec_step, None, execution_app, None, _cev, None, _expected)
             except BaseException: _cev.set(); log("action step %s cancelled (stop/supersede): worker told to stop before its next OS call" % t); raise  # STOP/supersede cancels the await; the worker checks this event before EVERY OS side effect
             log("action executed (%s), ok=%s" % (t, resp.get("ok"))); dlog("action", json.dumps(resp)); _ev({"action": "performed" if resp.get("ok") else "failed", "performed": bool(resp.get("ok")), "detail": resp.get("detail") or resp.get("error")})
@@ -1141,9 +1148,8 @@ def main():
                         _ev({'action':'navigation_verified','proof':_proof})
                     except Exception as exc:
                         await _nav.close()
-                        _ev({'action':'navigation_partial','performed':True,'error':str(exc)})
-                        log('Approved Enter performed, navigation not verified: PARTIAL, not complete; ' + str(exc))
-                        return {'ok':False,'status':'navigation_partial','error':str(exc)}, tool_seen
+                        _ev({'action':'navigation_unverified','performed':True,'error':str(exc)})
+                        log('Approved Enter performed; post-Enter ownership recheck unavailable (%s) - Mac-exact: a performed Enter completes the step (Mac has no post-Enter nav gate; W L976-1027); the navigation it caused is the intended effect; detail stays in logs' % exc)
                 else: await _nav.close()
             if resp.get("ok"):grounding.post_action()
             if resp.get("ok") and t == 'openApp':
@@ -1229,6 +1235,7 @@ def main():
                 with glock:
                     plan_tok["n"] += 1; clicks.disarm(); ov['hidden'] = True; ov['covered'] = False; GLib.idle_add(overlay.retire); cur['armed'] = False; cur['paused'] = None; pause_rs['r'] = None; _clear_last(); PREV_STEP_POINT['p'] = None
                 click_events.append({"wait_for_state": "skipped", "plan_complete": True})
+                log("[Workflow] plan complete")  # Mac continueAdvanceAfterValidator prints "[Workflow] plan complete" when the skip consumes the last step; the surface must match
                 return {"ok": True, "status": "wait_for_state_skipped", "note": "waitForState is not implemented (skipped, as on the Mac); no pointer was placed"}, None
             step = _steps[idx]
             if not _approved_step(args, idx, step):
@@ -1270,9 +1277,9 @@ def main():
                 now_id = ident(); dlog('identity pinned=%r now=%r' % (_fv, now_id))
                 if own and (_pin_seq["applied"] != own["pin"] or _perc_seq["applied"] != own["perc"]):  # evidence only (no refusal): this resolve proceeds on its OWN frame pair + own cache snapshot
                     click_events.append(dict({"gate": "own_generation_resolve", "identity_changed": bool(_fv and now_id != _fv)}, **_gens(own))); log("resolve on OWN generation (pin/perc %s/%s; shared latest %s/%s)" % (own["pin"], own["perc"], _pin_seq["applied"], _perc_seq["applied"]))
-                if _fv and now_id != _fv:
+                if _fv and now_id != _fv and own is None:  # only the user-ask resolve pins the model's screenshot. Advance/retry resolves re-capture fresh (Mac resolves every step against a fresh capture); pinning there deadlocks after any legit navigation, and the pause panel itself steals X11 focus so retries refused forever
                     refuse = "focused window, title or geometry changed since the screenshot (%s -> %s); ask again" % (_fv[2], now_id[2]); done = True
-                if not done and _fi is not None and os.environ.get("TIPTOUR_STALE_FRAME_GUARD", "1") == "1":  # same window can still show different content (voice turns: frame is taken at turn start, speech can come much later)
+                if not done and _fi is not None and os.environ.get("TIPTOUR_STALE_FRAME_GUARD", "0") == "1":  # default OFF per Ishit 1:24 / main 1:28 (no stale-frame refusal exists in the Mac sources; it refused every post-scroll step). Original note: same window can still show different content (voice turns: frame is taken at turn start, speech can come much later)
                     try:
                         _now = await read(lambda: capture_clean()[0]); _fr = changed_fraction(_fi, _now); _tf = (0.0 if nohint else target_changed_fraction(_fi, _now, px))
                         log("stale-frame check: %.1f%% of frame pixels, %.1f%% around the target changed since the pinned frame (heuristic, not proof of freshness)" % (_fr * 100, _tf * 100))
@@ -1296,7 +1303,7 @@ def main():
                     else: log("target_id/target_mark not in the fresh target list; falling through to label resolution")
                 # Mac ElementResolver.resolve:218 preferLocalHintBeforeAccessibility: a step that carries a spatial hint (point_2d/box_2d) tries the LOCAL perception cache (label only, anchor = previous step point or cursor) BEFORE AX/CDP
                 if not done and pt and not nohint and lab:
-                    _lr = _local_resolve_owned(lab, own)
+                    _lr = _local_resolve_owned(lab, own, anchor=model_px)  # Mac: anchor the local tier at the model's hint, not the cursor
                     if _lr: px = (_half_up(_lr["global_point"][0]), _half_up(_lr["global_point"][1])); src = "target_cache(hint-first):" + _lr["source"]; done = True; arm_rect = tuple(_lr["global_rect"])
                 # Mac order: AX (here AT-SPI) -> local YOLO+OCR refinement -> raw Gemini coordinate
                 if not _menu_bound and atspi_resolver and os.environ.get("TIPTOUR_USE_ATSPI", "1") == "1":
@@ -1403,7 +1410,7 @@ def main():
                                 if v == "unchanged_paused": GLib.idle_add(lambda: (panel.show_at(px[0], px[1], "No visible change after the click.", _tok) if _tok == plan_tok["n"] else None) and False)
                                 if v == "unchanged_paused": log("post-click validator: AT-SPI state unchanged after the settle window; paused (pointer kept; on-screen Retry/Skip panel shown)"); return
                                 log("target click detected; pointer dismissed; validator: %s" % ("changed (effect confirmed in the target app's AT-SPI state)" if v == "changed" else "%s - the click was on the target but its effect is UNVERIFIED" % v)); ov['hidden'] = True; ov['covered'] = False; GLib.idle_add(overlay.retire)
-                                if v == "changed": loop.call_soon_threadsafe(lambda: hl.get("advance") and hl["advance"]("click", _tok))
+                                if v == "changed" or (v or "").startswith("unavailable"): loop.call_soon_threadsafe(lambda: hl.get("advance") and hl["advance"]("click", _tok))  # Mac: an unavailable validator (no AT-SPI control at the point on Brave) must not freeze the plan - advance with the effect UNVERIFIED, same as the validator-not-run path
                             threading.Thread(target=_watch, daemon=True).start()
                         def _stale(): log("click on stale armed target ignored (token mismatch)"); click_events.append({"stale_ignored": True})
                         _clicked = guarded_callback(plan_tok, _tok, _valid, _stale)
@@ -1498,42 +1505,16 @@ def main():
                     # Binding the same native object is independent read work inside
                     # that delay, not an additional delay before the clock starts.
                     _armed_at=time.monotonic()
-                    _baseline=cur.get("click_validator");_baseline_token=_gen0
-                    # Bind the actual native object before dispatch, never label+rect alone.
                     _click_pin = clicks._pin
-                    _click_native = None
-                    if atspi_resolver and arm_app and arm_rect:
-                        _native_targets = await asyncio.to_thread(atspi_resolver.app_targets, arm_app)
-                        _native_matches = [nt for nt in _native_targets if (nt.get("label") or "").strip().lower() == (step.get("label") or "").strip().lower() and nt.get("rect") and all(abs(nt["rect"][j]-arm_rect[j]) <= 8 for j in range(4))]
-                        if len(_native_matches) == 1: _click_native = _native_matches[0].get("native_identity")
-                    if not _click_native: return {"ok": False, "status": "not_executed", "error": "stable native click object unavailable"}, tool_seen
-                    dlog("stable native click bound", json.dumps(_click_native, sort_keys=True))
+                    # Mac WorkflowRunner.scheduleAutopilotClickIfEnabled (L976-1027): after the 0.28s delay, click AT the resolved global point. No native-object binding, no pre-dispatch re-reads (Ishit 1:24: exactly like Mac; main 1:28: drop binding).
                     # Keep the loop responsive while the pointer lands. STOP/supersede must win before dispatch.
                     _click_cancel = threading.Event()
                     try:
                         if not await _pointer_arrival(px, step.get('label') or 'Click target', _gen0):
                             return {'ok':False,'status':'pointer_arrival_revoked'},tool_seen
                         await asyncio.sleep(max(0.0, 0.28-(time.monotonic()-_armed_at)))
-                        if plan_tok["n"] != _baseline_token or cur.get("click_validator") is not _baseline:
-                            return {"ok":False,"status":"not_executed","error":"click baseline superseded"},tool_seen
-                        if _baseline is not None:
-                            _wait_end=time.monotonic()+8.0
-                            while not _baseline.ready.is_set():
-                                if plan_tok["n"] != _gen0:raise asyncio.CancelledError()
-                                if time.monotonic()>=_wait_end:
-                                    return {"ok":False,"status":"not_executed","error":"click baseline unavailable before dispatch"},tool_seen
-                                await asyncio.sleep(.02)
-                            if _baseline.baseline_error:
-                                return {"ok":False,"status":"not_executed","error":"click baseline failed before dispatch"},tool_seen
-                        if plan_tok["n"] != _gen0: return {"ok": False, "status": "not_executed", "error": "click superseded before dispatch"}, tool_seen
-                        _click_ident = ident()
-                        if _click_ident != now_id: return {"ok": False, "status": "not_executed", "error": "focused window changed while pointer landed"}, tool_seen
-                        _click_valid = await asyncio.to_thread(_target_valid, arm_app, step.get("label"), arm_rect, _click_native)
-                        _click_ms, _click_mt = await asyncio.to_thread(atspi_resolver.modal_title, execution_app or arm_app) if atspi_resolver else ("unavailable", None)
-                        if plan_tok["n"] != _gen0 or ident() != _click_ident or not _click_valid or _click_ms != "ok" or _click_mt is not None:
-                            resp = {"ok": False, "status": "not_executed", "error": "click target/window changed or unavailable before dispatch"}
-                        else:
-                            resp = await asyncio.to_thread(actions.execute, step, px, arm_app, None, _click_cancel, lambda: plan_tok["n"] == _gen0 and _approved_step(args, idx, step) and _click_pin is not None and clicks.pin_state(px, _click_pin) == "ok")
+                        if plan_tok["n"] != _gen0: return {"ok": False, "status": "not_executed", "error": "click superseded before dispatch"}, tool_seen  # Mac: operationToken gate only (W L990-994)
+                        resp = await asyncio.to_thread(actions.execute, step, px, arm_app, None, _click_cancel, lambda: plan_tok["n"] == _gen0 and _approved_step(args, idx, step) and _click_pin is not None and clicks.pin_state(px, _click_pin) == "ok")
                     except BaseException:
                         _click_cancel.set(); log("click cancelled before next OS dispatch (an already dispatched event cannot be undone)"); raise
                     if resp.get('ok'):grounding.post_action()
@@ -1677,6 +1658,8 @@ def main():
                 yolo, ocr_el, _mp, _pcn = await asyncio.to_thread(_perceive, full, True); _own = _own_rec((full, jpeg, size), _oc, yolo, ocr_el, _mp, _pcn)
                 if tok0 is not None and tok0 != plan_tok['n']: click_events.append({"control": kind + "_refused", "reason": "superseded after capture"}); log("control %s refused: superseded by a skip or a newer target during capture" % kind); return
                 resp, ts = await _resolve_step(c["v"], c["args"], c["text"], c.get("idx", 0), own=_own)
+                if kind == "approved_plan" and isinstance(resp, dict) and resp.get("ok") is False:
+                    _step_pause(resp.get("error") or resp.get("status") or "step failed", resp); return  # Mac: pause + skip/retry surface; the plan never stops itself (main 1:28 option a)
             finally: gate['replay'] = False
             click_events.append({"control": kind + "_replay", "status": (resp or {}).get("status"), "source": (ts or {}).get("source"), "refused": (ts or {}).get("refused")}); log("control %s: re-resolved the active step from a fresh capture -> %s" % (kind, (ts or {}).get("source")))
         async def _observe_advance(tok0):
@@ -1710,6 +1693,8 @@ def main():
                 yolo, ocr_el, _mp, _pcn = await asyncio.to_thread(_perceive, full, True); _own = _own_rec((full, jpeg, size), _oc, yolo, ocr_el, _mp, _pcn)
                 if tok0 is not None and tok0 != plan_tok['n']: last_call["idx"] = c["idx"]; click_events.append({"advance": kind, "refused": "superseded after capture"}); log("advance (%s) refused: superseded during capture" % kind); return
                 resp, ts = await _resolve_step(c["v"], c["args"], c["text"], c["idx"] + 1, own=_own, post_click=kind == "click")
+                if prop["state"] == "approved" and isinstance(resp, dict) and resp.get("ok") is False:
+                    _step_pause(resp.get("error") or resp.get("status") or "step failed", resp); return  # Mac: pause + skip/retry surface; the plan never stops itself (main 1:28 option a)
                 click_events.append({"advance": kind, "to_step": c["idx"] + 1, "of": n, "source": (ts or {}).get("source"), "refused": (ts or {}).get("refused")}); log("advance (%s): step %d of %d resolved -> %s" % (kind, c["idx"] + 2, n, (ts or {}).get("source")))
             finally: gate['replay'] = False
         def _advance_spawn(kind, tok0=None):
@@ -1717,9 +1702,12 @@ def main():
                 # A listen-only button event can arrive while our own click OS call is still returning.
                 # Do not cancel that executor just to advance its successful click.
                 async def _after_dispatch():
+                    _w = 0.0
                     while gate['turn'] or gate['replay']:
                         if tok0 != plan_tok['n']: return
-                        await asyncio.sleep(0.03)
+                        await asyncio.sleep(0.03); _w += 0.03
+                        if _w >= 8.0:  # bounded: an open model turn must not stall the plan forever (two long runs died silently here); Mac advances on the click token immediately
+                            log("click advance deferred %.1fs (model turn/replay still open); advancing anyway - Mac advanceUsingCachedHandlers is token-gated only" % _w); break
                     if tok0 == plan_tok['n']: _spawn(_advance_step(kind, tok0))
                 asyncio.create_task(_after_dispatch()); return
             _spawn(_advance_step(kind, tok0))
@@ -1753,7 +1741,7 @@ def main():
                     return False
             return (prop.get("request") is not None and
                     _plan_canon(prop.get("request")) == _plan_canon(requests.snapshot()) == _plan_canon(last_call.get("request")) and
-                    not no_action_requested(prop.get("text")) and not forbidden_plan(prop.get("text"), args, menu_proof=prop.get("menu_proof") if not a.act else None) and
+                    not forbidden_plan(prop.get("text"), args, menu_proof=prop.get("menu_proof") if not a.act else None) and  # no_action_requested check REMOVED per Ishit 1:24 / main 1:28: the Mac has no answer-only gate anywhere (checked the Swift tree); it paused approved plans whose wording contained read/note
                     approved_step(prop, last_call, args, idx, step))
         def _kv(d, skip): return "".join(" %s=%s" % (k, json.dumps(v, ensure_ascii=False)) for k, v in d.items() if k not in skip and not k.startswith("_") and v not in (None, ""))
         def _plan_text(args):
@@ -1851,6 +1839,15 @@ def main():
             if _had == "approved": prop["state"] = "revoked"  # honest record state (pending was already cleared above)
             hl["active_goal"] = None; plan_tok["n"] += 1; clicks.disarm(); _clear_last(); (hl.get('cancel_task') or (lambda *_: None))(); GLib.idle_add(overlay.retire); ov['hidden'] = True; ov['covered'] = False; cur['armed'] = False; cur['paused'] = None; PREV_STEP_POINT['p'] = None
             _note("the user said STOP (%s): any pending/approved/running plan was stopped" % src); click_events.append({"gate": "stop_work", "via": src, "record_state": _had, "was_live": bool(_live0)}); log("confirmation: STOP (%s): pending cleared, approved/queued/running work stopped (record %s, live %s)" % (src, _had, _live0))
+        STEP_RESOLVE_BUDGET_S = 3.5  # Mac stepResolutionTimeoutSeconds (WorkflowRunner.swift L115)
+        def _step_pause(why, resp=None):
+            """Mac (W L870-888 + PauseReason, main 1:28 option a): budget exhausted or action failed -> publish a minimal failure label and PAUSE for skip/retry. The plan never stops itself; technical reasons go to logs, not the user."""
+            log("step unresolved/failed: %s - plan PAUSED at rev %s (skip or retry to continue)" % (why, prop.get("rev")))
+            click_events.append({"gate": "step_paused", "why": why, "resp": resp})
+            pause_rs['r'] = 'resolutionFailed'; cur['paused'] = 'resolutionFailed'
+            _c = dict(last_call); _steps = (_c.get("args") or {}).get("steps") or []; _i = _c.get("idx", 0)
+            _lab = (_steps[_i].get("label") or _steps[_i].get("hint") or "this step") if 0 <= _i < len(_steps) else "this step"
+            _note("paused on step %d (%s) - say skip or retry" % (_i + 1, _lab))
         def _revoke_approved(src):
             if prop["state"] != "approved": return False
             prop["state"] = "revoked"; hl["active_goal"] = None; plan_tok["n"] += 1; clicks.disarm(); _clear_last(); (hl.get('cancel_task') or (lambda *_: None))(); GLib.idle_add(overlay.retire)
@@ -2077,7 +2074,14 @@ def main():
                     if str(e) != "stale capture discarded":raise
                     log("stale ask capture discarded; newer transition retained");continue
                 full.save(os.path.join(a.out, "screen-%d.png" % i))
-                yolo, ocr_el, _mp, _pcn = await asyncio.to_thread(_perceive, full, True); ask_own = _own_rec((full, jpeg, size), _oc, yolo, ocr_el, _mp, _pcn)  # this ask's OWN capture/perception record: its toolCall resolves bind to it
+                # Perception no longer blocks the ask: Mac's serial order costs ~0.1s (Vision),
+                # tesseract here costs ~2.1s of pure sandbox CPU. Gemini never sees OCR output -
+                # it feeds only the LOCAL target cache - so run it alongside the model round-trip
+                # off the same pinned frame. Publish semantics unchanged (newest-started wins);
+                # every execution step re-resolves from its own fresh capture, so no resolution
+                # ever binds to an unfinished pass. (Latency: Ishit 4:57 'Planning 5.6 sec wtffff')
+                yolo, ocr_el = None, None  # names stay bound for the nonlocal below; the pass itself runs in background
+                _perc_bg = asyncio.ensure_future(asyncio.to_thread(_perceive, full, True))
                 if _oc.get("token") != plan_tok["n"]:
                     log("stale ask capture discarded before provider delivery");continue
                 if voice_turn and not voice_request_live():
@@ -2168,13 +2172,8 @@ def main():
                             click_events.append({'gate': 'proposal_native_app_mismatch'})
                             await reply({'ok': False, 'status': 'not_executed', 'error': 'The proposed app does not match the native current-window identity. Use the supplied exact app name for this window; nothing proposed or executed.'})
                             return
-                    if _hlg.no_action_requested(_request_text):  # original request constraints survive proposal-only continuation; USER intent gate: answer-only request -> no cursor, click, right-click or workflow, whatever the model calls
-                        GLib.idle_add(overlay.retire); tool_seen = {"source": "NO_ACTION_REQUESTED", "refused": "user asked for an answer only"}
-                        log("tool call suppressed: the request is answer-only (no pointing or action)")
-                        _aw = float(os.environ.get('TIPTOUR_ANSWER_WAIT_S', '20')); answer_wait.update(need=True, got=False, until=time.time() + _aw)
-                        _resp = _hlg.suppressed_payload(_request_text, _request.get("context"))
-                        await reply(_resp)
-                        return
+                    if _hlg.no_action_requested(_request_text):  # Mac has no answer-only suppression gate (no noActionRequested in the Mac sources); log-only per Ishit 1:24 / main 1:28 Mac-exact direction. The confirmation gate below still holds every plan for user approval.
+                        log("note: request wording looks answer-only (%r...); Mac has no such gate, so the plan is proposed normally and the user reviews it" % _request_text[:60])
                     from .request_limits import forbidden_plan
                     _menu_proof = None
                     _forbidden = forbidden_plan(_request_text, args)
@@ -2457,9 +2456,22 @@ def main():
         GLib.idle_add(Gtk.main_quit)
 
     def runner():
-        try: asyncio.run(run())
-        except Exception as e:
-            log("FATAL", type(e).__name__); dlog("FATAL detail", str(e)[:300]); GLib.idle_add(Gtk.main_quit)
+        # A dropped Live websocket (e.g. ABNORMAL_CLOSURE after long idle) must not
+        # kill the whole app; start a fresh session in-process. Real bugs still FATAL.
+        from websockets.exceptions import ConnectionClosedError as _CCError
+        for _attempt in range(5):
+            try: asyncio.run(run()); return
+            except _CCError as e:
+                log("SESSION CLOSED", type(e).__name__, "- starting fresh session, attempt", _attempt + 1)
+                # A fresh session never approved the old one's plan: invalidate every token, disarm the pointer, and clear armed/paused/pending state, the prev-step anchor, and the perception cache before the new session starts (flagged deviation 3, platform robustness).
+                plan_tok["n"] += 1; clicks.disarm(); cur.clear(); pause_rs['r'] = None; validators.clear()
+                (hl.get('last_call') or {}).clear(); PREV_STEP_POINT['p'] = None; TARGET_CACHE.clear()
+                ov['hidden'] = True; ov['covered'] = False
+                GLib.idle_add(overlay.retire); GLib.idle_add(lambda: panel.hide_panel() and False)
+                dlog("SESSION CLOSED detail", str(e)[:300]); time.sleep(2.0)
+            except Exception as e:
+                log("FATAL", type(e).__name__); dlog("FATAL detail", str(e)[:300]); GLib.idle_add(Gtk.main_quit); return
+        log("FATAL", "session restart budget exhausted"); GLib.idle_add(Gtk.main_quit)
     threading.Thread(target=runner, daemon=True).start()
     Gtk.main()
     if hl["trail"]: hl["trail"].close()
